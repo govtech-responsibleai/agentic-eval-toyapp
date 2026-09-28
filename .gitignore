@@ -1,0 +1,18 @@
+# Local design notes; this file must never be committed.
+design.md
+
+# Local configuration and Python build/test output.
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+artifacts/
+.DS_Store
