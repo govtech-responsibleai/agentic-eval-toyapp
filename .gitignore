@@ -15,4 +15,8 @@ build/
 dist/
 *.egg-info/
 artifacts/
+models/
+*.faiss
+*.index
+.cache/
 .DS_Store
