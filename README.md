@@ -2,7 +2,7 @@
 
 A lightweight, single-agent RAG application for validating METIS metrics with controlled functional cases.
 
-> **Status:** Stage 1 project scaffolding is implemented and awaiting manual verification. The API, RAG agent, FAISS retrieval, frontend, scenarios, and tracing are planned but not implemented.
+> **Status:** Stage 1 is complete. Stage 2 typed configuration and service-introspection API are implemented and awaiting manual verification. The RAG agent, FAISS retrieval, frontend, scenarios, and tracing are planned but not implemented.
 
 ## MVP summary
 
@@ -37,6 +37,7 @@ Useful commands:
 
 | Command | Purpose |
 |---|---|
+| `make run` | Start the local FastAPI development server. |
 | `make lock-check` | Verify that `pyproject.toml` and `uv.lock` agree. |
 | `make check` | Run linting, formatting checks, and strict type checking. |
 | `make fix` | Apply safe lint fixes and formatting. |
@@ -44,10 +45,26 @@ Useful commands:
 | `make test-unit` | Run unit tests only. |
 | `make clean` | Remove generated Python and test caches. |
 
+Start the current API:
+
+```bash
+make run
+```
+
+Then inspect:
+
+```text
+http://127.0.0.1:8000/health
+http://127.0.0.1:8000/ready
+http://127.0.0.1:8000/api/v1/capabilities
+http://127.0.0.1:8000/docs
+```
+
 ## Current structure
 
 ```text
 agentic-eval-toyapp/
+├── .env.example
 ├── .github/
 │   └── workflows/
 │       └── ci.yml
@@ -61,9 +78,16 @@ agentic-eval-toyapp/
 ├── uv.lock
 ├── src/
 │   └── agentic_eval_toyapp/
-│       └── __init__.py
+│       ├── __init__.py
+│       ├── app.py
+│       ├── config.py
+│       └── models.py
 └── tests/
+    ├── integration/
+    │   └── test_health_api.py
     └── unit/
+        ├── test_config.py
+        ├── test_models.py
         └── test_package.py
 ```
 
@@ -77,13 +101,20 @@ The local `design.md` is intentionally excluded because it is not committed.
 | `uv.lock` | Locks exact package and development dependency versions. |
 | `Makefile` | Provides the standard local and CI command interface, including lockfile validation. |
 | `.python-version` | Selects Python 3.11 for uv and local development. |
+| `.env.example` | Documents current non-secret service configuration. |
 | `.gitignore` | Excludes secrets, environments, caches, generated data, and the local design file. |
 | `.github/workflows/ci.yml` | Runs the offline `make ci` suite on future pushes and pull requests. |
 | `AGENTS.md` | Records repository-specific implementation, testing, reporting, and Git conventions. |
 | `CONTRIBUTING.md` | Explains setup, branching, code standards, tests, commits, and review expectations. |
 | `README.md` | Describes the current scaffold, planned app, files, and commands. |
 | `src/agentic_eval_toyapp/__init__.py` | Declares the installable package and static version. |
+| `src/agentic_eval_toyapp/config.py` | Loads immutable, validated `TOYAPP_` service settings. |
+| `src/agentic_eval_toyapp/models.py` | Defines strict health, readiness, capability, and error contracts. |
+| `src/agentic_eval_toyapp/app.py` | Constructs FastAPI and exposes the initial service-introspection endpoints. |
 | `tests/unit/test_package.py` | Verifies that package and distribution versions remain aligned. |
+| `tests/unit/test_config.py` | Tests defaults, environment-variable overrides, and invalid service settings. |
+| `tests/unit/test_models.py` | Tests strict API contracts and feature defaults. |
+| `tests/integration/test_health_api.py` | Tests health, readiness, capability, and OpenAPI responses. |
 
 ## Planned MVP structure
 
@@ -92,16 +123,12 @@ The following files will be added in later, separately verified stages:
 ```text
 agentic-eval-toyapp/
 ├── .dockerignore
-├── .env.example
 ├── Dockerfile
 ├── LICENSE
 ├── compose.yaml
 ├── src/agentic_eval_toyapp/
 │   ├── agent.py
-│   ├── app.py
-│   ├── config.py
 │   ├── embeddings.py
-│   ├── models.py
 │   ├── providers.py
 │   ├── retrieval.py
 │   ├── scenarios.py
@@ -136,9 +163,6 @@ agentic-eval-toyapp/
 
 | File | Purpose |
 |---|---|
-| `app.py` | Construct FastAPI, expose health/session/message routes, and serve the browser UI. |
-| `config.py` | Load and validate typed environment configuration. |
-| `models.py` | Define Pydantic API contracts and internal action/result schemas. |
 | `embeddings.py` | Provide the pinned SentenceTransformer embedder and deterministic fake. |
 | `retrieval.py` | Validate the corpus, build FAISS `IndexFlatIP`, and return ranked chunks. |
 | `providers.py` | Define the generation-model interface and real/fake implementations. |
@@ -157,7 +181,6 @@ agentic-eval-toyapp/
 
 | File | Purpose |
 |---|---|
-| `.env.example` | Document model, Langfuse, service, and retrieval settings without secrets. |
 | `.dockerignore` | Exclude unnecessary and sensitive files from Docker builds. |
 | `Dockerfile` | Build the API, UI, and pinned embedding model into one image. |
 | `compose.yaml` | Run the toy app locally with environment and health configuration. |

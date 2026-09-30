@@ -1,10 +1,11 @@
-.PHONY: help install lock-check lint lint-fix format format-check fix typecheck check test test-unit ci clean
+.PHONY: help install run lock-check lint lint-fix format format-check fix typecheck check test test-unit ci clean
 
 PYTHON_SOURCES := src tests
 
 help:
 	@printf "Available targets:\n"
 	@printf "  make install       Install the package and development dependencies\n"
+	@printf "  make run           Start the local development API\n"
 	@printf "  make lock-check    Check that the uv lockfile is current\n"
 	@printf "  make lint          Run Ruff lint checks\n"
 	@printf "  make lint-fix      Apply safe Ruff lint fixes\n"
@@ -20,6 +21,12 @@ help:
 
 install:
 	uv sync --group dev
+
+run:
+	uv run uvicorn agentic_eval_toyapp.app:app \
+		--host "$${TOYAPP_HOST:-127.0.0.1}" \
+		--port "$${TOYAPP_PORT:-8000}" \
+		--reload
 
 lock-check:
 	uv lock --check

@@ -8,7 +8,12 @@ version = "0.1.0"
 description = "A controlled RAG target application for agentic evaluation"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.141.1",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "uvicorn>=0.53.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentic_eval_toyapp"]
@@ -54,6 +59,7 @@ python_functions = ["test_*"]
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.13.1",
     "pyright>=1.1",
     "pytest>=9.1.1",
     "ruff>=0.11",
