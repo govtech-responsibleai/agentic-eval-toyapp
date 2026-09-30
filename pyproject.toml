@@ -9,9 +9,12 @@ description = "A controlled RAG target application for agentic evaluation"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "faiss-cpu>=1.15.1",
     "fastapi>=0.141.1",
+    "numpy>=2.0",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
+    "sentence-transformers>=6.1.0",
     "uvicorn>=0.53.0",
 ]
 
@@ -51,11 +54,14 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pytest.ini_options]
-addopts = "-p no:rerunfailures"
+addopts = "-p no:rerunfailures -m 'not live'"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "live: requires a network service or separately downloaded model artefact",
+]
 
 [dependency-groups]
 dev = [

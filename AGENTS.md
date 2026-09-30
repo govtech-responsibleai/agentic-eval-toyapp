@@ -10,8 +10,8 @@ This repository contains a small, controlled RAG application used as a target fo
 - uv for dependency and environment management
 - Hatchling as the build backend
 - Pydantic v2 for shared contracts when schemas are introduced
-- FastAPI for the future API and browser service
-- SentenceTransformers and FAISS for future semantic retrieval
+- FastAPI for the API and future browser service
+- SentenceTransformers and FAISS for semantic retrieval
 - Langfuse for future tracing
 - Ruff, Pyright, and pytest for development checks
 

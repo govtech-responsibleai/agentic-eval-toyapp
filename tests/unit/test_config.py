@@ -12,6 +12,12 @@ _SETTING_ENV_VARS = (
     "TOYAPP_HOST",
     "TOYAPP_PORT",
     "TOYAPP_LOG_LEVEL",
+    "TOYAPP_EMBEDDING_MODEL_ID",
+    "TOYAPP_EMBEDDING_MODEL_REVISION",
+    "TOYAPP_EMBEDDING_CACHE_DIR",
+    "TOYAPP_EMBEDDING_DEVICE",
+    "TOYAPP_RETRIEVAL_TOP_K",
+    "TOYAPP_RETRIEVAL_MIN_SIMILARITY",
 )
 
 
@@ -31,6 +37,13 @@ def test_settings_defaults_are_safe_for_local_development() -> None:
     assert settings.host == "127.0.0.1"
     assert settings.port == 8000
     assert settings.log_level is LogLevel.INFO
+    assert settings.embedding_model_id == "sentence-transformers/all-MiniLM-L6-v2"
+    assert settings.embedding_model_revision == (
+        "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    )
+    assert settings.embedding_device == "cpu"
+    assert settings.retrieval_top_k == 3
+    assert settings.retrieval_min_similarity == 0.25
 
 
 def test_settings_load_prefixed_environment_variables(
@@ -41,6 +54,9 @@ def test_settings_load_prefixed_environment_variables(
     monkeypatch.setenv("TOYAPP_HOST", "0.0.0.0")
     monkeypatch.setenv("TOYAPP_PORT", "9000")
     monkeypatch.setenv("TOYAPP_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("TOYAPP_EMBEDDING_DEVICE", "mps")
+    monkeypatch.setenv("TOYAPP_RETRIEVAL_TOP_K", "5")
+    monkeypatch.setenv("TOYAPP_RETRIEVAL_MIN_SIMILARITY", "0.4")
 
     settings = AppSettings()
 
@@ -48,6 +64,9 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.host == "0.0.0.0"
     assert settings.port == 9000
     assert settings.log_level is LogLevel.DEBUG
+    assert settings.embedding_device == "mps"
+    assert settings.retrieval_top_k == 5
+    assert settings.retrieval_min_similarity == 0.4
 
 
 @pytest.mark.parametrize("port", [0, 65536])
@@ -57,8 +76,32 @@ def test_settings_reject_out_of_range_ports(port: int) -> None:
         AppSettings.model_validate({"port": port})
 
 
-@pytest.mark.parametrize("field", ["app_name", "host"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "app_name",
+        "host",
+        "embedding_model_id",
+        "embedding_model_revision",
+        "embedding_device",
+    ],
+)
 def test_settings_reject_blank_required_text(field: str) -> None:
     """Whitespace-only service identifiers and hosts are invalid."""
     with pytest.raises(ValidationError):
         AppSettings.model_validate({field: "   "})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("retrieval_top_k", 0),
+        ("retrieval_min_similarity", -1.01),
+        ("retrieval_min_similarity", 1.01),
+        ("retrieval_min_similarity", float("nan")),
+    ],
+)
+def test_settings_reject_invalid_retrieval_values(field: str, value: float) -> None:
+    """Retrieval limits must stay within their mathematical domains."""
+    with pytest.raises(ValidationError):
+        AppSettings.model_validate({field: value})

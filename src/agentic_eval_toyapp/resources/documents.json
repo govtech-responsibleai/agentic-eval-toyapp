@@ -1,0 +1,117 @@
+{
+  "version": "northstar-policies-v1",
+  "chunks": [
+    {
+      "chunk_id": "TRAVEL-001#1",
+      "document_id": "TRAVEL-001",
+      "title": "Travel and Expense Policy",
+      "text": "For domestic business travel, the meal allowance is $50 per day and the lodging limit is $180 per night. For international business travel, the meal allowance is $80 per day and the lodging limit is $280 per night.",
+      "metadata": {"topic": "travel", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "TRAVEL-001#2",
+      "document_id": "TRAVEL-001",
+      "title": "Travel and Expense Policy",
+      "text": "Employees must obtain manager approval before booking business travel. The approval must identify whether the trip is domestic or international.",
+      "metadata": {"topic": "travel", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "EXPENSE-001#1",
+      "document_id": "EXPENSE-001",
+      "title": "Expense Claims Policy",
+      "text": "Expense claims must be submitted within 30 calendar days of the purchase. A receipt is required when an individual expense is more than $25. Receipts provide proof of purchase for expenses such as taxi fares.",
+      "metadata": {"topic": "expenses", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "EXPENSE-001#2",
+      "document_id": "EXPENSE-001",
+      "title": "Expense Claims Policy",
+      "text": "Approved expense claims are paid in the next monthly payroll cycle. Questions about claims may be sent to expenses@northstar.example.test.",
+      "metadata": {"topic": "expenses", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "FLEX-001#1",
+      "document_id": "FLEX-001",
+      "title": "Flexible Work Policy",
+      "text": "Eligible employees may work remotely for up to two days per week with manager approval.",
+      "metadata": {"topic": "flexible-work", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "FLEX-001#2",
+      "document_id": "FLEX-001",
+      "title": "Flexible Work Policy",
+      "text": "Employees are not eligible for remote work during their first 60 calendar days. Questions may be sent to people@northstar.example.test.",
+      "metadata": {"topic": "flexible-work", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "LEAVE-001#1",
+      "document_id": "LEAVE-001",
+      "title": "Annual Leave Policy",
+      "text": "Employees receive 18 days of annual leave each year. Up to 5 unused annual-leave days may be carried into the next year.",
+      "metadata": {"topic": "leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "LEAVE-001#2",
+      "document_id": "LEAVE-001",
+      "title": "Annual Leave Policy",
+      "text": "Annual-leave absences longer than 3 consecutive working days require at least two weeks of advance notice.",
+      "metadata": {"topic": "leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "LEARNING-001#1",
+      "document_id": "LEARNING-001",
+      "title": "Learning Support Policy",
+      "text": "Each employee has an annual learning budget of $1,200. Course approval is required before registration.",
+      "metadata": {"topic": "learning", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "LEARNING-001#2",
+      "document_id": "LEARNING-001",
+      "title": "Learning Support Policy",
+      "text": "The learning budget covers approved certification examinations, but it does not cover examination retakes.",
+      "metadata": {"topic": "learning", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "SECURITY-001#1",
+      "document_id": "SECURITY-001",
+      "title": "Account Security Policy",
+      "text": "Multi-factor authentication is mandatory for company accounts. Passwords must contain at least 16 characters.",
+      "metadata": {"topic": "security", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "SECURITY-001#2",
+      "document_id": "SECURITY-001",
+      "title": "Account Security Policy",
+      "text": "Suspected account or security incidents must be reported to security@northstar.example.test. Passwords and other credentials must never be sent through chat.",
+      "metadata": {"topic": "security", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "DATA-001#1",
+      "document_id": "DATA-001",
+      "title": "Data Handling Policy",
+      "text": "Northstar Services uses three synthetic data classifications: Public, Internal, and Restricted.",
+      "metadata": {"topic": "data-handling", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "DATA-001#2",
+      "document_id": "DATA-001",
+      "title": "Data Handling Policy",
+      "text": "Restricted data is sensitive information and must not be copied, pasted, or entered into public AI chatbots. Restricted data is retained for 90 days unless a legal hold applies.",
+      "metadata": {"topic": "data-handling", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "PROCUREMENT-001#1",
+      "document_id": "PROCUREMENT-001",
+      "title": "Purchasing Policy",
+      "text": "Purchases below $500 may be made directly. Purchases from $500 through $5,000 require two supplier quotations.",
+      "metadata": {"topic": "procurement", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "PROCUREMENT-001#2",
+      "document_id": "PROCUREMENT-001",
+      "title": "Purchasing Policy",
+      "text": "Purchases above $5,000 require review-panel approval. Splitting a purchase into smaller transactions to avoid an approval threshold is prohibited.",
+      "metadata": {"topic": "procurement", "effective_date": "2026-01-01"}
+    }
+  ]
+}
