@@ -53,15 +53,17 @@ make run
 Then inspect:
 
 ```text
+http://127.0.0.1:8000/
 http://127.0.0.1:8000/health
 http://127.0.0.1:8000/ready
 http://127.0.0.1:8000/api/v1/capabilities
 http://127.0.0.1:8000/docs
 ```
 
-Calling `/ready` initialises the pinned embedding model and FAISS index. If the
-model is not already cached, the first readiness call downloads it from
-Hugging Face.
+Application startup loads the pinned embedding model, embeds the corpus, and
+builds the FAISS index before the server accepts requests. If the model is not
+already cached, startup first downloads it from Hugging Face. `/ready` reports
+the completed startup state; it does not trigger first-use initialisation.
 
 Create a session:
 
@@ -85,10 +87,18 @@ retrieved source text with citations. It is deterministic and does not call a
 generation-model API. A later provider will use the same agent interface for
 model-backed answers.
 
+The browser page creates a session automatically. It displays the answer,
+citations, retrieved chunks and similarity scores, public action summaries,
+termination reason, model-call count, and search count returned by the same
+API used by METIS. Use **New session** to clear the browser transcript and
+create a separate backend session. Enter sends a message; Shift+Enter inserts
+a new line.
+
 | Method and path | Purpose |
 |---|---|
-| `GET /health` | Report process liveness without initialising model dependencies. |
-| `GET /ready` | Initialise and report chat dependencies. |
+| `GET /` | Serve the browser chat client. |
+| `GET /health` | Report process liveness after application startup. |
+| `GET /ready` | Report the chat dependencies initialised during startup. |
 | `GET /api/v1/capabilities` | Advertise supported target features and actions. |
 | `POST /api/v1/sessions` | Create an empty process-local conversation session. |
 | `POST /api/v1/sessions/{session_id}/messages` | Run and retain one synchronous RAG turn. |
@@ -124,12 +134,18 @@ agentic-eval-toyapp/
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
 │       ├── resources/
 │       │   └── documents.json                # Synthetic Northstar policy corpus
-│       └── sessions.py                       # Thread-safe bounded in-memory conversation state
+│       ├── sessions.py                       # Thread-safe bounded in-memory conversation state
+│       ├── static/
+│       │   ├── app.js                        # Safe browser API client and result rendering
+│       │   └── style.css                     # Responsive local browser styling
+│       └── templates/
+│           └── index.html                    # Accessible server-rendered chat page
 └── tests/
     ├── integration/
     │   ├── test_agent_retrieval.py           # Offline agent-to-FAISS integration test
     │   ├── test_api.py                       # Offline session and chat API contract tests
     │   ├── test_api_live.py                  # Opt-in default semantic API smoke test
+    │   ├── test_frontend.py                  # Browser page, asset, and rendering-safety tests
     │   ├── test_health_api.py                # FastAPI health and capability contract tests
     │   └── test_retrieval_live.py            # Opt-in pinned-model semantic retrieval tests
     └── unit/
@@ -158,13 +174,8 @@ agentic-eval-toyapp/
 ├── src/agentic_eval_toyapp/
 │   ├── scenarios.py                           # Controlled functional-case selection and mutations
 │   ├── tracing.py                             # Langfuse tracing abstraction and implementation
-│   ├── resources/
-│   │   └── cases.yaml                         # Opaque controlled-case runtime inputs
-│   ├── static/
-│   │   ├── app.js                             # Browser API client and chat interactions
-│   │   └── style.css                          # Browser interface styling
-│   └── templates/
-│       └── index.html                         # Server-rendered chat page
+│   └── resources/
+│       └── cases.yaml                         # Opaque controlled-case runtime inputs
 └── tests/
     ├── fixtures/
     │   ├── ground_truth.yaml                  # Evaluation-only expected labels
@@ -196,7 +207,9 @@ fd79e97d578089ebef4b5c3bf7ada9ee4e5545bf72c66fbb8fb1abd2fa8682ee
 
 The corpus and FAISS index are read-only during a run. Results are filtered by the configured cosine threshold, ordered by descending score, and use chunk ID as a deterministic tie-break.
 
-Offline CI uses fixed test embeddings and does not download the model. To run the six natural-language retrieval checks against the pinned model:
+Offline CI uses fixed test embeddings and does not download the model. To run
+the six natural-language retrieval checks and the default API smoke test
+against the pinned model:
 
 ```bash
 make test-live

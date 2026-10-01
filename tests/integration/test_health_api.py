@@ -9,6 +9,7 @@ from starlette.testclient import TestClient
 from agentic_eval_toyapp.app import create_app
 from agentic_eval_toyapp.config import AppSettings, LogLevel
 from agentic_eval_toyapp.models import AgentTurnResult, ConversationMessage
+from agentic_eval_toyapp.sessions import AgentRunner
 
 
 class _IntrospectionAgent:
@@ -69,6 +70,28 @@ def test_ready_reports_session_and_agent_dependencies() -> None:
             },
         ],
     }
+
+
+def test_startup_initialises_the_agent_factory_exactly_once() -> None:
+    """The server should finish RAG initialisation before serving readiness."""
+    factory_calls = 0
+
+    def agent_factory() -> AgentRunner:
+        nonlocal factory_calls
+        factory_calls += 1
+        return _IntrospectionAgent()
+
+    application = create_app(
+        AppSettings(app_name="Startup Test Target"),
+        agent_factory=agent_factory,
+    )
+
+    with TestClient(application) as raw_client:
+        client = cast(Client, raw_client)
+        assert factory_calls == 1
+        assert client.get("/ready").json()["status"] == "ready"
+        assert client.get("/ready").json()["status"] == "ready"
+        assert factory_calls == 1
 
 
 def test_capabilities_advertise_only_operational_chat_features() -> None:

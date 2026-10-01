@@ -144,7 +144,10 @@ class RagAgent:
                 summaries.append(
                     AgentActionSummary(
                         action=AgentActionKind.SEARCH,
-                        detail=f"Retrieved {len(results)} chunks.",
+                        detail=(
+                            f"Retrieved {len(results)} "
+                            f"{'chunk' if len(results) == 1 else 'chunks'}."
+                        ),
                     )
                 )
                 if not results:
@@ -210,7 +213,10 @@ class RagAgent:
             summaries.append(
                 AgentActionSummary(
                     action=AgentActionKind.ANSWER,
-                    detail=f"Returned an answer with {len(action.citations)} citations.",
+                    detail=(
+                        f"Returned an answer with {len(action.citations)} "
+                        f"{'citation' if len(action.citations) == 1 else 'citations'}."
+                    ),
                 )
             )
             return AgentTurnResult(

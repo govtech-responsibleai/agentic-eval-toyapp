@@ -108,6 +108,10 @@ def test_agent_searches_then_returns_grounded_answer() -> None:
         AgentActionKind.SEARCH,
         AgentActionKind.ANSWER,
     ]
+    assert [summary.detail for summary in result.action_summaries] == [
+        "Retrieved 1 chunk.",
+        "Returned an answer with 1 citation.",
+    ]
     assert all(
         "domestic meals" not in summary.detail for summary in result.action_summaries
     )
@@ -128,6 +132,32 @@ def test_agent_returns_clarification_without_searching() -> None:
     assert result.termination_reason is TerminationReason.CLARIFICATION_REQUIRED
     assert result.searches == 0
     assert retriever.calls == []
+
+
+def test_agent_action_summaries_pluralise_multiple_counts() -> None:
+    """Observable summaries should use grammatical nouns for multiple items."""
+    first = _chunk("TRAVEL-001#1")
+    second = _chunk("TRAVEL-001#2")
+    agent, _ = _agent(
+        (
+            SearchAction(query="travel"),
+            AnswerAction(
+                markdown=(
+                    "Domestic meals are covered. [TRAVEL-001#1] "
+                    "Travel requires approval. [TRAVEL-001#2]"
+                ),
+                citations=("TRAVEL-001#1", "TRAVEL-001#2"),
+            ),
+        ),
+        _StubRetriever({"travel": (first, second)}),
+    )
+
+    result = agent.run("Summarise travel policy")
+
+    assert [summary.detail for summary in result.action_summaries] == [
+        "Retrieved 2 chunks.",
+        "Returned an answer with 2 citations.",
+    ]
 
 
 def test_agent_rejects_answer_without_retrieval() -> None:

@@ -1,13 +1,17 @@
 """FastAPI application, dependency wiring, and versioned target endpoints."""
 
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
+from contextlib import asynccontextmanager
 from functools import partial
+from pathlib import Path
 from threading import Lock
 from uuid import UUID
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from agentic_eval_toyapp import __version__
 from agentic_eval_toyapp.agent import RagAgent, load_system_prompt
@@ -36,6 +40,10 @@ from agentic_eval_toyapp.sessions import (
 )
 
 API_PREFIX = "/api/v1"
+PACKAGE_DIRECTORY = Path(__file__).parent
+STATIC_DIRECTORY = PACKAGE_DIRECTORY / "static"
+TEMPLATE_DIRECTORY = PACKAGE_DIRECTORY / "templates"
+TEMPLATES = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
 
 
 class AgentInitialisationError(RuntimeError):
@@ -154,10 +162,22 @@ def create_app(
         agent_factory = partial(_build_default_agent, resolved_settings)
     resolver = _AgentResolver(agent=agent, factory=agent_factory)
 
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI) -> AsyncGenerator[None, None]:
+        """Finish RAG initialisation before the server accepts requests."""
+        resolver.get()
+        yield
+
     application = FastAPI(
         title=resolved_settings.app_name,
         version=__version__,
         description="Controlled RAG target application for METIS evaluations.",
+        lifespan=lifespan,
+    )
+    application.mount(
+        "/static",
+        StaticFiles(directory=STATIC_DIRECTORY),
+        name="static",
     )
     application.add_exception_handler(
         SessionNotFoundError,
@@ -172,6 +192,23 @@ def create_app(
         _handle_request_validation_error,
     )
 
+    @application.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def index(request: Request) -> Response:
+        """Render the browser client after startup dependencies are ready."""
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="index.html",
+            context={"app_name": resolved_settings.app_name},
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'self'; script-src 'self'; style-src 'self'; "
+                    "connect-src 'self'; img-src 'self'; base-uri 'none'; "
+                    "frame-ancestors 'none'; form-action 'self'"
+                ),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @application.get("/health", response_model=HealthResponse, tags=["service"])
     def health() -> HealthResponse:
         """Report process liveness without checking external dependencies."""
@@ -182,7 +219,7 @@ def create_app(
 
     @application.get("/ready", response_model=ReadinessResponse, tags=["service"])
     def ready() -> ReadinessResponse:
-        """Initialise and report the dependencies required for chat turns."""
+        """Report the dependencies initialised during application startup."""
         checks = [
             ReadinessCheck(
                 name="configuration",

@@ -10,7 +10,7 @@ from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.agent import RagAgent
-from agentic_eval_toyapp.app import create_app
+from agentic_eval_toyapp.app import AgentInitialisationError, create_app
 from agentic_eval_toyapp.config import AppSettings
 from agentic_eval_toyapp.models import DocumentMetadata, RetrievedChunk
 from agentic_eval_toyapp.providers import ExtractiveGenerationProvider
@@ -187,30 +187,22 @@ def test_message_endpoint_rejects_blank_and_oversized_text(message: str) -> None
     assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []
 
 
-def test_readiness_and_messages_fail_safely_when_agent_initialisation_fails() -> None:
-    """Dependency failures should not leak exception details or corrupt sessions."""
+def test_application_startup_fails_when_agent_initialisation_fails() -> None:
+    """The server must not accept requests with unavailable RAG dependencies."""
 
     def unavailable_factory() -> AgentRunner:
         raise RuntimeError("private model-cache failure")
 
-    client = _build_client(agent_factory=unavailable_factory)
-    readiness: Response = client.get("/ready")
-    session_id = client.post("/api/v1/sessions").json()["session_id"]
-    message: Response = client.post(
-        f"/api/v1/sessions/{session_id}/messages",
-        json={"message": "Question"},
+    application = create_app(
+        AppSettings(),
+        agent_factory=unavailable_factory,
     )
 
-    assert readiness.status_code == 200
-    assert readiness.json()["status"] == "not_ready"
-    assert readiness.json()["checks"][-1] == {
-        "name": "rag_agent",
-        "status": "fail",
-        "detail": "agent dependencies could not be initialised",
-    }
-    assert message.status_code == 503
-    assert message.json() == {
-        "code": "agent_unavailable",
-        "message": "The RAG agent is not ready.",
-    }
-    assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []
+    with (
+        pytest.raises(
+            AgentInitialisationError,
+            match="agent dependencies could not be initialised",
+        ),
+        TestClient(application),
+    ):
+        pass
