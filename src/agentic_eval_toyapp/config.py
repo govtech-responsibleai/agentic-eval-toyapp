@@ -49,6 +49,8 @@ class AppSettings(BaseSettings):
         le=1.0,
         allow_inf_nan=False,
     )
+    agent_max_model_calls: int = Field(default=3, ge=1)
+    agent_max_searches: int = Field(default=2, ge=1)
 
     @field_validator(
         "app_name",

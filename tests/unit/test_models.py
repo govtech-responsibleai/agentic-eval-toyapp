@@ -1,12 +1,18 @@
 """Tests for public API models."""
 
 from datetime import date
+from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from agentic_eval_toyapp.models import (
+    AgentAction,
+    AgentTurnResult,
+    AgentTurnStatus,
+    AnswerAction,
     CapabilityResponse,
+    ClarifyAction,
     DocumentChunk,
     DocumentMetadata,
     ErrorResponse,
@@ -15,7 +21,11 @@ from agentic_eval_toyapp.models import (
     KnowledgeCorpus,
     LifecycleMode,
     RetrievedChunk,
+    SearchAction,
+    TerminationReason,
 )
+
+_AGENT_ACTION_ADAPTER: TypeAdapter[AgentAction] = TypeAdapter(AgentAction)
 
 
 def test_capability_defaults_do_not_advertise_future_features() -> None:
@@ -110,3 +120,112 @@ def test_retrieved_chunk_rejects_invalid_similarity(score: float) -> None:
 
     with pytest.raises(ValidationError):
         RetrievedChunk(**chunk.model_dump(), similarity_score=score)
+
+
+@pytest.mark.parametrize(
+    ("payload", "action_type"),
+    [
+        ({"kind": "search", "query": "travel allowance"}, SearchAction),
+        (
+            {"kind": "clarify", "question": "Is the trip domestic?"},
+            ClarifyAction,
+        ),
+        (
+            {
+                "kind": "answer",
+                "markdown": "The limit is $50. [TRAVEL-001#1]",
+                "citations": ["TRAVEL-001#1"],
+            },
+            AnswerAction,
+        ),
+    ],
+)
+def test_agent_action_union_uses_kind_discriminator(
+    payload: dict[str, Any], action_type: type[object]
+) -> None:
+    """Provider output must resolve to exactly one known action schema."""
+    action = _AGENT_ACTION_ADAPTER.validate_python(payload)
+
+    assert isinstance(action, action_type)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kind": "search", "query": "   "},
+        {"kind": "answer", "markdown": "No citation", "citations": []},
+        {"kind": "unknown", "value": "anything"},
+    ],
+)
+def test_agent_action_union_rejects_invalid_payloads(payload: dict[str, Any]) -> None:
+    """Blank, uncited, and unknown actions cannot enter the agent loop."""
+    with pytest.raises(ValidationError):
+        _AGENT_ACTION_ADAPTER.validate_python(payload)
+
+
+def test_answer_action_rejects_duplicate_citations() -> None:
+    """One evidence chunk should appear once in structured citations."""
+    with pytest.raises(ValidationError, match="unique"):
+        AnswerAction(
+            markdown="Policy text. [POLICY-001#1]",
+            citations=("POLICY-001#1", "POLICY-001#1"),
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "status": "answered",
+            "message": "Answer",
+            "termination_reason": "answered",
+            "model_calls": 1,
+            "searches": 0,
+        },
+        {
+            "status": "clarification_required",
+            "message": "Question?",
+            "termination_reason": "provider_error",
+            "model_calls": 1,
+            "searches": 0,
+        },
+        {
+            "status": "failed",
+            "message": "Failure",
+            "termination_reason": "answered",
+            "model_calls": 1,
+            "searches": 0,
+        },
+        {
+            "status": "failed",
+            "message": "Failure",
+            "termination_reason": "search_limit",
+            "model_calls": 1,
+            "searches": 2,
+        },
+    ],
+)
+def test_agent_turn_result_rejects_inconsistent_outcomes(
+    payload: dict[str, Any],
+) -> None:
+    """Public turn results cannot advertise contradictory states."""
+    with pytest.raises(ValidationError):
+        AgentTurnResult.model_validate(payload)
+
+
+def test_agent_turn_result_accepts_grounded_answer() -> None:
+    """An answered outcome identifies evidence supporting every citation."""
+    chunk = _document_chunk()
+    retrieved = RetrievedChunk(**chunk.model_dump(), similarity_score=0.9)
+
+    result = AgentTurnResult(
+        status=AgentTurnStatus.ANSWERED,
+        message="Policy statement. [POLICY-001#1]",
+        citations=("POLICY-001#1",),
+        retrieved_chunks=(retrieved,),
+        termination_reason=TerminationReason.ANSWERED,
+        model_calls=2,
+        searches=1,
+    )
+
+    assert result.citations == ("POLICY-001#1",)

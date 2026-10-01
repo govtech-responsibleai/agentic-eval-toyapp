@@ -78,22 +78,29 @@ agentic-eval-toyapp/
 ├── src/
 │   └── agentic_eval_toyapp/
 │       ├── __init__.py                       # Package version
+│       ├── agent.py                          # Bounded RAG agent loop
 │       ├── app.py                            # FastAPI application and service endpoints
 │       ├── config.py                         # Validated service and retrieval settings
 │       ├── embeddings.py                     # Embedding interface, validation, and providers
-│       ├── models.py                         # API, corpus, retrieval, and provenance schemas
+│       ├── models.py                         # API, retrieval, agent, and provenance schemas
+│       ├── providers.py                      # Generation interface and scripted test provider
+│       ├── prompts/
+│       │   └── system.md                     # Versioned grounding and action instructions
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
 │       └── resources/
 │           └── documents.json                # Synthetic Northstar policy corpus
 └── tests/
     ├── integration/
+    │   ├── test_agent_retrieval.py           # Offline agent-to-FAISS integration test
     │   ├── test_health_api.py                # FastAPI health and capability contract tests
     │   └── test_retrieval_live.py            # Opt-in pinned-model semantic retrieval tests
     └── unit/
         ├── test_config.py                    # Configuration validation tests
         ├── test_embeddings.py                # Embedding validation and normalisation tests
+        ├── test_agent.py                     # Agent flow, grounding, and limit tests
         ├── test_models.py                    # Pydantic contract and immutability tests
         ├── test_package.py                   # Package/distribution version consistency test
+        ├── test_providers.py                 # Scripted provider ordering and failure tests
         └── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
 ```
 
@@ -110,13 +117,9 @@ agentic-eval-toyapp/
 ├── LICENSE                                    # Repository licence
 ├── compose.yaml                               # Local container configuration
 ├── src/agentic_eval_toyapp/
-│   ├── agent.py                               # Bounded RAG agent loop
-│   ├── providers.py                           # Real and deterministic generation providers
 │   ├── scenarios.py                           # Controlled functional-case selection and mutations
 │   ├── sessions.py                            # Bounded in-memory conversation state
 │   ├── tracing.py                             # Langfuse tracing abstraction and implementation
-│   ├── prompts/
-│   │   └── system.md                          # Versioned agent instructions
 │   ├── resources/
 │   │   └── cases.yaml                         # Opaque controlled-case runtime inputs
 │   ├── static/
@@ -132,7 +135,6 @@ agentic-eval-toyapp/
     │   ├── test_api.py                        # End-to-end fake-provider API tests
     │   └── test_langfuse_live.py              # Opt-in METIS trace-retrieval test
     └── unit/
-        ├── test_agent.py                      # Agent actions, limits, and citation tests
         ├── test_scenarios.py                  # Control/defect isolation tests
         └── test_tracing.py                    # Trace shape, metadata, and redaction tests
 ```

@@ -18,6 +18,8 @@ _SETTING_ENV_VARS = (
     "TOYAPP_EMBEDDING_DEVICE",
     "TOYAPP_RETRIEVAL_TOP_K",
     "TOYAPP_RETRIEVAL_MIN_SIMILARITY",
+    "TOYAPP_AGENT_MAX_MODEL_CALLS",
+    "TOYAPP_AGENT_MAX_SEARCHES",
 )
 
 
@@ -44,6 +46,8 @@ def test_settings_defaults_are_safe_for_local_development() -> None:
     assert settings.embedding_device == "cpu"
     assert settings.retrieval_top_k == 3
     assert settings.retrieval_min_similarity == 0.25
+    assert settings.agent_max_model_calls == 3
+    assert settings.agent_max_searches == 2
 
 
 def test_settings_load_prefixed_environment_variables(
@@ -57,6 +61,8 @@ def test_settings_load_prefixed_environment_variables(
     monkeypatch.setenv("TOYAPP_EMBEDDING_DEVICE", "mps")
     monkeypatch.setenv("TOYAPP_RETRIEVAL_TOP_K", "5")
     monkeypatch.setenv("TOYAPP_RETRIEVAL_MIN_SIMILARITY", "0.4")
+    monkeypatch.setenv("TOYAPP_AGENT_MAX_MODEL_CALLS", "4")
+    monkeypatch.setenv("TOYAPP_AGENT_MAX_SEARCHES", "1")
 
     settings = AppSettings()
 
@@ -67,6 +73,8 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.embedding_device == "mps"
     assert settings.retrieval_top_k == 5
     assert settings.retrieval_min_similarity == 0.4
+    assert settings.agent_max_model_calls == 4
+    assert settings.agent_max_searches == 1
 
 
 @pytest.mark.parametrize("port", [0, 65536])
@@ -99,6 +107,8 @@ def test_settings_reject_blank_required_text(field: str) -> None:
         ("retrieval_min_similarity", -1.01),
         ("retrieval_min_similarity", 1.01),
         ("retrieval_min_similarity", float("nan")),
+        ("agent_max_model_calls", 0),
+        ("agent_max_searches", 0),
     ],
 )
 def test_settings_reject_invalid_retrieval_values(field: str, value: float) -> None:

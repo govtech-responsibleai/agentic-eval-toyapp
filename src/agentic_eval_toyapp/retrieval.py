@@ -3,7 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 from pydantic import ValidationError
@@ -25,6 +25,17 @@ DEFAULT_CORPUS_PATH = Path(__file__).parent / "resources" / "documents.json"
 
 class CorpusLoadError(ValueError):
     """Raised when a corpus file cannot be read or validated."""
+
+
+@runtime_checkable
+class Retriever(Protocol):
+    """Narrow search interface consumed by the RAG agent."""
+
+    def search(
+        self, query: str, *, top_k: int | None = None
+    ) -> tuple[RetrievedChunk, ...]:
+        """Return ranked chunks for one non-blank query."""
+        ...
 
 
 def load_corpus(path: Path = DEFAULT_CORPUS_PATH) -> KnowledgeCorpus:

@@ -2,7 +2,7 @@
 
 from datetime import date
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -151,3 +151,151 @@ class RetrieverMetadata(ApiModel):
     embedding_dimension: int = Field(gt=0)
     index_type: str = "IndexFlatIP"
     chunk_count: int = Field(gt=0)
+
+
+class ConversationRole(StrEnum):
+    """Roles retained in bounded public conversation history."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ConversationMessage(ApiModel):
+    """One public conversation message without hidden reasoning."""
+
+    role: ConversationRole
+    content: NonEmptyString
+
+
+class AgentActionKind(StrEnum):
+    """Actions available to the bounded RAG agent."""
+
+    SEARCH = "search"
+    CLARIFY = "clarify"
+    ANSWER = "answer"
+
+
+class SearchAction(ApiModel):
+    """Request semantic retrieval for one focused query."""
+
+    kind: Literal["search"] = "search"
+    query: NonEmptyString
+
+
+class ClarifyAction(ApiModel):
+    """Ask the user for information required to proceed."""
+
+    kind: Literal["clarify"] = "clarify"
+    question: NonEmptyString
+
+
+class AnswerAction(ApiModel):
+    """Return a grounded Markdown answer and declared chunk citations."""
+
+    kind: Literal["answer"] = "answer"
+    markdown: NonEmptyString
+    citations: tuple[NonEmptyString, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_citations(self) -> Self:
+        """Avoid ambiguous duplicate citation declarations."""
+        if len(self.citations) != len(set(self.citations)):
+            raise ValueError("citations must be unique")
+        return self
+
+
+AgentAction = Annotated[
+    SearchAction | ClarifyAction | AnswerAction,
+    Field(discriminator="kind"),
+]
+
+
+class ModelRequest(ApiModel):
+    """Information exposed to a generation provider for one action."""
+
+    system_prompt: NonEmptyString
+    user_message: NonEmptyString
+    history: tuple[ConversationMessage, ...] = ()
+    retrieved_chunks: tuple[RetrievedChunk, ...] = ()
+    available_actions: tuple[AgentActionKind, ...] = (
+        AgentActionKind.SEARCH,
+        AgentActionKind.CLARIFY,
+        AgentActionKind.ANSWER,
+    )
+    model_call_number: int = Field(ge=1)
+    remaining_searches: int = Field(ge=0)
+
+
+class AgentActionSummary(ApiModel):
+    """Observable action record that excludes private chain-of-thought."""
+
+    action: AgentActionKind
+    detail: NonEmptyString
+
+
+class AgentTurnStatus(StrEnum):
+    """Public outcome categories for one agent turn."""
+
+    ANSWERED = "answered"
+    CLARIFICATION_REQUIRED = "clarification_required"
+    FAILED = "failed"
+
+
+class TerminationReason(StrEnum):
+    """Stable reason why a bounded agent turn stopped."""
+
+    ANSWERED = "answered"
+    CLARIFICATION_REQUIRED = "clarification_required"
+    EMPTY_RETRIEVAL = "empty_retrieval"
+    REPEATED_SEARCH = "repeated_search"
+    ANSWER_WITHOUT_RETRIEVAL = "answer_without_retrieval"
+    INVALID_CITATIONS = "invalid_citations"
+    CITATION_MISMATCH = "citation_mismatch"
+    MODEL_CALL_LIMIT = "model_call_limit"
+    SEARCH_LIMIT = "search_limit"
+    PROVIDER_ERROR = "provider_error"
+    RETRIEVAL_ERROR = "retrieval_error"
+
+
+class AgentTurnResult(ApiModel):
+    """Typed result returned by the bounded agent loop."""
+
+    status: AgentTurnStatus
+    message: NonEmptyString
+    citations: tuple[NonEmptyString, ...] = ()
+    retrieved_chunks: tuple[RetrievedChunk, ...] = ()
+    action_summaries: tuple[AgentActionSummary, ...] = ()
+    termination_reason: TerminationReason
+    model_calls: int = Field(ge=0)
+    searches: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_outcome_consistency(self) -> Self:
+        """Keep status, evidence, citations, and counters internally consistent."""
+        if self.searches > self.model_calls:
+            raise ValueError("searches cannot exceed model_calls")
+
+        if self.status is AgentTurnStatus.ANSWERED:
+            if self.termination_reason is not TerminationReason.ANSWERED:
+                raise ValueError("answered status requires answered termination reason")
+            if not self.retrieved_chunks or not self.citations:
+                raise ValueError("answered results require evidence and citations")
+            retrieved_ids = {chunk.chunk_id for chunk in self.retrieved_chunks}
+            if not set(self.citations) <= retrieved_ids:
+                raise ValueError("answer citations must refer to retrieved chunks")
+        elif self.status is AgentTurnStatus.CLARIFICATION_REQUIRED:
+            if self.termination_reason is not TerminationReason.CLARIFICATION_REQUIRED:
+                raise ValueError(
+                    "clarification status requires clarification termination reason"
+                )
+            if self.citations:
+                raise ValueError("clarification results cannot contain citations")
+        else:
+            if self.termination_reason in {
+                TerminationReason.ANSWERED,
+                TerminationReason.CLARIFICATION_REQUIRED,
+            }:
+                raise ValueError("failed status requires a failure termination reason")
+            if self.citations:
+                raise ValueError("failed results cannot contain citations")
+        return self
