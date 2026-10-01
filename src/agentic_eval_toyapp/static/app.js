@@ -12,6 +12,7 @@ const appStatus = document.querySelector("#app-status");
 const detailsEmpty = document.querySelector("#details-empty");
 const turnDetails = document.querySelector("#turn-details");
 const turnStatus = document.querySelector("#turn-status");
+const executionDetails = document.querySelector("#execution-details");
 const terminationReason = document.querySelector("#termination-reason");
 const modelCalls = document.querySelector("#model-calls");
 const searches = document.querySelector("#searches");
@@ -21,6 +22,12 @@ const actions = document.querySelector("#actions");
 
 let sessionId = null;
 let requestInProgress = false;
+
+function preferredScrollBehavior() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
+}
 
 function setStatus(message, isError = false) {
   appStatus.textContent = message;
@@ -65,6 +72,34 @@ function createTextElement(tagName, text, className = "") {
   return element;
 }
 
+function renderWelcome() {
+  const item = document.createElement("li");
+  item.className = "conversation-welcome";
+
+  const mark = createTextElement("span", "N", "welcome-mark");
+  mark.setAttribute("aria-hidden", "true");
+  item.append(mark);
+
+  const copy = document.createElement("div");
+  copy.append(createTextElement("h3", "Ask about Northstar policies"));
+  copy.append(
+    createTextElement(
+      "p",
+      "Try annual leave, flexible work, learning allowances, or another topic from the synthetic employee handbook.",
+    ),
+  );
+  item.append(copy);
+  transcript.append(item);
+}
+
+function removeWelcome() {
+  transcript.querySelector(".conversation-welcome")?.remove();
+}
+
+function scrollToElement(element) {
+  element.scrollIntoView({ behavior: preferredScrollBehavior(), block: "nearest" });
+}
+
 function renderResponseText(container, text) {
   const lines = text.split("\n");
   for (const line of lines) {
@@ -85,6 +120,7 @@ function renderResponseText(container, text) {
 }
 
 function appendMessage(role, text, status = "") {
+  removeWelcome();
   const item = document.createElement("li");
   item.className = `message message-${role}`;
 
@@ -107,7 +143,23 @@ function appendMessage(role, text, status = "") {
   }
   item.append(body);
   transcript.append(item);
-  item.scrollIntoView({ behavior: "smooth", block: "end" });
+  scrollToElement(item);
+}
+
+function appendWorkingIndicator() {
+  const item = document.createElement("li");
+  item.className = "message message-assistant message-working";
+  item.setAttribute("aria-hidden", "true");
+
+  const dots = document.createElement("div");
+  dots.className = "working-dots";
+  for (let index = 0; index < 3; index += 1) {
+    dots.append(document.createElement("span"));
+  }
+  item.append(dots);
+  transcript.append(item);
+  scrollToElement(item);
+  return item;
 }
 
 function renderList(container, values, emptyLabel) {
@@ -134,16 +186,26 @@ function resultStatusLabel(result) {
   return "Failed";
 }
 
+function resultStatusClass(result) {
+  if (result.termination_reason === "empty_retrieval") {
+    return "status-no-evidence";
+  }
+  return `status-${result.status}`;
+}
+
 function renderSources(retrievedChunks) {
   sources.replaceChildren();
+  const sourceIds = new Map();
   if (retrievedChunks.length === 0) {
     sources.append(createTextElement("p", "No source passed the retrieval threshold.", "muted-item"));
-    return;
+    return sourceIds;
   }
 
-  for (const chunk of retrievedChunks) {
+  for (const [index, chunk] of retrievedChunks.entries()) {
     const details = document.createElement("details");
     details.className = "source-item";
+    details.id = `retrieved-source-${index + 1}`;
+    sourceIds.set(chunk.chunk_id, details.id);
     const score = Number(chunk.similarity_score).toFixed(3);
     const summary = createTextElement(
       "summary",
@@ -160,19 +222,54 @@ function renderSources(retrievedChunks) {
     );
     sources.append(details);
   }
+  return sourceIds;
+}
+
+function renderCitations(values, sourceIds) {
+  citations.replaceChildren();
+  if (values.length === 0) {
+    citations.append(createTextElement("li", "No citations returned.", "muted-item"));
+    return;
+  }
+
+  for (const value of values) {
+    const item = document.createElement("li");
+    const sourceId = sourceIds.get(value);
+    if (sourceId) {
+      const button = createTextElement("button", value, "citation-chip");
+      button.type = "button";
+      button.setAttribute("aria-controls", sourceId);
+      button.addEventListener("click", () => {
+        const source = document.getElementById(sourceId);
+        if (!(source instanceof HTMLDetailsElement)) {
+          return;
+        }
+        for (const candidate of sources.querySelectorAll(".source-highlight")) {
+          candidate.classList.remove("source-highlight");
+        }
+        source.open = true;
+        source.classList.add("source-highlight");
+        scrollToElement(source);
+      });
+      item.append(button);
+    } else {
+      item.append(createTextElement("span", value, "muted-item"));
+    }
+    citations.append(item);
+  }
 }
 
 function renderTurnDetails(result) {
   detailsEmpty.hidden = true;
   turnDetails.hidden = false;
   turnStatus.textContent = resultStatusLabel(result);
-  turnStatus.className = `status-badge status-${result.status}`;
+  turnStatus.className = `status-badge ${resultStatusClass(result)}`;
   terminationReason.textContent = result.termination_reason.replaceAll("_", " ");
   modelCalls.textContent = String(result.model_calls);
   searches.textContent = String(result.searches);
 
-  renderList(citations, result.citations, "No citations returned.");
-  renderSources(result.retrieved_chunks);
+  const sourceIds = renderSources(result.retrieved_chunks);
+  renderCitations(result.citations, sourceIds);
   renderList(
     actions,
     result.action_summaries.map(
@@ -180,6 +277,7 @@ function renderTurnDetails(result) {
     ),
     "No public action summary returned.",
   );
+  executionDetails.open = false;
 }
 
 function resetDetails() {
@@ -187,6 +285,7 @@ function resetDetails() {
   turnDetails.hidden = true;
   turnStatus.textContent = "Waiting";
   turnStatus.className = "status-badge status-idle";
+  executionDetails.open = false;
   terminationReason.textContent = "—";
   modelCalls.textContent = "—";
   searches.textContent = "—";
@@ -201,6 +300,7 @@ async function createSession() {
   sessionId = null;
   sessionIdElement.textContent = "Creating session…";
   transcript.replaceChildren();
+  renderWelcome();
   resetDetails();
   try {
     const session = await apiRequest("/sessions", { method: "POST" });
@@ -229,15 +329,18 @@ async function submitMessage(event) {
   messageInput.value = "";
   setBusy(true);
   setStatus("Searching the corpus and preparing a response…");
+  const workingIndicator = appendWorkingIndicator();
   try {
     const response = await apiRequest(`/sessions/${sessionId}/messages`, {
       method: "POST",
       body: JSON.stringify({ message }),
     });
+    workingIndicator.remove();
     appendMessage("assistant", response.result.message, resultStatusLabel(response.result));
     renderTurnDetails(response.result);
     setStatus("Turn complete.");
   } catch (error) {
+    workingIndicator.remove();
     appendMessage("assistant", error.message, "request_error");
     setStatus(error.message, true);
   } finally {

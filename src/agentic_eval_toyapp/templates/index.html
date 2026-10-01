@@ -10,21 +10,27 @@
   </head>
   <body>
     <header class="site-header">
-      <div>
-        <p class="eyebrow">METIS evaluation target</p>
+      <div class="header-copy">
+        <p class="eyebrow product-label">
+          <span class="product-mark" aria-hidden="true"></span>
+          METIS evaluation target
+        </p>
         <h1>{{ app_name }}</h1>
         <p class="intro">
           Ask questions about the synthetic Northstar Services policy corpus.
           Responses show their retrieved evidence and agent actions.
         </p>
       </div>
-      <a class="api-link" href="/docs">API documentation</a>
+      <a class="api-link" href="/docs">
+        API documentation
+        <span aria-hidden="true">↗</span>
+      </a>
     </header>
 
     <main id="app" class="app-shell" data-api-base="/api/v1">
       <section class="chat-card" aria-labelledby="chat-heading">
         <div class="session-bar">
-          <div>
+          <div class="session-context">
             <p class="label">Current session</p>
             <code id="session-id">Creating session…</code>
           </div>
@@ -41,23 +47,39 @@
           aria-live="polite"
           aria-relevant="additions"
           aria-label="Conversation transcript"
-        ></ol>
+        >
+          <li class="conversation-welcome">
+            <span class="welcome-mark" aria-hidden="true">N</span>
+            <div>
+              <h3>Ask about Northstar policies</h3>
+              <p>
+                Try annual leave, flexible work, learning allowances, or another
+                topic from the synthetic employee handbook.
+              </p>
+            </div>
+          </li>
+        </ol>
 
         <form id="chat-form" class="message-form">
-          <label for="message-input">Your policy question</label>
-          <textarea
-            id="message-input"
-            name="message"
-            rows="3"
-            maxlength="8000"
-            required
-            disabled
-            placeholder="For example: How many annual leave days do employees receive?"
-          ></textarea>
-          <div class="form-footer">
-            <button id="send-message" class="primary-button" type="submit" disabled>
-              Send question
-            </button>
+          <div class="composer-shell">
+            <label for="message-input">Your policy question</label>
+            <textarea
+              id="message-input"
+              name="message"
+              rows="3"
+              maxlength="8000"
+              required
+              disabled
+              placeholder="Ask a question about Northstar policies"
+            ></textarea>
+            <div class="form-footer">
+              <p id="app-status" class="app-status" role="status" aria-live="polite">
+                Initialising a new session…
+              </p>
+              <button id="send-message" class="primary-button" type="submit" disabled>
+                Send question
+              </button>
+            </div>
           </div>
         </form>
       </section>
@@ -77,42 +99,43 @@
         </p>
 
         <div id="turn-details" hidden>
-          <dl class="turn-metadata">
-            <div>
-              <dt>Outcome reason</dt>
-              <dd id="termination-reason">—</dd>
-            </div>
-            <div>
-              <dt>Model calls</dt>
-              <dd id="model-calls">—</dd>
-            </div>
-            <div>
-              <dt>Searches</dt>
-              <dd id="searches">—</dd>
-            </div>
-          </dl>
-
-          <section aria-labelledby="citations-heading">
+          <section class="detail-section" aria-labelledby="citations-heading">
             <h3 id="citations-heading">Citations</h3>
-            <ul id="citations" class="compact-list"></ul>
+            <ul id="citations" class="citation-list"></ul>
           </section>
 
-          <section aria-labelledby="sources-heading">
+          <section class="detail-section" aria-labelledby="sources-heading">
             <h3 id="sources-heading">Retrieved sources</h3>
             <div id="sources" class="source-list"></div>
           </section>
 
-          <section aria-labelledby="actions-heading">
-            <h3 id="actions-heading">Agent actions</h3>
-            <ol id="actions" class="compact-list"></ol>
-          </section>
+          <details id="execution-details" class="execution-details">
+            <summary>Execution details</summary>
+            <div class="execution-content">
+              <dl class="turn-metadata">
+                <div>
+                  <dt>Outcome reason</dt>
+                  <dd id="termination-reason">—</dd>
+                </div>
+                <div>
+                  <dt>Model calls</dt>
+                  <dd id="model-calls">—</dd>
+                </div>
+                <div>
+                  <dt>Searches</dt>
+                  <dd id="searches">—</dd>
+                </div>
+              </dl>
+
+              <section aria-labelledby="actions-heading">
+                <h3 id="actions-heading">Agent actions</h3>
+                <ol id="actions" class="compact-list"></ol>
+              </section>
+            </div>
+          </details>
         </div>
       </aside>
     </main>
-
-    <p id="app-status" class="app-status" role="status" aria-live="polite">
-      Initialising a new session…
-    </p>
 
     <noscript>
       <p class="noscript-message">

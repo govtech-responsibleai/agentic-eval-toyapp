@@ -41,6 +41,9 @@ def test_root_page_loads_with_accessible_controls() -> None:
     assert 'for="message-input"' in response.text
     assert 'role="log"' in response.text
     assert 'role="status"' in response.text
+    assert 'id="execution-details"' in response.text
+    assert "Execution details" in response.text
+    assert "Ask about Northstar policies" in response.text
     assert "Outcome reason" in response.text
     assert "Model calls" in response.text
     assert "Provider calls" not in response.text
@@ -74,6 +77,10 @@ def test_javascript_uses_the_versioned_api_and_safe_dom_rendering() -> None:
     assert "/sessions/${sessionId}/messages" in response.text
     assert "textContent" in response.text
     assert "replaceChildren" in response.text
+    assert "renderCitations" in response.text
+    assert 'setAttribute("aria-controls"' in response.text
+    assert 'window.matchMedia("(prefers-reduced-motion: reduce)")' in response.text
+    assert "HTMLDetailsElement" in response.text
     assert "!event.shiftKey && !event.isComposing" in response.text
     assert 'return "Needs clarification"' in response.text
     assert 'return "No relevant evidence"' in response.text
@@ -91,5 +98,11 @@ def test_stylesheet_is_local_and_contains_responsive_layout() -> None:
     assert response.headers["content-type"].startswith("text/css")
     assert "@media (max-width: 900px)" in response.text
     assert "@media (max-width: 560px)" in response.text
+    assert "@media (prefers-reduced-motion: reduce)" in response.text
+    assert "@media (prefers-reduced-transparency: reduce)" in response.text
+    assert "@media (prefers-contrast: more)" in response.text
+    assert "backdrop-filter" in response.text
+    assert ".message-user .message-body p" in response.text
+    assert "white-space: pre-wrap" in response.text
     assert "http://" not in response.text
     assert "https://" not in response.text
