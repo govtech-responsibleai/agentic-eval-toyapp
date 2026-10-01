@@ -59,6 +59,41 @@ http://127.0.0.1:8000/api/v1/capabilities
 http://127.0.0.1:8000/docs
 ```
 
+Calling `/ready` initialises the pinned embedding model and FAISS index. If the
+model is not already cached, the first readiness call downloads it from
+Hugging Face.
+
+Create a session:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/sessions
+```
+
+Copy the returned `session_id`, then submit and inspect a turn:
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/api/v1/sessions/<session_id>/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"How many annual leave days do employees receive?"}'
+
+curl http://127.0.0.1:8000/api/v1/sessions/<session_id>
+```
+
+The default pre-model provider performs semantic search and returns the
+retrieved source text with citations. It is deterministic and does not call a
+generation-model API. A later provider will use the same agent interface for
+model-backed answers.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /health` | Report process liveness without initialising model dependencies. |
+| `GET /ready` | Initialise and report chat dependencies. |
+| `GET /api/v1/capabilities` | Advertise supported target features and actions. |
+| `POST /api/v1/sessions` | Create an empty process-local conversation session. |
+| `POST /api/v1/sessions/{session_id}/messages` | Run and retain one synchronous RAG turn. |
+| `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |
+
 ## Repository structure
 
 ```text
@@ -79,19 +114,22 @@ agentic-eval-toyapp/
 │   └── agentic_eval_toyapp/
 │       ├── __init__.py                       # Package version
 │       ├── agent.py                          # Bounded RAG agent loop
-│       ├── app.py                            # FastAPI application and service endpoints
-│       ├── config.py                         # Validated service and retrieval settings
+│       ├── app.py                            # FastAPI wiring, readiness, session, and message endpoints
+│       ├── config.py                         # Validated service, retrieval, agent, and session settings
 │       ├── embeddings.py                     # Embedding interface, validation, and providers
-│       ├── models.py                         # API, retrieval, agent, and provenance schemas
-│       ├── providers.py                      # Generation interface and scripted test provider
+│       ├── models.py                         # API, retrieval, agent, session, and provenance schemas
+│       ├── providers.py                      # Generation interface plus scripted and extractive providers
 │       ├── prompts/
 │       │   └── system.md                     # Versioned grounding and action instructions
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
-│       └── resources/
-│           └── documents.json                # Synthetic Northstar policy corpus
+│       ├── resources/
+│       │   └── documents.json                # Synthetic Northstar policy corpus
+│       └── sessions.py                       # Thread-safe bounded in-memory conversation state
 └── tests/
     ├── integration/
     │   ├── test_agent_retrieval.py           # Offline agent-to-FAISS integration test
+    │   ├── test_api.py                       # Offline session and chat API contract tests
+    │   ├── test_api_live.py                  # Opt-in default semantic API smoke test
     │   ├── test_health_api.py                # FastAPI health and capability contract tests
     │   └── test_retrieval_live.py            # Opt-in pinned-model semantic retrieval tests
     └── unit/
@@ -101,7 +139,8 @@ agentic-eval-toyapp/
         ├── test_models.py                    # Pydantic contract and immutability tests
         ├── test_package.py                   # Package/distribution version consistency test
         ├── test_providers.py                 # Scripted provider ordering and failure tests
-        └── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
+        ├── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
+        └── test_sessions.py                  # Session isolation, history, and truncation tests
 ```
 
 The local `design.md` is intentionally excluded because it is not committed.
@@ -118,7 +157,6 @@ agentic-eval-toyapp/
 ├── compose.yaml                               # Local container configuration
 ├── src/agentic_eval_toyapp/
 │   ├── scenarios.py                           # Controlled functional-case selection and mutations
-│   ├── sessions.py                            # Bounded in-memory conversation state
 │   ├── tracing.py                             # Langfuse tracing abstraction and implementation
 │   ├── resources/
 │   │   └── cases.yaml                         # Opaque controlled-case runtime inputs
@@ -132,7 +170,6 @@ agentic-eval-toyapp/
     │   ├── ground_truth.yaml                  # Evaluation-only expected labels
     │   └── model_actions/                     # Deterministic generation fixtures
     ├── integration/
-    │   ├── test_api.py                        # End-to-end fake-provider API tests
     │   └── test_langfuse_live.py              # Opt-in METIS trace-retrieval test
     └── unit/
         ├── test_scenarios.py                  # Control/defect isolation tests

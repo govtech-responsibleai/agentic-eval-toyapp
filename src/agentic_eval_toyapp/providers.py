@@ -3,7 +3,12 @@
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
-from agentic_eval_toyapp.models import AgentAction, ModelRequest
+from agentic_eval_toyapp.models import (
+    AgentAction,
+    AnswerAction,
+    ModelRequest,
+    SearchAction,
+)
 
 
 class GenerationProviderError(RuntimeError):
@@ -74,3 +79,32 @@ class ScriptedGenerationProvider:
         action = self._actions[self._position]
         self._position += 1
         return action
+
+
+class ExtractiveGenerationProvider:
+    """Build deterministic search and cited extractive-answer actions."""
+
+    @property
+    def model_id(self) -> str:
+        return "deterministic-extractive-provider"
+
+    @property
+    def revision(self) -> str:
+        return "v1"
+
+    def generate_action(self, request: ModelRequest) -> AgentAction:
+        """Search once, then quote all retrieved chunks with exact citations."""
+        if not request.retrieved_chunks:
+            if request.remaining_searches < 1:
+                raise GenerationProviderError("no search action remains")
+            return SearchAction(query=request.user_message)
+
+        citations = tuple(chunk.chunk_id for chunk in request.retrieved_chunks)
+        sections = tuple(
+            f"### {chunk.title}\n\n{chunk.text} [{chunk.chunk_id}]"
+            for chunk in request.retrieved_chunks
+        )
+        return AnswerAction(
+            markdown="## Retrieved policy information\n\n" + "\n\n".join(sections),
+            citations=citations,
+        )

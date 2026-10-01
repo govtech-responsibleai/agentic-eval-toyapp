@@ -3,10 +3,15 @@
 from datetime import date
 from enum import StrEnum
 from typing import Annotated, Literal, Self
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+UserMessageString = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=8_000),
+]
 
 
 class ApiModel(BaseModel):
@@ -299,3 +304,37 @@ class AgentTurnResult(ApiModel):
             if self.citations:
                 raise ValueError("failed results cannot contain citations")
         return self
+
+
+class SessionMessageRequest(ApiModel):
+    """One bounded user message submitted to an existing session."""
+
+    message: UserMessageString
+
+
+class SessionResponse(ApiModel):
+    """Safe public snapshot of one in-memory conversation session."""
+
+    session_id: UUID
+    messages: tuple[ConversationMessage, ...] = ()
+    retained_turns: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_complete_turn_history(self) -> Self:
+        """Require complete user/assistant pairs in chronological order."""
+        if len(self.messages) != self.retained_turns * 2:
+            raise ValueError("retained_turns must match complete message pairs")
+        for index, message in enumerate(self.messages):
+            expected_role = (
+                ConversationRole.USER if index % 2 == 0 else ConversationRole.ASSISTANT
+            )
+            if message.role is not expected_role:
+                raise ValueError("messages must alternate user and assistant roles")
+        return self
+
+
+class SessionMessageResponse(ApiModel):
+    """Result of one agent turn within a named application session."""
+
+    session_id: UUID
+    result: AgentTurnResult

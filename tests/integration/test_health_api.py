@@ -1,5 +1,6 @@
 """Integration tests for service-introspection endpoints."""
 
+from collections.abc import Sequence
 from typing import cast
 
 from httpx2 import Client, Response
@@ -7,6 +8,17 @@ from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.app import create_app
 from agentic_eval_toyapp.config import AppSettings, LogLevel
+from agentic_eval_toyapp.models import AgentTurnResult, ConversationMessage
+
+
+class _IntrospectionAgent:
+    def run(
+        self,
+        user_message: str,
+        *,
+        history: Sequence[ConversationMessage] = (),
+    ) -> AgentTurnResult:
+        raise AssertionError("introspection endpoints must not execute the agent")
 
 
 def build_client() -> Client:
@@ -17,7 +29,7 @@ def build_client() -> Client:
         port=8000,
         log_level=LogLevel.INFO,
     )
-    return cast(Client, TestClient(create_app(settings)))
+    return cast(Client, TestClient(create_app(settings, agent=_IntrospectionAgent())))
 
 
 def test_health_reports_liveness_and_version() -> None:
@@ -32,8 +44,8 @@ def test_health_reports_liveness_and_version() -> None:
     }
 
 
-def test_ready_reports_configuration_check() -> None:
-    """Stage 2 readiness covers validated configuration only."""
+def test_ready_reports_session_and_agent_dependencies() -> None:
+    """Readiness should cover every dependency needed by the chat API."""
     response: Response = build_client().get("/ready")
 
     assert response.status_code == 200
@@ -44,13 +56,23 @@ def test_ready_reports_configuration_check() -> None:
                 "name": "configuration",
                 "status": "pass",
                 "detail": "service settings validated",
-            }
+            },
+            {
+                "name": "session_store",
+                "status": "pass",
+                "detail": "retains up to 10 complete turns",
+            },
+            {
+                "name": "rag_agent",
+                "status": "pass",
+                "detail": "agent dependencies initialised",
+            },
         ],
     }
 
 
-def test_capabilities_do_not_claim_unimplemented_features() -> None:
-    """METIS should see only features that are operational now."""
+def test_capabilities_advertise_only_operational_chat_features() -> None:
+    """METIS should see chat and retrieval but not tracing or scenarios."""
     response: Response = build_client().get("/api/v1/capabilities")
 
     assert response.status_code == 200
@@ -59,12 +81,12 @@ def test_capabilities_do_not_claim_unimplemented_features() -> None:
         "service_version": "0.1.0",
         "lifecycle": "synchronous",
         "features": {
-            "session_chat": False,
-            "semantic_retrieval": False,
+            "session_chat": True,
+            "semantic_retrieval": True,
             "langfuse_tracing": False,
             "controlled_scenarios": False,
         },
-        "actions": [],
+        "actions": ["search", "clarify", "answer"],
         "output_formats": ["application/json"],
     }
 
@@ -78,4 +100,11 @@ def test_openapi_contains_only_the_intended_application_routes() -> None:
     assert response.status_code == 200
     assert isinstance(paths, dict)
     typed_paths = cast(dict[str, object], paths)
-    assert set(typed_paths) == {"/health", "/ready", "/api/v1/capabilities"}
+    assert set(typed_paths) == {
+        "/health",
+        "/ready",
+        "/api/v1/capabilities",
+        "/api/v1/sessions",
+        "/api/v1/sessions/{session_id}",
+        "/api/v1/sessions/{session_id}/messages",
+    }

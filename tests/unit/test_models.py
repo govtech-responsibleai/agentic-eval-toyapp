@@ -2,6 +2,7 @@
 
 from datetime import date
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -13,6 +14,8 @@ from agentic_eval_toyapp.models import (
     AnswerAction,
     CapabilityResponse,
     ClarifyAction,
+    ConversationMessage,
+    ConversationRole,
     DocumentChunk,
     DocumentMetadata,
     ErrorResponse,
@@ -22,6 +25,8 @@ from agentic_eval_toyapp.models import (
     LifecycleMode,
     RetrievedChunk,
     SearchAction,
+    SessionMessageRequest,
+    SessionResponse,
     TerminationReason,
 )
 
@@ -229,3 +234,63 @@ def test_agent_turn_result_accepts_grounded_answer() -> None:
     )
 
     assert result.citations == ("POLICY-001#1",)
+
+
+@pytest.mark.parametrize("message", ["", "   ", "x" * 8_001])
+def test_session_message_request_rejects_invalid_lengths(message: str) -> None:
+    """Chat requests must be non-blank and bounded before entering memory."""
+    with pytest.raises(ValidationError):
+        SessionMessageRequest(message=message)
+
+
+def test_session_message_request_strips_and_preserves_unicode() -> None:
+    """User text should retain Unicode while removing boundary whitespace."""
+    request = SessionMessageRequest(message="  休暇ポリシーは何ですか？  ")
+
+    assert request.message == "休暇ポリシーは何ですか？"
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        (ConversationMessage(role=ConversationRole.USER, content="Question"),),
+        (
+            ConversationMessage(role=ConversationRole.ASSISTANT, content="Answer"),
+            ConversationMessage(role=ConversationRole.USER, content="Question"),
+        ),
+        (
+            ConversationMessage(role=ConversationRole.USER, content="Question"),
+            ConversationMessage(
+                role=ConversationRole.USER,
+                content="Another question",
+            ),
+        ),
+    ],
+)
+def test_session_response_rejects_incomplete_or_misordered_turns(
+    messages: tuple[ConversationMessage, ...],
+) -> None:
+    """Public history must contain complete chronological conversation turns."""
+    with pytest.raises(ValidationError):
+        SessionResponse(
+            session_id=uuid4(),
+            messages=messages,
+            retained_turns=1,
+        )
+
+
+def test_session_response_accepts_empty_and_complete_histories() -> None:
+    """A new session is empty and later snapshots contain complete pairs."""
+    session_id = uuid4()
+    empty = SessionResponse(session_id=session_id, retained_turns=0)
+    complete = SessionResponse(
+        session_id=session_id,
+        messages=(
+            ConversationMessage(role=ConversationRole.USER, content="Question"),
+            ConversationMessage(role=ConversationRole.ASSISTANT, content="Answer"),
+        ),
+        retained_turns=1,
+    )
+
+    assert empty.messages == ()
+    assert complete.retained_turns == 1

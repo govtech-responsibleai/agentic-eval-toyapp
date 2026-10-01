@@ -51,6 +51,7 @@ class AppSettings(BaseSettings):
     )
     agent_max_model_calls: int = Field(default=3, ge=1)
     agent_max_searches: int = Field(default=2, ge=1)
+    session_max_turns: int = Field(default=10, ge=1, le=100)
 
     @field_validator(
         "app_name",

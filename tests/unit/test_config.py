@@ -20,6 +20,7 @@ _SETTING_ENV_VARS = (
     "TOYAPP_RETRIEVAL_MIN_SIMILARITY",
     "TOYAPP_AGENT_MAX_MODEL_CALLS",
     "TOYAPP_AGENT_MAX_SEARCHES",
+    "TOYAPP_SESSION_MAX_TURNS",
 )
 
 
@@ -48,6 +49,7 @@ def test_settings_defaults_are_safe_for_local_development() -> None:
     assert settings.retrieval_min_similarity == 0.25
     assert settings.agent_max_model_calls == 3
     assert settings.agent_max_searches == 2
+    assert settings.session_max_turns == 10
 
 
 def test_settings_load_prefixed_environment_variables(
@@ -63,6 +65,7 @@ def test_settings_load_prefixed_environment_variables(
     monkeypatch.setenv("TOYAPP_RETRIEVAL_MIN_SIMILARITY", "0.4")
     monkeypatch.setenv("TOYAPP_AGENT_MAX_MODEL_CALLS", "4")
     monkeypatch.setenv("TOYAPP_AGENT_MAX_SEARCHES", "1")
+    monkeypatch.setenv("TOYAPP_SESSION_MAX_TURNS", "20")
 
     settings = AppSettings()
 
@@ -75,6 +78,7 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.retrieval_min_similarity == 0.4
     assert settings.agent_max_model_calls == 4
     assert settings.agent_max_searches == 1
+    assert settings.session_max_turns == 20
 
 
 @pytest.mark.parametrize("port", [0, 65536])
@@ -109,6 +113,8 @@ def test_settings_reject_blank_required_text(field: str) -> None:
         ("retrieval_min_similarity", float("nan")),
         ("agent_max_model_calls", 0),
         ("agent_max_searches", 0),
+        ("session_max_turns", 0),
+        ("session_max_turns", 101),
     ],
 )
 def test_settings_reject_invalid_retrieval_values(field: str, value: float) -> None:
