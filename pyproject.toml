@@ -12,7 +12,9 @@ dependencies = [
     "faiss-cpu>=1.15.1",
     "fastapi>=0.141.1",
     "jinja2>=3.1",
+    "langfuse>=4.7,<5",
     "numpy>=2.0",
+    "openai>=1.40",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "sentence-transformers>=6.1.0",
@@ -55,13 +57,15 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pytest.ini_options]
-addopts = "-p no:rerunfailures -m 'not live'"
+addopts = "-p no:rerunfailures -m 'not live and not model_live and not langfuse_live'"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
     "live: requires a network service or separately downloaded model artefact",
+    "model_live: requires live model credentials, network access, and may incur cost",
+    "langfuse_live: requires live Langfuse credentials and network access",
 ]
 
 [dependency-groups]

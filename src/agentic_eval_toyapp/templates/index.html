@@ -109,7 +109,7 @@
             <div id="sources" class="source-list"></div>
           </section>
 
-          <details id="execution-details" class="execution-details">
+          <details id="execution-details" class="execution-details" open>
             <summary>Execution details</summary>
             <div class="execution-content">
               <dl class="turn-metadata">
@@ -125,11 +125,30 @@
                   <dt>Searches</dt>
                   <dd id="searches">—</dd>
                 </div>
+                <div>
+                  <dt>Final model action</dt>
+                  <dd id="model-action">—</dd>
+                </div>
               </dl>
 
               <section aria-labelledby="actions-heading">
                 <h3 id="actions-heading">Agent actions</h3>
                 <ol id="actions" class="compact-list"></ol>
+              </section>
+
+              <section aria-labelledby="model-actions-heading">
+                <h3 id="model-actions-heading">Structured model actions</h3>
+                <ol id="model-actions" class="compact-list"></ol>
+              </section>
+
+              <section aria-labelledby="controller-events-heading">
+                <h3 id="controller-events-heading">Controller events</h3>
+                <ul id="controller-events" class="compact-list"></ul>
+              </section>
+
+              <section aria-labelledby="validation-findings-heading">
+                <h3 id="validation-findings-heading">Validation findings</h3>
+                <ul id="validation-findings" class="compact-list"></ul>
               </section>
             </div>
           </details>

@@ -16,9 +16,13 @@ const executionDetails = document.querySelector("#execution-details");
 const terminationReason = document.querySelector("#termination-reason");
 const modelCalls = document.querySelector("#model-calls");
 const searches = document.querySelector("#searches");
+const modelAction = document.querySelector("#model-action");
 const citations = document.querySelector("#citations");
 const sources = document.querySelector("#sources");
 const actions = document.querySelector("#actions");
+const modelActions = document.querySelector("#model-actions");
+const controllerEvents = document.querySelector("#controller-events");
+const validationFindings = document.querySelector("#validation-findings");
 
 let sessionId = null;
 let requestInProgress = false;
@@ -173,6 +177,17 @@ function renderList(container, values, emptyLabel) {
   }
 }
 
+function formatModelAction(action) {
+  if (action.kind === "search") {
+    return `search: ${action.query} (top_k=${action.top_k})`;
+  }
+  if (action.kind === "clarify") {
+    return `clarify: ${action.question}`;
+  }
+  const citationCount = action.citations.length;
+  return `answer: ${citationCount} ${citationCount === 1 ? "citation" : "citations"}`;
+}
+
 function resultStatusLabel(result) {
   if (result.status === "answered") {
     return "Answered";
@@ -180,24 +195,22 @@ function resultStatusLabel(result) {
   if (result.status === "clarification_required") {
     return "Needs clarification";
   }
-  if (result.termination_reason === "empty_retrieval") {
-    return "No relevant evidence";
-  }
   return "Failed";
 }
 
 function resultStatusClass(result) {
-  if (result.termination_reason === "empty_retrieval") {
-    return "status-no-evidence";
-  }
   return `status-${result.status}`;
 }
 
-function renderSources(retrievedChunks) {
+function renderSources(retrievedChunks, searchCount) {
   sources.replaceChildren();
   const sourceIds = new Map();
   if (retrievedChunks.length === 0) {
-    sources.append(createTextElement("p", "No source passed the retrieval threshold.", "muted-item"));
+    const emptyMessage =
+      searchCount === 0
+        ? "No retrieval was performed."
+        : "No source passed the retrieval threshold.";
+    sources.append(createTextElement("p", emptyMessage, "muted-item"));
     return sourceIds;
   }
 
@@ -267,8 +280,9 @@ function renderTurnDetails(result) {
   terminationReason.textContent = result.termination_reason.replaceAll("_", " ");
   modelCalls.textContent = String(result.model_calls);
   searches.textContent = String(result.searches);
+  modelAction.textContent = result.model_actions.at(-1)?.kind ?? "None";
 
-  const sourceIds = renderSources(result.retrieved_chunks);
+  const sourceIds = renderSources(result.retrieved_chunks, result.searches);
   renderCitations(result.citations, sourceIds);
   renderList(
     actions,
@@ -277,7 +291,30 @@ function renderTurnDetails(result) {
     ),
     "No public action summary returned.",
   );
-  executionDetails.open = false;
+  renderList(
+    modelActions,
+    result.model_actions.map(formatModelAction),
+    "No valid structured model action was returned.",
+  );
+  renderList(
+    controllerEvents,
+    result.controller_events.map(
+      (event) => `${event.kind.replaceAll("_", " ")}: ${event.detail}`,
+    ),
+    "No controller intervention was required.",
+  );
+  renderList(
+    validationFindings,
+    result.validation_findings.map((finding) => {
+      const citationSuffix =
+        finding.citation_ids.length === 0
+          ? ""
+          : ` (${finding.citation_ids.join(", ")})`;
+      return `${finding.code.replaceAll("_", " ")}: ${finding.detail}${citationSuffix}`;
+    }),
+    "No deterministic citation inconsistency was detected.",
+  );
+  executionDetails.open = true;
 }
 
 function resetDetails() {
@@ -285,13 +322,17 @@ function resetDetails() {
   turnDetails.hidden = true;
   turnStatus.textContent = "Waiting";
   turnStatus.className = "status-badge status-idle";
-  executionDetails.open = false;
+  executionDetails.open = true;
   terminationReason.textContent = "—";
   modelCalls.textContent = "—";
   searches.textContent = "—";
+  modelAction.textContent = "—";
   citations.replaceChildren();
   sources.replaceChildren();
   actions.replaceChildren();
+  modelActions.replaceChildren();
+  controllerEvents.replaceChildren();
+  validationFindings.replaceChildren();
 }
 
 async function createSession() {
@@ -328,7 +369,7 @@ async function submitMessage(event) {
   appendMessage("user", message);
   messageInput.value = "";
   setBusy(true);
-  setStatus("Searching the corpus and preparing a response…");
+  setStatus("Reviewing the question and preparing a response…");
   const workingIndicator = appendWorkingIndicator();
   try {
     const response = await apiRequest(`/sessions/${sessionId}/messages`, {

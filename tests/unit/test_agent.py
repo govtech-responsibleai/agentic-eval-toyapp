@@ -13,14 +13,21 @@ from agentic_eval_toyapp.models import (
     AgentTurnStatus,
     AnswerAction,
     ClarifyAction,
+    ControllerEventKind,
     ConversationMessage,
     ConversationRole,
     DocumentMetadata,
+    ModelRequest,
     RetrievedChunk,
     SearchAction,
     TerminationReason,
+    ValidationFindingCode,
 )
-from agentic_eval_toyapp.providers import ScriptedGenerationProvider
+from agentic_eval_toyapp.providers import (
+    InvalidGenerationActionError,
+    ScriptedGenerationProvider,
+)
+from agentic_eval_toyapp.retrieval import load_corpus
 
 
 def _chunk(chunk_id: str = "TRAVEL-001#1") -> RetrievedChunk:
@@ -54,11 +61,43 @@ class _StubRetriever:
         return self._results_by_query.get(query, ())
 
 
+class _RepairingProvider:
+    """Fail one structured action, then return a valid direct answer."""
+
+    model_id = "repairing-fixture"
+    revision = "v1"
+
+    def __init__(self) -> None:
+        self.requests: list[ModelRequest] = []
+
+    def generate_action(self, request: ModelRequest) -> AgentAction:
+        self.requests.append(request)
+        if len(self.requests) == 1:
+            raise InvalidGenerationActionError("invalid fixture action")
+        return AnswerAction(
+            markdown="I can help with Northstar policies.", citations=()
+        )
+
+
+class _AlwaysInvalidProvider:
+    """Return no protocol-valid action across the one allowed repair."""
+
+    model_id = "invalid-fixture"
+    revision = "v1"
+
+    def __init__(self) -> None:
+        self.requests: list[ModelRequest] = []
+
+    def generate_action(self, request: ModelRequest) -> AgentAction:
+        self.requests.append(request)
+        raise InvalidGenerationActionError("invalid fixture action")
+
+
 def _agent(
     actions: tuple[AgentAction, ...],
     retriever: _StubRetriever,
     *,
-    max_model_calls: int = 3,
+    max_model_calls: int = 4,
     max_searches: int = 2,
 ) -> tuple[RagAgent, ScriptedGenerationProvider]:
     provider = ScriptedGenerationProvider(actions)
@@ -103,13 +142,23 @@ def test_agent_searches_then_returns_grounded_answer() -> None:
     assert result.searches == 1
     assert retriever.calls == [("domestic meals", 3)]
     assert provider.requests[0].history == history
+    assert provider.requests[0].available_actions == (
+        AgentActionKind.SEARCH,
+        AgentActionKind.CLARIFY,
+        AgentActionKind.ANSWER,
+    )
     assert provider.requests[1].retrieved_chunks == (chunk,)
+    assert provider.requests[1].available_actions == (
+        AgentActionKind.SEARCH,
+        AgentActionKind.CLARIFY,
+        AgentActionKind.ANSWER,
+    )
     assert [summary.action for summary in result.action_summaries] == [
         AgentActionKind.SEARCH,
         AgentActionKind.ANSWER,
     ]
     assert [summary.detail for summary in result.action_summaries] == [
-        "Retrieved 1 chunk.",
+        "Retrieved 1 chunk with top_k=3.",
         "Returned an answer with 1 citation.",
     ]
     assert all(
@@ -155,13 +204,13 @@ def test_agent_action_summaries_pluralise_multiple_counts() -> None:
     result = agent.run("Summarise travel policy")
 
     assert [summary.detail for summary in result.action_summaries] == [
-        "Retrieved 2 chunks.",
+        "Retrieved 2 chunks with top_k=3.",
         "Returned an answer with 2 citations.",
     ]
 
 
-def test_agent_rejects_answer_without_retrieval() -> None:
-    """A provider cannot bypass grounding by answering immediately."""
+def test_agent_preserves_answer_without_retrieval_for_metis() -> None:
+    """Tool choice remains model behavior for METIS to evaluate."""
     agent, _ = _agent(
         (
             AnswerAction(
@@ -174,45 +223,224 @@ def test_agent_rejects_answer_without_retrieval() -> None:
 
     result = agent.run("What is the limit?")
 
-    assert result.status is AgentTurnStatus.FAILED
-    assert result.termination_reason is TerminationReason.ANSWER_WITHOUT_RETRIEVAL
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.termination_reason is TerminationReason.ANSWERED
+    assert result.searches == 0
+    assert result.message == "The limit is $50. [TRAVEL-001#1]"
+    assert [finding.code for finding in result.validation_findings] == [
+        ValidationFindingCode.CITATION_NOT_RETRIEVED
+    ]
 
 
-def test_agent_stops_on_empty_retrieval() -> None:
-    """No evidence produces a safe failure rather than an unsupported answer."""
+def test_agent_accepts_direct_capability_answer_without_findings() -> None:
+    """System-prompt capability answers need neither retrieval nor citations."""
+    expected_action = AnswerAction(
+        markdown="I support eight Northstar policy areas.",
+        citations=(),
+    )
+    agent, provider = _agent((expected_action,), _StubRetriever({}))
+
+    result = agent.run("What policies do you support?")
+
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.searches == 0
+    assert result.retrieved_chunks == ()
+    assert result.validation_findings == ()
+    assert result.model_actions == (expected_action,)
+    assert provider.requests[0].available_actions == tuple(AgentActionKind)
+
+
+def test_agent_uses_model_selected_retrieval_breadth() -> None:
+    """The model may choose bounded breadth while ranking stays deterministic."""
+    chunk = _chunk()
+    retriever = _StubRetriever({"broad policy question": (chunk,)})
     agent, _ = _agent(
-        (SearchAction(query="unknown policy"),),
+        (
+            SearchAction(query="broad policy question", top_k=8),
+            AnswerAction(
+                markdown="The policy contains a travel limit. [TRAVEL-001#1]",
+                citations=("TRAVEL-001#1",),
+            ),
+        ),
+        retriever,
+    )
+
+    result = agent.run("Summarise the relevant policies")
+
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert retriever.calls == [("broad policy question", 8)]
+    assert result.action_summaries[0].detail.endswith("top_k=8.")
+
+
+def test_agent_repairs_one_invalid_structured_action() -> None:
+    """A single schema mistake gets one bounded, observable correction call."""
+    provider = _RepairingProvider()
+    agent = RagAgent(
+        provider=provider,
+        retriever=_StubRetriever({}),
+        system_prompt="Choose one valid action.",
+    )
+
+    result = agent.run("What can you do?")
+
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.model_calls == 2
+    assert provider.requests[1].action_feedback is not None
+    assert [event.kind for event in result.controller_events] == [
+        ControllerEventKind.STRUCTURED_ACTION_REPAIRED
+    ]
+
+
+def test_agent_fails_after_one_unsuccessful_structured_action_repair() -> None:
+    """Protocol repair is bounded and cannot become an unbounded model loop."""
+    provider = _AlwaysInvalidProvider()
+    agent = RagAgent(
+        provider=provider,
+        retriever=_StubRetriever({}),
+        system_prompt="Choose one valid action.",
+    )
+
+    result = agent.run("What can you do?")
+
+    assert result.status is AgentTurnStatus.FAILED
+    assert result.termination_reason is TerminationReason.PROVIDER_ERROR
+    assert result.model_calls == 2
+    assert len(provider.requests) == 2
+    assert provider.requests[1].action_feedback is not None
+    assert result.controller_events == ()
+
+
+def test_agent_passes_empty_retrieval_to_provider_for_a_response() -> None:
+    """No evidence must remain visible to the model before it responds."""
+    agent, provider = _agent(
+        (
+            SearchAction(query="unknown policy"),
+            AnswerAction(
+                markdown="No relevant evidence was found.",
+                citations=(),
+            ),
+        ),
         _StubRetriever({"unknown policy": ()}),
     )
 
     result = agent.run("Unknown question")
 
-    assert result.termination_reason is TerminationReason.EMPTY_RETRIEVAL
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.termination_reason is TerminationReason.ANSWERED
+    assert result.message == "No relevant evidence was found."
+    assert result.citations == ()
+    assert result.retrieved_chunks == ()
+    assert result.model_calls == 2
     assert result.searches == 1
-    assert result.action_summaries[0].detail == "Retrieved 0 chunks."
+    assert provider.requests[1].retrieval_attempted is True
+    assert provider.requests[1].retrieved_chunks == ()
+    assert [summary.detail for summary in result.action_summaries] == [
+        "Retrieved 0 chunks with top_k=3.",
+        "Returned an answer with 0 citations.",
+    ]
 
 
-def test_agent_stops_on_repeated_normalised_search() -> None:
-    """Case and whitespace changes cannot evade repeated-search detection."""
+def test_agent_preserves_unsupported_zero_evidence_model_response() -> None:
+    """A hallucination after empty retrieval must remain observable to METIS."""
+    agent, _ = _agent(
+        (
+            SearchAction(query="unknown policy"),
+            AnswerAction(
+                markdown="Employees receive a fictional $900 allowance.",
+                citations=(),
+            ),
+        ),
+        _StubRetriever({"unknown policy": ()}),
+    )
+
+    result = agent.run("What is the unknown allowance?")
+
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.message == "Employees receive a fictional $900 allowance."
+    assert result.retrieved_chunks == ()
+    assert result.citations == ()
+
+
+def test_agent_accepts_zero_citations_when_candidates_do_not_support_answer() -> None:
+    """Retrieved candidates are not necessarily relevant supporting evidence."""
+    chunk = _chunk()
+    agent, _ = _agent(
+        (
+            SearchAction(query="sick leave"),
+            AnswerAction(
+                markdown="No relevant sick-leave evidence was found.",
+                citations=(),
+            ),
+        ),
+        _StubRetriever({"sick leave": (chunk,)}),
+    )
+
+    result = agent.run("I need help with sick leave")
+
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.termination_reason is TerminationReason.ANSWERED
+    assert result.retrieved_chunks == (chunk,)
+    assert result.citations == ()
+    assert result.action_summaries[-1].detail == "Returned an answer with 0 citations."
+
+
+def test_agent_recovers_from_repeated_normalised_search() -> None:
+    """A repeated query gets one constrained correction call, not an early failure."""
     chunk = _chunk()
     retriever = _StubRetriever({"travel policy": (chunk,)})
-    agent, _ = _agent(
+    agent, provider = _agent(
         (
             SearchAction(query="travel policy"),
             SearchAction(query="  TRAVEL   POLICY "),
+            AnswerAction(
+                markdown="The limit is $50. [TRAVEL-001#1]",
+                citations=("TRAVEL-001#1",),
+            ),
         ),
         retriever,
     )
 
     result = agent.run("Travel question")
 
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.termination_reason is TerminationReason.ANSWERED
+    assert result.model_calls == 3
+    assert result.searches == 1
+    assert len(retriever.calls) == 1
+    assert provider.requests[2].available_actions == (
+        AgentActionKind.CLARIFY,
+        AgentActionKind.ANSWER,
+    )
+    assert provider.requests[2].action_feedback is not None
+    assert "repeated a query" in provider.requests[2].action_feedback
+    assert [event.kind for event in result.controller_events] == [
+        ControllerEventKind.REPEATED_SEARCH_REJECTED
+    ]
+
+
+def test_agent_stops_on_repeated_search_without_a_correction_call() -> None:
+    """A repeated query remains a typed failure when no model call remains."""
+    chunk = _chunk()
+    retriever = _StubRetriever({"travel policy": (chunk,)})
+    agent, _ = _agent(
+        (
+            SearchAction(query="travel policy"),
+            SearchAction(query="TRAVEL POLICY"),
+        ),
+        retriever,
+        max_model_calls=2,
+    )
+
+    result = agent.run("Travel question")
+
     assert result.termination_reason is TerminationReason.REPEATED_SEARCH
+    assert result.model_calls == 2
     assert result.searches == 1
     assert len(retriever.calls) == 1
 
 
-def test_agent_rejects_citation_that_was_not_retrieved() -> None:
-    """Declared citations must be a subset of retrieved chunk IDs."""
+def test_agent_records_citation_that_was_not_retrieved() -> None:
+    """Invalid citations remain observable without replacing the answer."""
     chunk = _chunk()
     agent, _ = _agent(
         (
@@ -227,7 +455,35 @@ def test_agent_rejects_citation_that_was_not_retrieved() -> None:
 
     result = agent.run("What is the limit?")
 
-    assert result.termination_reason is TerminationReason.INVALID_CITATIONS
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.termination_reason is TerminationReason.ANSWERED
+    assert result.message == "The limit is $80. [TRAVEL-001#2]"
+    assert result.validation_findings[0].code is (
+        ValidationFindingCode.CITATION_NOT_RETRIEVED
+    )
+    assert result.validation_findings[0].citation_ids == ("TRAVEL-001#2",)
+
+
+def test_agent_preserves_duplicate_citations_as_a_finding() -> None:
+    """Duplicate model output remains intact for downstream evaluation."""
+    chunk = _chunk()
+    agent, _ = _agent(
+        (
+            SearchAction(query="travel"),
+            AnswerAction(
+                markdown="The limit is $50. [TRAVEL-001#1]",
+                citations=("TRAVEL-001#1", "TRAVEL-001#1"),
+            ),
+        ),
+        _StubRetriever({"travel": (chunk,)}),
+    )
+
+    result = agent.run("What is the limit?")
+
+    assert result.citations == ("TRAVEL-001#1", "TRAVEL-001#1")
+    assert [finding.code for finding in result.validation_findings] == [
+        ValidationFindingCode.DUPLICATE_CITATION
+    ]
 
 
 @pytest.mark.parametrize(
@@ -240,10 +496,10 @@ def test_agent_rejects_citation_that_was_not_retrieved() -> None:
         ),
     ],
 )
-def test_agent_rejects_markdown_and_declared_citation_mismatch(
+def test_agent_records_markdown_and_declared_citation_mismatch(
     markdown: str, citations: tuple[str, ...]
 ) -> None:
-    """Inline citations and the structured citation list must agree exactly."""
+    """Citation disagreement is returned as a non-blocking finding."""
     chunk = _chunk()
     agent, _ = _agent(
         (
@@ -255,13 +511,43 @@ def test_agent_rejects_markdown_and_declared_citation_mismatch(
 
     result = agent.run("What is the limit?")
 
-    assert result.termination_reason is TerminationReason.CITATION_MISMATCH
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.termination_reason is TerminationReason.ANSWERED
+    assert result.validation_findings[-1].code is (
+        ValidationFindingCode.CITATION_DECLARATION_MISMATCH
+    )
+
+
+def test_agent_preserves_answer_with_multiple_independent_findings() -> None:
+    """One imperfect answer can expose every applicable mechanical observation."""
+    chunk = _chunk()
+    agent, _ = _agent(
+        (
+            SearchAction(query="travel"),
+            AnswerAction(
+                markdown="The limit is $80. [TRAVEL-001#1]",
+                citations=("TRAVEL-001#2", "TRAVEL-001#2"),
+            ),
+        ),
+        _StubRetriever({"travel": (chunk,)}),
+    )
+
+    result = agent.run("What is the limit?")
+
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert result.message == "The limit is $80. [TRAVEL-001#1]"
+    assert result.citations == ("TRAVEL-001#2", "TRAVEL-001#2")
+    assert [finding.code for finding in result.validation_findings] == [
+        ValidationFindingCode.DUPLICATE_CITATION,
+        ValidationFindingCode.CITATION_NOT_RETRIEVED,
+        ValidationFindingCode.CITATION_DECLARATION_MISMATCH,
+    ]
 
 
 def test_agent_enforces_search_and_model_call_limits() -> None:
     """Independent bounds prevent unbounded tool or provider loops."""
     chunk = _chunk()
-    search_limited_agent, _ = _agent(
+    search_limited_agent, search_limited_provider = _agent(
         (SearchAction(query="one"), SearchAction(query="two")),
         _StubRetriever({"one": (chunk,), "two": (chunk,)}),
         max_searches=1,
@@ -278,6 +564,10 @@ def test_agent_enforces_search_and_model_call_limits() -> None:
     assert search_limited.termination_reason is TerminationReason.SEARCH_LIMIT
     assert search_limited.model_calls == 2
     assert search_limited.searches == 1
+    assert search_limited_provider.requests[1].available_actions == (
+        AgentActionKind.CLARIFY,
+        AgentActionKind.ANSWER,
+    )
     assert call_limited.termination_reason is TerminationReason.MODEL_CALL_LIMIT
     assert call_limited.model_calls == 1
     assert call_limited.searches == 1
@@ -338,6 +628,7 @@ def test_agent_accepts_unicode_user_message() -> None:
         ({"max_model_calls": 0}, "max_model_calls"),
         ({"max_searches": 0}, "max_searches"),
         ({"retrieval_top_k": 0}, "retrieval_top_k"),
+        ({"retrieval_top_k": 9}, "retrieval_top_k"),
     ],
 )
 def test_agent_rejects_invalid_construction_limits(
@@ -370,3 +661,13 @@ def test_load_system_prompt_reads_default_and_rejects_missing_or_blank(
         load_system_prompt(blank_path)
     with pytest.raises(PromptLoadError, match="could not read"):
         load_system_prompt(tmp_path / "missing.md")
+
+
+def test_default_system_prompt_names_every_supported_policy() -> None:
+    """Capability answers must cover the complete fixed corpus catalogue."""
+    prompt = load_system_prompt()
+    corpus_titles = {chunk.title for chunk in load_corpus().chunks}
+
+    assert "chatbot assisting employees" in prompt
+    assert len(corpus_titles) == 8
+    assert all(title in prompt for title in corpus_titles)

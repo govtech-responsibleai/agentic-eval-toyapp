@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from typing import cast
 
+import pytest
 from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
@@ -18,7 +19,9 @@ class _IntrospectionAgent:
         user_message: str,
         *,
         history: Sequence[ConversationMessage] = (),
+        session_id: str | None = None,
     ) -> AgentTurnResult:
+        del session_id
         raise AssertionError("introspection endpoints must not execute the agent")
 
 
@@ -29,6 +32,7 @@ def build_client() -> Client:
         host="127.0.0.1",
         port=8000,
         log_level=LogLevel.INFO,
+        langfuse_enabled=False,
     )
     return cast(Client, TestClient(create_app(settings, agent=_IntrospectionAgent())))
 
@@ -62,6 +66,11 @@ def test_ready_reports_session_and_agent_dependencies() -> None:
                 "name": "session_store",
                 "status": "pass",
                 "detail": "retains up to 10 complete turns",
+            },
+            {
+                "name": "langfuse_tracing",
+                "status": "pass",
+                "detail": "disabled",
             },
             {
                 "name": "rag_agent",
@@ -112,6 +121,17 @@ def test_capabilities_advertise_only_operational_chat_features() -> None:
         "actions": ["search", "clarify", "answer"],
         "output_formats": ["application/json"],
     }
+
+
+def test_introspection_contract_ignores_local_langfuse_enablement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A developer's `.env` must not change deterministic endpoint tests."""
+    monkeypatch.setenv("TOYAPP_LANGFUSE_ENABLED", "true")
+
+    response: Response = build_client().get("/api/v1/capabilities")
+
+    assert response.json()["features"]["langfuse_tracing"] is False
 
 
 def test_openapi_contains_only_the_intended_application_routes() -> None:

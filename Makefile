@@ -1,4 +1,4 @@
-.PHONY: help install run lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live ci clean
+.PHONY: help install run lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live test-model-live test-langfuse-live ci clean
 
 PYTHON_SOURCES := src tests
 
@@ -17,6 +17,8 @@ help:
 	@printf "  make test          Run all offline tests\n"
 	@printf "  make test-unit     Run unit tests only\n"
 	@printf "  make test-live     Run opt-in tests that may download models or call services\n"
+	@printf "  make test-model-live  Test the configured live model provider\n"
+	@printf "  make test-langfuse-live  Test trace export against configured Langfuse\n"
 	@printf "  make ci            Run the complete offline CI suite\n"
 	@printf "  make clean         Remove generated Python and test caches\n"
 
@@ -64,6 +66,12 @@ test-unit:
 
 test-live:
 	uv run pytest -m live
+
+test-model-live:
+	uv run pytest -m model_live
+
+test-langfuse-live:
+	uv run pytest -m langfuse_live
 
 ci:
 	$(MAKE) lock-check

@@ -41,14 +41,30 @@ Useful commands:
 | `make fix` | Apply safe lint fixes and formatting. |
 | `make test` | Run all offline tests. |
 | `make test-unit` | Run unit tests only. |
-| `make test-live` | Run opt-in checks that may download a model or call a future external service. |
+| `make test-live` | Run opt-in checks against the pinned embedding model. |
+| `make test-model-live` | Make a real structured request to the configured model provider. |
+| `make test-langfuse-live` | Export and retrieve one synthetic API turn using configured Langfuse. |
 | `make clean` | Remove generated Python and test caches. |
 
-Start the current API:
+Copy `.env.example` to `.env`, then replace the `OPENAI_API_KEY` and
+`OPENAI_BASE_URL` placeholders with credentials for an OpenAI-compatible
+provider such as Platform AI. Start the model-backed application with:
 
 ```bash
 make run
 ```
+
+To run the same browser and API without credentials or model charges, select
+the deterministic provider explicitly for that process:
+
+```bash
+TOYAPP_GENERATION_PROVIDER=deterministic make run
+```
+
+Langfuse tracing is independently opt-in. Configure its three connection
+values in `.env`, set `TOYAPP_LANGFUSE_ENABLED=true`, and leave
+`TOYAPP_LANGFUSE_FLUSH_ON_TURN=true` for evaluation runs. The app session UUID
+then becomes the Langfuse session ID used by METIS.
 
 Then inspect:
 
@@ -60,10 +76,12 @@ http://127.0.0.1:8000/api/v1/capabilities
 http://127.0.0.1:8000/docs
 ```
 
-Application startup loads the pinned embedding model, embeds the corpus, and
-builds the FAISS index before the server accepts requests. If the model is not
-already cached, startup first downloads it from Hugging Face. `/ready` reports
-the completed startup state; it does not trigger first-use initialisation.
+Application startup validates the selected generation provider, loads the
+pinned embedding model, embeds the corpus, and builds the FAISS index before
+the server accepts requests. If the embedding model is not already cached,
+startup first downloads it from Hugging Face. Missing live credentials fail
+startup rather than silently selecting deterministic behavior. `/ready`
+reports the completed startup state; it does not make a billable provider call.
 
 Create a session:
 
@@ -82,17 +100,38 @@ curl -X POST \
 curl http://127.0.0.1:8000/api/v1/sessions/<session_id>
 ```
 
-The default pre-model provider performs semantic search and returns the
-retrieved source text with citations. It is deterministic and does not call a
-generation-model API. A later provider will use the same agent interface for
-model-backed answers.
+The default live provider makes OpenAI-compatible structured-output requests.
+On every new user turn, the model may search, ask for clarification, or answer
+directly. The system prompt identifies the app as a Northstar employee-policy
+assistant and lists all eight supported policy areas, so conversational and
+capability questions do not require retrieval. Questions about policy contents
+should use semantic search, but tool choice remains model behavior for METIS to
+evaluate rather than a controller-enforced outcome.
+
+A search action includes a model-selected `top_k` from 1 through 8. Retrieved
+chunks are candidates: the model analyses their relevance and cites only the
+subset used. Empty and irrelevant retrieval results are passed back to the
+model, which may answer without citations. The deterministic provider follows
+the same typed action loop but performs no external model calls.
+
+The controller validates API and action schemas, enforces tool/model-call
+limits, rejects duplicate search execution, and allows one structured-action
+repair. It does not replace a completed answer because retrieval was skipped or
+citations were imperfect. Answers preserve all structured `model_actions` in
+order and expose
+non-blocking `validation_findings` for duplicate citations, citations that were
+not retrieved, and disagreement between inline and structured citations.
+`failed` is reserved for technical or unrecoverable protocol outcomes.
 
 The browser page creates a session automatically. It displays the answer,
 citations, retrieved chunks and similarity scores, public action summaries,
+controller events, citation-validation findings, ordered structured model
+actions and the final model action,
 termination reason, model-call count, and search count returned by the same
-API used by METIS. Use **New session** to clear the browser transcript and
-create a separate backend session. Enter sends a message; Shift+Enter inserts
-a new line.
+API used by METIS. Execution details are open by default and remain
+collapsible. Use **New session** to clear the browser transcript and create a
+separate backend session. Enter sends a message; Shift+Enter inserts a new
+line.
 
 | Method and path | Purpose |
 |---|---|
@@ -125,16 +164,17 @@ agentic-eval-toyapp/
 │       ├── __init__.py                       # Package version
 │       ├── agent.py                          # Bounded RAG agent loop
 │       ├── app.py                            # FastAPI wiring, readiness, session, and message endpoints
-│       ├── config.py                         # Validated service, retrieval, agent, and session settings
+│       ├── config.py                         # Validated service, provider, retrieval, agent, and session settings
 │       ├── embeddings.py                     # Embedding interface, validation, and providers
 │       ├── models.py                         # API, retrieval, agent, session, and provenance schemas
-│       ├── providers.py                      # Generation interface plus scripted and extractive providers
+│       ├── providers.py                      # Scripted, extractive, and OpenAI-compatible providers
 │       ├── prompts/
 │       │   └── system.md                     # Versioned grounding and action instructions
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
 │       ├── resources/
 │       │   └── documents.json                # Synthetic Northstar policy corpus
 │       ├── sessions.py                       # Thread-safe bounded in-memory conversation state
+│       ├── tracing.py                        # No-op and Langfuse turn-observation implementations
 │       ├── static/
 │       │   ├── app.js                        # Safe browser API client and result rendering
 │       │   └── style.css                     # Responsive local browser styling
@@ -147,6 +187,8 @@ agentic-eval-toyapp/
     │   ├── test_api_live.py                  # Opt-in default semantic API smoke test
     │   ├── test_frontend.py                  # Browser page, asset, and rendering-safety tests
     │   ├── test_health_api.py                # FastAPI health and capability contract tests
+    │   ├── test_langfuse_live.py             # Opt-in Langfuse export and retrieval test
+    │   ├── test_model_live.py                # Opt-in live-provider connection and schema test
     │   └── test_retrieval_live.py            # Opt-in pinned-model semantic retrieval tests
     └── unit/
         ├── test_config.py                    # Configuration validation tests
@@ -154,9 +196,10 @@ agentic-eval-toyapp/
         ├── test_agent.py                     # Agent flow, grounding, and limit tests
         ├── test_models.py                    # Pydantic contract and immutability tests
         ├── test_package.py                   # Package/distribution version consistency test
-        ├── test_providers.py                 # Scripted provider ordering and failure tests
+        ├── test_providers.py                 # Deterministic and live provider boundary tests
         ├── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
-        └── test_sessions.py                  # Session isolation, history, and truncation tests
+        ├── test_sessions.py                  # Session isolation, history, and truncation tests
+        └── test_tracing.py                   # Offline trace shape and session-correlation tests
 ```
 
 The local `design.md` is intentionally excluded because it is not committed.
@@ -173,18 +216,14 @@ agentic-eval-toyapp/
 ├── compose.yaml                               # Local container configuration
 ├── src/agentic_eval_toyapp/
 │   ├── scenarios.py                           # Controlled functional-case selection and mutations
-│   ├── tracing.py                             # Langfuse tracing abstraction and implementation
 │   └── resources/
 │       └── cases.yaml                         # Opaque controlled-case runtime inputs
 └── tests/
     ├── fixtures/
     │   ├── ground_truth.yaml                  # Evaluation-only expected labels
     │   └── model_actions/                     # Deterministic generation fixtures
-    ├── integration/
-    │   └── test_langfuse_live.py              # Opt-in METIS trace-retrieval test
     └── unit/
-        ├── test_scenarios.py                  # Control/defect isolation tests
-        └── test_tracing.py                    # Trace shape, metadata, and redaction tests
+        └── test_scenarios.py                  # Control/defect isolation tests
 ```
 
 ## Retrieval design
@@ -205,7 +244,11 @@ The validated `northstar-policies-v1` corpus contains 16 chunks from eight synth
 fd79e97d578089ebef4b5c3bf7ada9ee4e5545bf72c66fbb8fb1abd2fa8682ee
 ```
 
-The corpus and FAISS index are read-only during a run. Results are filtered by the configured cosine threshold, ordered by descending score, and use chunk ID as a deterministic tie-break.
+The corpus and FAISS index are read-only during a run. Results are filtered by
+the configured cosine threshold, ordered by descending score, and use chunk ID
+as a deterministic tie-break. The model can request between one and eight
+results per search; the configured `TOYAPP_RETRIEVAL_TOP_K` value is the
+default used by the deterministic provider.
 
 Offline CI uses fixed test embeddings and does not download the model. To run
 the six natural-language retrieval checks and the default API smoke test
@@ -217,6 +260,17 @@ make test-live
 
 The first live run downloads the model to the local Hugging Face cache. The retriever is a Python component designed for use by the agent and chat API.
 
+To verify Platform AI credentials, connectivity, and structured-output support
+with one real request:
+
+```bash
+make test-model-live
+```
+
+This test is excluded from offline CI because it requires credentials, network
+access, and may incur provider cost. It validates the action schema rather than
+exact response wording.
+
 ## Intended workflow
 
 ```text
@@ -227,7 +281,7 @@ FastAPI session/message API
 Single bounded RAG agent
        ├── ask a clarification question
        ├── search the FAISS knowledge base
-       └── return a cited Markdown answer
+       └── return a cited answer or an observable zero-evidence response
        ↓
 Langfuse session trace
        ↓

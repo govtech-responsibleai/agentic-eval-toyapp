@@ -185,6 +185,7 @@ class SearchAction(ApiModel):
 
     kind: Literal["search"] = "search"
     query: NonEmptyString
+    top_k: int = Field(default=3, ge=1, le=8)
 
 
 class ClarifyAction(ApiModel):
@@ -195,18 +196,11 @@ class ClarifyAction(ApiModel):
 
 
 class AnswerAction(ApiModel):
-    """Return a grounded Markdown answer and declared chunk citations."""
+    """Return Markdown and the model's declared chunk citations unchanged."""
 
     kind: Literal["answer"] = "answer"
     markdown: NonEmptyString
-    citations: tuple[NonEmptyString, ...] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def validate_unique_citations(self) -> Self:
-        """Avoid ambiguous duplicate citation declarations."""
-        if len(self.citations) != len(set(self.citations)):
-            raise ValueError("citations must be unique")
-        return self
+    citations: tuple[NonEmptyString, ...]
 
 
 AgentAction = Annotated[
@@ -222,6 +216,8 @@ class ModelRequest(ApiModel):
     user_message: NonEmptyString
     history: tuple[ConversationMessage, ...] = ()
     retrieved_chunks: tuple[RetrievedChunk, ...] = ()
+    retrieval_attempted: bool = False
+    action_feedback: NonEmptyString | None = None
     available_actions: tuple[AgentActionKind, ...] = (
         AgentActionKind.SEARCH,
         AgentActionKind.CLARIFY,
@@ -229,12 +225,59 @@ class ModelRequest(ApiModel):
     )
     model_call_number: int = Field(ge=1)
     remaining_searches: int = Field(ge=0)
+    default_top_k: int = Field(default=3, ge=1, le=8)
+
+    @model_validator(mode="after")
+    def validate_retrieval_state(self) -> Self:
+        """Keep retrieval context and the current action budget consistent."""
+        if self.retrieved_chunks and not self.retrieval_attempted:
+            raise ValueError("retrieved chunks require an attempted retrieval")
+        if not self.available_actions:
+            raise ValueError("at least one available action is required")
+        if len(self.available_actions) != len(set(self.available_actions)):
+            raise ValueError("available actions must be unique")
+        if (
+            AgentActionKind.SEARCH in self.available_actions
+            and self.remaining_searches == 0
+        ):
+            raise ValueError("search cannot be available when no searches remain")
+        return self
 
 
 class AgentActionSummary(ApiModel):
     """Observable action record that excludes private chain-of-thought."""
 
     action: AgentActionKind
+    detail: NonEmptyString
+
+
+class ValidationFindingCode(StrEnum):
+    """Deterministic citation inconsistencies preserved for evaluation."""
+
+    CITATION_NOT_RETRIEVED = "citation_not_retrieved"
+    CITATION_DECLARATION_MISMATCH = "citation_declaration_mismatch"
+    DUPLICATE_CITATION = "duplicate_citation"
+
+
+class ValidationFinding(ApiModel):
+    """One non-blocking, mechanically detected citation inconsistency."""
+
+    code: ValidationFindingCode
+    detail: NonEmptyString
+    citation_ids: tuple[NonEmptyString, ...] = ()
+
+
+class ControllerEventKind(StrEnum):
+    """Recoverable controller interventions visible to evaluators."""
+
+    REPEATED_SEARCH_REJECTED = "repeated_search_rejected"
+    STRUCTURED_ACTION_REPAIRED = "structured_action_repaired"
+
+
+class ControllerEvent(ApiModel):
+    """One bounded controller intervention without private reasoning."""
+
+    kind: ControllerEventKind
     detail: NonEmptyString
 
 
@@ -251,11 +294,7 @@ class TerminationReason(StrEnum):
 
     ANSWERED = "answered"
     CLARIFICATION_REQUIRED = "clarification_required"
-    EMPTY_RETRIEVAL = "empty_retrieval"
     REPEATED_SEARCH = "repeated_search"
-    ANSWER_WITHOUT_RETRIEVAL = "answer_without_retrieval"
-    INVALID_CITATIONS = "invalid_citations"
-    CITATION_MISMATCH = "citation_mismatch"
     MODEL_CALL_LIMIT = "model_call_limit"
     SEARCH_LIMIT = "search_limit"
     PROVIDER_ERROR = "provider_error"
@@ -270,6 +309,9 @@ class AgentTurnResult(ApiModel):
     citations: tuple[NonEmptyString, ...] = ()
     retrieved_chunks: tuple[RetrievedChunk, ...] = ()
     action_summaries: tuple[AgentActionSummary, ...] = ()
+    controller_events: tuple[ControllerEvent, ...] = ()
+    validation_findings: tuple[ValidationFinding, ...] = ()
+    model_actions: tuple[AgentAction, ...] = ()
     termination_reason: TerminationReason
     model_calls: int = Field(ge=0)
     searches: int = Field(ge=0)
@@ -283,11 +325,18 @@ class AgentTurnResult(ApiModel):
         if self.status is AgentTurnStatus.ANSWERED:
             if self.termination_reason is not TerminationReason.ANSWERED:
                 raise ValueError("answered status requires answered termination reason")
-            if not self.retrieved_chunks or not self.citations:
-                raise ValueError("answered results require evidence and citations")
-            retrieved_ids = {chunk.chunk_id for chunk in self.retrieved_chunks}
-            if not set(self.citations) <= retrieved_ids:
-                raise ValueError("answer citations must refer to retrieved chunks")
+            if not self.model_actions or not isinstance(
+                self.model_actions[-1], AnswerAction
+            ):
+                raise ValueError("answered results require the final answer action")
+            final_answer = self.model_actions[-1]
+            if (
+                self.message != final_answer.markdown
+                or self.citations != final_answer.citations
+            ):
+                raise ValueError(
+                    "answered result must preserve the final answer action"
+                )
         elif self.status is AgentTurnStatus.CLARIFICATION_REQUIRED:
             if self.termination_reason is not TerminationReason.CLARIFICATION_REQUIRED:
                 raise ValueError(
@@ -295,6 +344,17 @@ class AgentTurnResult(ApiModel):
                 )
             if self.citations:
                 raise ValueError("clarification results cannot contain citations")
+            if not self.model_actions or not isinstance(
+                self.model_actions[-1], ClarifyAction
+            ):
+                raise ValueError(
+                    "clarification results require the final clarification action"
+                )
+            final_clarification = self.model_actions[-1]
+            if self.message != final_clarification.question:
+                raise ValueError(
+                    "clarification result must preserve the final clarification action"
+                )
         else:
             if self.termination_reason in {
                 TerminationReason.ANSWERED,
@@ -303,6 +363,8 @@ class AgentTurnResult(ApiModel):
                 raise ValueError("failed status requires a failure termination reason")
             if self.citations:
                 raise ValueError("failed results cannot contain citations")
+            if self.validation_findings:
+                raise ValueError("failed results cannot contain validation findings")
         return self
 
 
