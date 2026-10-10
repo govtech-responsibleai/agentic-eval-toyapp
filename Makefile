@@ -1,11 +1,15 @@
-.PHONY: help install run lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live test-model-live test-langfuse-live ci clean
+.PHONY: help install run trace-cases-list trace-case lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live test-model-live test-langfuse-live ci clean
 
-PYTHON_SOURCES := src tests
+PYTHON_SOURCES := src tests trace_cases
+TRACE_METRIC_ARGUMENT = $(if $(strip $(METRIC)),--metric "$(METRIC)",)
+TRACE_VARIANT_ARGUMENT = $(if $(strip $(VARIANT)),--variant "$(VARIANT)",)
 
 help:
 	@printf "Available targets:\n"
 	@printf "  make install       Install the package and development dependencies\n"
 	@printf "  make run           Start the local development API\n"
+	@printf "  make trace-cases-list  List supported controlled trace metrics\n"
+	@printf "  make trace-case [METRIC=...] [VARIANT=...]  Generate controlled traces; omitted filters select all\n"
 	@printf "  make lock-check    Check that the uv lockfile is current\n"
 	@printf "  make lint          Run Ruff lint checks\n"
 	@printf "  make lint-fix      Apply safe Ruff lint fixes\n"
@@ -30,6 +34,12 @@ run:
 		--host "$${TOYAPP_HOST:-127.0.0.1}" \
 		--port "$${TOYAPP_PORT:-8000}" \
 		--reload
+
+trace-cases-list:
+	uv run python -m trace_cases list
+
+trace-case:
+	uv run python -m trace_cases generate $(TRACE_METRIC_ARGUMENT) $(TRACE_VARIANT_ARGUMENT)
 
 lock-check:
 	uv lock --check
@@ -79,5 +89,5 @@ ci:
 	$(MAKE) test
 
 clean:
-	find src tests -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+	find src tests trace_cases -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 	rm -rf .pytest_cache .ruff_cache .pyright .coverage htmlcov

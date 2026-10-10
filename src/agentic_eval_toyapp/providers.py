@@ -3,9 +3,9 @@
 import json
 from collections.abc import Sequence
 from copy import deepcopy
+from importlib import import_module
 from typing import Any, Protocol, cast, runtime_checkable
 
-import langfuse.openai
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
@@ -26,6 +26,12 @@ class GenerationProviderError(RuntimeError):
 
 class InvalidGenerationActionError(GenerationProviderError):
     """Raised when a provider response can be retried with schema feedback."""
+
+
+def _langfuse_openai_client_class() -> Any:
+    """Load the globally instrumenting Langfuse wrapper only when requested."""
+    langfuse_openai_module = cast(Any, import_module("langfuse.openai"))
+    return langfuse_openai_module.OpenAI
 
 
 @runtime_checkable
@@ -74,9 +80,8 @@ class OpenAICompatibleChatClient:
         timeout_seconds: float,
         instrument_with_langfuse: bool = False,
     ) -> None:
-        langfuse_openai_module = cast(Any, langfuse.openai)
         client_class: Any = (
-            langfuse_openai_module.OpenAI if instrument_with_langfuse else OpenAI
+            _langfuse_openai_client_class() if instrument_with_langfuse else OpenAI
         )
         self._instrument_with_langfuse = instrument_with_langfuse
         self._client: Any = client_class(

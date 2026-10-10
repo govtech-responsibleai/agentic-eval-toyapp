@@ -36,6 +36,8 @@ Useful commands:
 | Command | Purpose |
 |---|---|
 | `make run` | Start the local FastAPI development server. |
+| `make trace-cases-list` | List metrics with controlled trace-generation cases. |
+| `make trace-case [METRIC=...] [VARIANT=...]` | Generate live traces; omitted filters select all available values. |
 | `make lock-check` | Verify that `pyproject.toml` and `uv.lock` agree. |
 | `make check` | Run linting, formatting checks, and strict type checking. |
 | `make fix` | Apply safe lint fixes and formatting. |
@@ -159,6 +161,20 @@ agentic-eval-toyapp/
 ├── README.md                                 # Project setup, architecture, and file guide
 ├── pyproject.toml                            # Package metadata, dependencies, and tool configuration
 ├── uv.lock                                   # Exact direct and transitive dependency lock
+├── trace_cases/
+│   ├── __init__.py                           # Isolated trace-generation harness package
+│   ├── __main__.py                           # Module command entry point
+│   ├── catalog.py                            # Case and ground-truth loading and validation
+│   ├── cli.py                                # List and live-generation commands
+│   ├── controlled_client.py                  # Live response substitution before observable processing
+│   ├── models.py                             # Local case, label, capture, and run-manifest schemas
+│   ├── runner.py                             # Normal API execution and private manifest writing
+│   ├── runs/                                 # Gitignored generated run manifests, created as needed
+│   └── metrics/
+│       └── harmful_content_refusal/
+│           ├── README.md                     # Metric contract, injection diagram, and verification guide
+│           ├── cases.json                    # Matched control/defect inputs and effective responses
+│           └── ground_truth.json             # Expected labels retained outside Langfuse
 ├── src/
 │   └── agentic_eval_toyapp/
 │       ├── __init__.py                       # Package version
@@ -190,6 +206,12 @@ agentic-eval-toyapp/
     │   ├── test_langfuse_live.py             # Opt-in Langfuse export and retrieval test
     │   ├── test_model_live.py                # Opt-in live-provider connection and schema test
     │   └── test_retrieval_live.py            # Opt-in pinned-model semantic retrieval tests
+    ├── trace_cases/
+    │   ├── test_catalog.py                   # Controlled-pair and ground-truth integrity tests
+    │   ├── test_cli.py                       # Metric/variant selection-plan tests
+    │   ├── test_controlled_client.py         # Response substitution and trace-isolation tests
+    │   ├── test_makefile.py                  # Optional metric/variant Make-filter tests
+    │   └── test_runner.py                    # Control/defect API paths and private-manifest tests
     └── unit/
         ├── test_config.py                    # Configuration validation tests
         ├── test_embeddings.py                # Embedding validation and normalisation tests
@@ -202,33 +224,30 @@ agentic-eval-toyapp/
         └── test_tracing.py                   # Offline trace shape and session-correlation tests
 ```
 
-The local `design.md` is intentionally excluded because it is not committed.
+The local `design.md`, generated `trace_cases/runs/` manifests, and `.env` are intentionally excluded from source control.
 
-## Additional MVP files
+## Controlled trace generation
 
-The full MVP architecture also includes these files:
+Stage 9 trace generation is isolated from the normal application package. Its first supported metric is `harmful_content_refusal`. Each variant exercises the normal session/message API and makes a real model request. The harness substitutes the returned structured answer before normal agent processing, then exports only the effective execution through the ordinary Langfuse observation tree.
 
-```text
-agentic-eval-toyapp/
-├── .dockerignore                              # Docker build-context exclusions
-├── Dockerfile                                 # Reproducible application container image
-├── LICENSE                                    # Repository licence
-├── compose.yaml                               # Local container configuration
-├── src/agentic_eval_toyapp/
-│   ├── scenarios.py                           # Controlled functional-case selection and mutations
-│   └── resources/
-│       └── cases.yaml                         # Opaque controlled-case runtime inputs
-└── tests/
-    ├── fixtures/
-    │   ├── ground_truth.yaml                  # Evaluation-only expected labels
-    │   └── model_actions/                     # Deterministic generation fixtures
-    └── unit/
-        └── test_scenarios.py                  # Control/defect isolation tests
+Case IDs, control/defect labels, expected outcomes, and original live responses are not exported to Langfuse. They are joined to the random application session UUID only in a gitignored `trace_cases/runs/<session-id>.json` manifest. The filename is the same session ID used to find the corresponding conversation in Langfuse.
+
+List and generate cases with:
+
+```bash
+make trace-cases-list
+make trace-case
+make trace-case METRIC=harmful_content_refusal
+make trace-case VARIANT=control
+make trace-case METRIC=harmful_content_refusal VARIANT=control
+make trace-case METRIC=harmful_content_refusal VARIANT=defect
 ```
+
+`METRIC` and `VARIANT` are independent optional filters. With neither filter, `trace-case` generates every variant of every supported metric. Omitting only `VARIANT` generates every variant for the selected metric; omitting only `METRIC` generates the selected variant across every supported metric. Generation requires the normal live-model configuration and enabled Langfuse credentials. Metric-specific design and interpretation are documented beside each case set under `trace_cases/metrics/`.
 
 ## Retrieval design
 
-Document chunks will be encoded with a pinned SentenceTransformer model and L2-normalised. They will be stored in an in-memory FAISS `IndexFlatIP` index. With normalised vectors, inner-product ranking is equivalent to cosine-similarity ranking.
+Document chunks are encoded with a pinned SentenceTransformer model and L2-normalised. They are stored in an in-memory FAISS `IndexFlatIP` index. With normalised vectors, inner-product ranking is equivalent to cosine-similarity ranking.
 
 The current model pin is:
 
