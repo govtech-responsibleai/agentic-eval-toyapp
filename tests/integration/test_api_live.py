@@ -7,13 +7,14 @@ from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.app import create_app
-from agentic_eval_toyapp.config import AppSettings
+from agentic_eval_toyapp.config import AppSettings, GenerationProviderKind
 
 
 @pytest.mark.live
 def test_default_api_completes_a_semantic_retrieval_turn() -> None:
     """The pinned embedder, FAISS, agent, sessions, and API should compose."""
-    with TestClient(create_app(AppSettings())) as raw_client:
+    settings = AppSettings(generation_provider=GenerationProviderKind.DETERMINISTIC)
+    with TestClient(create_app(settings)) as raw_client:
         client = cast(Client, raw_client)
         readiness: Response = client.get("/ready")
         created: Response = client.post("/api/v1/sessions")

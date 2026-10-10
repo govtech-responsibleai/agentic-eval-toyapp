@@ -9,6 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from agentic_eval_toyapp.models import (
     AgentAction,
+    AgentActionKind,
     AgentTurnResult,
     AgentTurnStatus,
     AnswerAction,
@@ -23,6 +24,7 @@ from agentic_eval_toyapp.models import (
     HealthResponse,
     KnowledgeCorpus,
     LifecycleMode,
+    ModelRequest,
     RetrievedChunk,
     SearchAction,
     SessionMessageRequest,
@@ -158,23 +160,93 @@ def test_agent_action_union_uses_kind_discriminator(
     "payload",
     [
         {"kind": "search", "query": "   "},
-        {"kind": "answer", "markdown": "No citation", "citations": []},
+        {"kind": "search", "query": "policy", "top_k": 0},
+        {"kind": "search", "query": "policy", "top_k": 9},
         {"kind": "unknown", "value": "anything"},
     ],
 )
 def test_agent_action_union_rejects_invalid_payloads(payload: dict[str, Any]) -> None:
-    """Blank, uncited, and unknown actions cannot enter the agent loop."""
+    """Blank and unknown actions cannot enter the agent loop."""
     with pytest.raises(ValidationError):
         _AGENT_ACTION_ADAPTER.validate_python(payload)
 
 
-def test_answer_action_rejects_duplicate_citations() -> None:
-    """One evidence chunk should appear once in structured citations."""
-    with pytest.raises(ValidationError, match="unique"):
-        AnswerAction(
-            markdown="Policy text. [POLICY-001#1]",
-            citations=("POLICY-001#1", "POLICY-001#1"),
+def test_answer_action_preserves_duplicate_citations() -> None:
+    """Model citation mistakes must reach the agent's finding collector."""
+    action = AnswerAction(
+        markdown="Policy text. [POLICY-001#1]",
+        citations=("POLICY-001#1", "POLICY-001#1"),
+    )
+
+    assert action.citations == ("POLICY-001#1", "POLICY-001#1")
+
+
+def test_answer_action_allows_no_citations_for_post_retrieval_model_response() -> None:
+    """The agent, rather than the action schema, validates retrieval context."""
+    action = AnswerAction(markdown="No relevant evidence was found.", citations=())
+
+    assert action.citations == ()
+
+
+def test_model_request_rejects_evidence_without_retrieval_attempt() -> None:
+    """Provider context must distinguish no search from an empty search."""
+    chunk = _document_chunk()
+    retrieved = RetrievedChunk(**chunk.model_dump(), similarity_score=0.9)
+
+    with pytest.raises(ValidationError, match="attempted retrieval"):
+        ModelRequest(
+            system_prompt="Use evidence.",
+            user_message="Question",
+            retrieved_chunks=(retrieved,),
+            model_call_number=2,
+            remaining_searches=1,
         )
+
+
+@pytest.mark.parametrize(
+    ("available_actions", "remaining_searches", "message"),
+    [
+        ((), 1, "at least one available action"),
+        (
+            (AgentActionKind.ANSWER, AgentActionKind.ANSWER),
+            1,
+            "available actions must be unique",
+        ),
+        (
+            (AgentActionKind.SEARCH, AgentActionKind.ANSWER),
+            0,
+            "search cannot be available",
+        ),
+    ],
+)
+def test_model_request_rejects_inconsistent_available_actions(
+    available_actions: tuple[AgentActionKind, ...],
+    remaining_searches: int,
+    message: str,
+) -> None:
+    """Fixed action schemas must agree with the controller's current budget."""
+    with pytest.raises(ValidationError, match=message):
+        ModelRequest(
+            system_prompt="Choose one action.",
+            user_message="Question",
+            available_actions=available_actions,
+            model_call_number=1,
+            remaining_searches=remaining_searches,
+        )
+
+
+def test_termination_reasons_exclude_superseded_semantic_failures() -> None:
+    """Observation-first answers must not expose old strict-controller outcomes."""
+    values = {reason.value for reason in TerminationReason}
+
+    assert values.isdisjoint(
+        {
+            "empty_retrieval",
+            "answer_without_retrieval",
+            "invalid_citations",
+            "citation_mismatch",
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -223,6 +295,10 @@ def test_agent_turn_result_accepts_grounded_answer() -> None:
     chunk = _document_chunk()
     retrieved = RetrievedChunk(**chunk.model_dump(), similarity_score=0.9)
 
+    action = AnswerAction(
+        markdown="Policy statement. [POLICY-001#1]",
+        citations=("POLICY-001#1",),
+    )
     result = AgentTurnResult(
         status=AgentTurnStatus.ANSWERED,
         message="Policy statement. [POLICY-001#1]",
@@ -231,9 +307,52 @@ def test_agent_turn_result_accepts_grounded_answer() -> None:
         termination_reason=TerminationReason.ANSWERED,
         model_calls=2,
         searches=1,
+        model_actions=(action,),
     )
 
     assert result.citations == ("POLICY-001#1",)
+
+
+def test_agent_turn_result_accepts_model_response_after_empty_retrieval() -> None:
+    """Zero-evidence text remains observable after a recorded search."""
+    action = AnswerAction(markdown="No relevant evidence was found.", citations=())
+    result = AgentTurnResult(
+        status=AgentTurnStatus.ANSWERED,
+        message="No relevant evidence was found.",
+        citations=(),
+        retrieved_chunks=(),
+        termination_reason=TerminationReason.ANSWERED,
+        model_calls=2,
+        searches=1,
+        model_actions=(action,),
+    )
+
+    assert result.citations == ()
+    assert result.searches == 1
+
+
+def test_agent_turn_result_accepts_uncited_irrelevant_candidates() -> None:
+    """Candidates can remain observable even when none supports the response."""
+    chunk = _document_chunk()
+    retrieved = RetrievedChunk(**chunk.model_dump(), similarity_score=0.9)
+
+    action = AnswerAction(
+        markdown="No supporting policy evidence was found.",
+        citations=(),
+    )
+    result = AgentTurnResult(
+        status=AgentTurnStatus.ANSWERED,
+        message="No supporting policy evidence was found.",
+        citations=(),
+        retrieved_chunks=(retrieved,),
+        termination_reason=TerminationReason.ANSWERED,
+        model_calls=2,
+        searches=1,
+        model_actions=(action,),
+    )
+
+    assert result.retrieved_chunks == (retrieved,)
+    assert result.citations == ()
 
 
 @pytest.mark.parametrize("message", ["", "   ", "x" * 8_001])

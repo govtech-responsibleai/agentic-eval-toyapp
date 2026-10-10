@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from agentic_eval_toyapp.models import (
     AgentTurnResult,
     AgentTurnStatus,
+    ClarifyAction,
     ConversationMessage,
     ConversationRole,
     TerminationReason,
@@ -19,13 +20,16 @@ from agentic_eval_toyapp.sessions import InMemorySessionStore, SessionNotFoundEr
 class _RecordingAgent:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[ConversationMessage, ...]]] = []
+        self.session_ids: list[str | None] = []
 
     def run(
         self,
         user_message: str,
         *,
         history: Sequence[ConversationMessage] = (),
+        session_id: str | None = None,
     ) -> AgentTurnResult:
+        self.session_ids.append(session_id)
         self.calls.append((user_message, tuple(history)))
         return AgentTurnResult(
             status=AgentTurnStatus.CLARIFICATION_REQUIRED,
@@ -33,6 +37,7 @@ class _RecordingAgent:
             termination_reason=TerminationReason.CLARIFICATION_REQUIRED,
             model_calls=1,
             searches=0,
+            model_actions=(ClarifyAction(question=f"Please clarify: {user_message}"),),
         )
 
 
@@ -42,7 +47,9 @@ class _FailingAgent:
         user_message: str,
         *,
         history: Sequence[ConversationMessage] = (),
+        session_id: str | None = None,
     ) -> AgentTurnResult:
+        del session_id
         raise RuntimeError("unexpected agent failure")
 
 
@@ -81,6 +88,7 @@ def test_store_passes_ordered_history_and_trims_complete_turns() -> None:
         "second",
         "Please clarify: second",
     ]
+    assert agent.session_ids == [str(session.session_id)] * 3
 
 
 def test_store_keeps_session_histories_isolated() -> None:

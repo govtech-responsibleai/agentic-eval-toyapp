@@ -28,6 +28,7 @@ class AgentRunner(Protocol):
         user_message: str,
         *,
         history: Sequence[ConversationMessage] = (),
+        session_id: str | None = None,
     ) -> AgentTurnResult:
         """Execute one agent turn using explicit prior conversation history."""
         ...
@@ -104,7 +105,11 @@ class InMemorySessionStore:
         record = self._get_record(session_id)
         with record.lock:
             history = self._flatten(record.turns)
-            result = agent.run(user.content, history=history)
+            result = agent.run(
+                user.content,
+                history=history,
+                session_id=str(session_id),
+            )
             assistant = ConversationMessage(
                 role=ConversationRole.ASSISTANT,
                 content=result.message,

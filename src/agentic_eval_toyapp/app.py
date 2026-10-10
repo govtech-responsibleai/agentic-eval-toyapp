@@ -1,5 +1,6 @@
 """FastAPI application, dependency wiring, and versioned target endpoints."""
 
+import hashlib
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from functools import partial
@@ -15,7 +16,11 @@ from fastapi.templating import Jinja2Templates
 
 from agentic_eval_toyapp import __version__
 from agentic_eval_toyapp.agent import RagAgent, load_system_prompt
-from agentic_eval_toyapp.config import AppSettings, get_settings
+from agentic_eval_toyapp.config import (
+    AppSettings,
+    GenerationProviderKind,
+    get_settings,
+)
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
 from agentic_eval_toyapp.models import (
     AgentActionKind,
@@ -31,12 +36,21 @@ from agentic_eval_toyapp.models import (
     SessionMessageResponse,
     SessionResponse,
 )
-from agentic_eval_toyapp.providers import ExtractiveGenerationProvider
+from agentic_eval_toyapp.providers import (
+    ExtractiveGenerationProvider,
+    GenerationProvider,
+    OpenAIChatGenerationProvider,
+)
 from agentic_eval_toyapp.retrieval import FaissRetriever, load_corpus
 from agentic_eval_toyapp.sessions import (
     AgentRunner,
     InMemorySessionStore,
     SessionNotFoundError,
+)
+from agentic_eval_toyapp.tracing import (
+    LangfuseTraceRecorder,
+    NoOpTraceRecorder,
+    TraceRecorder,
 )
 
 API_PREFIX = "/api/v1"
@@ -83,9 +97,66 @@ class _AgentResolver:
             self._agent = candidate
             return candidate
 
+    def shutdown(self) -> None:
+        """Release resources owned by the default agent, if initialised."""
+        if isinstance(self._agent, RagAgent):
+            self._agent.shutdown()
+
+
+def _build_generation_provider(settings: AppSettings) -> GenerationProvider:
+    """Construct the explicitly selected process-level generation provider."""
+    if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
+        return ExtractiveGenerationProvider()
+    api_key, base_url = settings.require_openai_configuration()
+    return OpenAIChatGenerationProvider(
+        api_key=api_key,
+        base_url=base_url,
+        model=settings.generation_model,
+        revision=settings.generation_model_revision,
+        temperature=settings.generation_temperature,
+        max_tokens=settings.generation_max_tokens,
+        timeout_seconds=settings.generation_timeout_seconds,
+        instrument_with_langfuse=settings.langfuse_enabled,
+    )
+
+
+def _build_trace_recorder(
+    settings: AppSettings,
+    *,
+    provider: GenerationProvider,
+    retriever: FaissRetriever,
+    system_prompt: str,
+) -> TraceRecorder:
+    """Build explicit opt-in tracing with immutable runtime provenance."""
+    if not settings.langfuse_enabled:
+        return NoOpTraceRecorder()
+    public_key, secret_key, base_url = settings.require_langfuse_configuration()
+    metadata = retriever.metadata
+    return LangfuseTraceRecorder(
+        public_key=public_key,
+        secret_key=secret_key,
+        base_url=base_url,
+        environment=settings.langfuse_environment,
+        release=__version__,
+        flush_on_turn=settings.langfuse_flush_on_turn,
+        base_metadata={
+            "application": "agentic-eval-toyapp",
+            "app_version": __version__,
+            "generation_model": provider.model_id,
+            "generation_model_revision": provider.revision,
+            "embedding_model": metadata.embedding_model_id,
+            "embedding_model_revision": metadata.embedding_model_revision,
+            "faiss_index": metadata.index_type,
+            "corpus_version": metadata.corpus_version,
+            "corpus_sha256": metadata.corpus_sha256,
+            "prompt_sha256": hashlib.sha256(system_prompt.encode()).hexdigest(),
+        },
+    )
+
 
 def _build_default_agent(settings: AppSettings) -> RagAgent:
-    """Construct the local semantic retriever and deterministic MVP provider."""
+    """Construct the configured generation provider and semantic retriever."""
+    generation_provider = _build_generation_provider(settings)
     embedding_provider = SentenceTransformerEmbeddingProvider(
         model_id=settings.embedding_model_id,
         revision=settings.embedding_model_revision,
@@ -98,13 +169,21 @@ def _build_default_agent(settings: AppSettings) -> RagAgent:
         default_top_k=settings.retrieval_top_k,
         minimum_similarity=settings.retrieval_min_similarity,
     )
-    return RagAgent(
-        provider=ExtractiveGenerationProvider(),
+    system_prompt = load_system_prompt()
+    trace_recorder = _build_trace_recorder(
+        settings,
+        provider=generation_provider,
         retriever=retriever,
-        system_prompt=load_system_prompt(),
+        system_prompt=system_prompt,
+    )
+    return RagAgent(
+        provider=generation_provider,
+        retriever=retriever,
+        system_prompt=system_prompt,
         max_model_calls=settings.agent_max_model_calls,
         max_searches=settings.agent_max_searches,
         retrieval_top_k=settings.retrieval_top_k,
+        trace_recorder=trace_recorder,
     )
 
 
@@ -166,7 +245,10 @@ def create_app(
     async def lifespan(_application: FastAPI) -> AsyncGenerator[None, None]:
         """Finish RAG initialisation before the server accepts requests."""
         resolver.get()
-        yield
+        try:
+            yield
+        finally:
+            resolver.shutdown()
 
     application = FastAPI(
         title=resolved_settings.app_name,
@@ -231,6 +313,15 @@ def create_app(
                 status=CheckStatus.PASS,
                 detail=f"retains up to {resolved_store.max_turns} complete turns",
             ),
+            ReadinessCheck(
+                name="langfuse_tracing",
+                status=CheckStatus.PASS,
+                detail=(
+                    "enabled and configured"
+                    if resolved_settings.langfuse_enabled
+                    else "disabled"
+                ),
+            ),
         ]
         try:
             resolver.get()
@@ -270,6 +361,7 @@ def create_app(
             features=FeatureAvailability(
                 session_chat=True,
                 semantic_retrieval=True,
+                langfuse_tracing=resolved_settings.langfuse_enabled,
             ),
             actions=tuple(action.value for action in AgentActionKind),
         )
