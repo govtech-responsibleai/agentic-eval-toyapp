@@ -113,6 +113,7 @@ def _build_live_application(
         revision=settings.embedding_model_revision,
         device=settings.embedding_device,
         cache_dir=settings.embedding_cache_dir,
+        local_files_only=settings.embedding_local_files_only,
     )
     retriever = FaissRetriever(
         corpus=load_corpus(),

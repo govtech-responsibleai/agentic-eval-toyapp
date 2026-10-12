@@ -49,6 +49,7 @@ class AppSettings(BaseSettings):
     embedding_model_id: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_model_revision: str = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
     embedding_cache_dir: Path | None = None
+    embedding_local_files_only: bool = False
     embedding_device: str = "cpu"
     retrieval_top_k: int = Field(default=3, ge=1, le=8)
     retrieval_min_similarity: float = Field(

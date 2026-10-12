@@ -1,6 +1,7 @@
 """FastAPI application, dependency wiring, and versioned target endpoints."""
 
 import hashlib
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from functools import partial
@@ -58,6 +59,7 @@ PACKAGE_DIRECTORY = Path(__file__).parent
 STATIC_DIRECTORY = PACKAGE_DIRECTORY / "static"
 TEMPLATE_DIRECTORY = PACKAGE_DIRECTORY / "templates"
 TEMPLATES = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
+LOGGER = logging.getLogger("uvicorn.error")
 
 
 class AgentInitialisationError(RuntimeError):
@@ -162,6 +164,7 @@ def _build_default_agent(settings: AppSettings) -> RagAgent:
         revision=settings.embedding_model_revision,
         device=settings.embedding_device,
         cache_dir=settings.embedding_cache_dir,
+        local_files_only=settings.embedding_local_files_only,
     )
     retriever = FaissRetriever(
         corpus=load_corpus(),
@@ -245,6 +248,11 @@ def create_app(
     async def lifespan(_application: FastAPI) -> AsyncGenerator[None, None]:
         """Finish RAG initialisation before the server accepts requests."""
         resolver.get()
+        LOGGER.info(
+            "application_started generation_provider=%s langfuse_enabled=%s",
+            resolved_settings.generation_provider.value,
+            str(resolved_settings.langfuse_enabled).lower(),
+        )
         try:
             yield
         finally:

@@ -17,7 +17,8 @@ The application currently provides:
 - process-local multi-turn sessions;
 - browser and programmatic API access;
 - optional Langfuse tracing correlated by application session ID;
-- controlled traces for the `harmful_content_refusal` metric.
+- controlled traces for the `harmful_content_refusal` metric;
+- a non-root Docker image containing the pinned embedding model.
 
 For component boundaries, data flows, and technical design, see
 [architecture.md](architecture.md).
@@ -28,11 +29,15 @@ For component boundaries, data flows, and technical design, see
 - [uv](https://docs.astral.sh/uv/)
 - Make
 
+Alternatively, Docker with Compose can build and run the packaged service
+without installing Python or uv on the host.
+
 Live operation additionally requires:
 
 - an API key and base URL for an OpenAI-compatible model provider;
 - Langfuse credentials when trace export is enabled;
-- network access for the first embedding-model download if it is not cached.
+- network access for the first local embedding-model download if it is not
+  cached, or during the Docker image build.
 
 ## Install
 
@@ -66,10 +71,10 @@ OPENAI_BASE_URL=https://your-platform-ai-gateway/v1
 The configured endpoint must support OpenAI-compatible chat completions and
 strict structured JSON output. Credentials and `.env` are excluded from Git.
 
-### Optional Langfuse tracing
+### Langfuse tracing
 
-To export normal browser and API turns, add the Langfuse connection values and
-enable tracing:
+The environment template enables tracing for normal browser and API turns.
+Replace its Langfuse placeholders with working connection values:
 
 ```dotenv
 TOYAPP_LANGFUSE_ENABLED=true
@@ -80,7 +85,8 @@ LANGFUSE_BASE_URL=https://your-langfuse-host
 
 The application session UUID is also used as the Langfuse session ID. Keep
 `TOYAPP_LANGFUSE_FLUSH_ON_TURN=true` for evaluation runs so observations are
-sent before the HTTP turn completes.
+sent before the HTTP turn completes. Set `TOYAPP_LANGFUSE_ENABLED=false` for a
+run that should not export traces.
 
 See [.env.example](.env.example) for model, retrieval, agent, session, and
 service settings.
@@ -116,6 +122,55 @@ Readiness:         http://127.0.0.1:8000/ready
 Capabilities:      http://127.0.0.1:8000/api/v1/capabilities
 OpenAPI interface: http://127.0.0.1:8000/docs
 ```
+
+### Run with Docker
+
+The image installs the locked runtime dependencies and downloads the exact
+embedding-model revision during the build. Runtime model loading is local-only,
+so container startup does not contact Hugging Face.
+
+After creating `.env`, build and start the default live-model service:
+
+```bash
+make docker-up
+```
+
+For a local run without Platform AI credentials or model-call cost:
+
+```bash
+TOYAPP_GENERATION_PROVIDER=deterministic \
+TOYAPP_LANGFUSE_ENABLED=false \
+make docker-up
+```
+
+The same endpoints are available at `http://127.0.0.1:8000`. Inspect or stop
+the service with:
+
+```bash
+make docker-logs
+make docker-down
+```
+
+The startup log states the selected generation provider and whether Langfuse
+tracing is enabled.
+
+The first image build needs network access for locked Python packages, the base
+images, and the pinned embedding model. Platform AI and Langfuse remain external
+services; their credentials are passed from `.env` only when the container
+starts and are not copied into the image.
+
+The image uses the CPU-only PyTorch wheel source and does not include CUDA
+libraries. In a managed network, `make docker-build` automatically forwards the
+certificate bundle named by the host's `SSL_CERT_FILE` through a BuildKit
+secret. Override it explicitly when necessary:
+
+```bash
+make docker-build DOCKER_CA_CERT=/absolute/path/to/combined-ca-bundle.pem
+```
+
+TLS verification remains enabled. The selected public CA bundle is copied into
+the runtime image so the unprivileged service can read it while only root can
+modify it. Supply public CA certificates only; do not include private keys.
 
 ## Use the browser
 
@@ -222,6 +277,11 @@ for the metric-specific case contract.
 | `make test-live` | Exercise natural-language retrieval and the default API with the pinned embedding model. | May download the embedding model |
 | `make test-model-live` | Verify live provider connectivity and structured-action support. | Live model request |
 | `make test-langfuse-live` | Export an API turn and retrieve its observations by session ID. | Live Langfuse request |
+| `make docker-build` | Build the non-root runtime image and cache the pinned embedding model in it. | Base images, packages, and embedding model during build |
+| `make docker-up` | Build and start the Compose service using runtime values from `.env`. | Depends on selected provider and tracing settings |
+| `make docker-down` | Stop and remove the Compose service. | No |
+| `make docker-logs` | Follow logs from the Compose service. | No |
+| `make docker-smoke` | Build the image and validate readiness plus one deterministic real-retrieval turn. | Build-time downloads only |
 | `make check` | Run Ruff and strict Pyright checks. | No |
 | `make fix` | Apply safe Ruff fixes and formatting. | No |
 | `make lock-check` | Confirm `pyproject.toml` and `uv.lock` agree. | No |
@@ -234,6 +294,7 @@ Live tests are excluded unless their target is selected explicitly.
 
 ```text
 agentic-eval-toyapp/
+├── .dockerignore                             # Secrets, tests, caches, and local artefacts excluded from image builds
 ├── .env.example                              # Non-secret local configuration template
 ├── .github/
 │   └── workflows/
@@ -242,11 +303,17 @@ agentic-eval-toyapp/
 ├── .python-version                           # Python version selected by uv
 ├── AGENTS.md                                 # Repository conventions for coding agents
 ├── CONTRIBUTING.md                           # Contributor setup and development workflow
+├── Dockerfile                                # Multi-stage non-root runtime image with cached embeddings
 ├── Makefile                                  # Stable install, run, verification, and trace commands
 ├── README.md                                 # Project introduction and user guide
 ├── architecture.md                           # Technical component architecture and data flows
+├── compose.yaml                              # Local single-service container configuration
 ├── pyproject.toml                            # Package metadata, dependencies, and tool configuration
 ├── uv.lock                                   # Exact direct and transitive dependency lock
+├── scripts/
+│   ├── __init__.py                           # Build-tool package marker
+│   ├── cache_embedding_model.py              # Image-build download and model-dimension validation
+│   └── docker_smoke.py                       # Container readiness and deterministic RAG smoke test
 ├── trace_cases/
 │   ├── __init__.py                           # Isolated trace-generation harness package
 │   ├── __main__.py                           # `python -m trace_cases` entry point
@@ -287,6 +354,7 @@ agentic-eval-toyapp/
     │   ├── test_agent_retrieval.py           # Offline agent-to-FAISS composition test
     │   ├── test_api.py                       # Session/message API contract and failure tests
     │   ├── test_api_live.py                  # Opt-in pinned-model API smoke test
+    │   ├── test_container_contract.py        # Static image, context, and Compose safety contracts
     │   ├── test_frontend.py                  # Browser page, asset, and rendering-safety tests
     │   ├── test_health_api.py                # Health, readiness, capability, and OpenAPI tests
     │   ├── test_langfuse_live.py             # Opt-in Langfuse export and v4 retrieval test
@@ -301,6 +369,7 @@ agentic-eval-toyapp/
     └── unit/
         ├── test_agent.py                     # Agent actions, bounds, repair, and findings tests
         ├── test_config.py                    # Defaults, environment aliases, and secret validation tests
+        ├── test_build_scripts.py             # Container smoke validation and build-input edge cases
         ├── test_embeddings.py                # Embedding validation and normalization tests
         ├── test_models.py                    # Pydantic contract and consistency tests
         ├── test_package.py                   # Package/distribution version consistency test
@@ -317,7 +386,8 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 
 - Sessions are stored in one process and are lost on restart.
 - Agent turns are synchronous; there is no cancellation or background job API.
-- The repository does not yet contain Docker packaging.
+- The runtime image contains the application only; controlled trace generation
+  remains source-repository tooling.
 - METIS's current legacy Langfuse extractor still requires migration for
   Langfuse v4 events-only deployments; the toy app's v4 export and retrieval
   path is independently verified.

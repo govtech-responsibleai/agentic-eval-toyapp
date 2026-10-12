@@ -18,6 +18,7 @@ dependencies = [
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "sentence-transformers>=6.1.0",
+    "torch>=2.0",
     "uvicorn>=0.53.0",
 ]
 
@@ -28,15 +29,23 @@ packages = ["src/agentic_eval_toyapp"]
 package = true
 required-version = ">=0.12.7,<0.13"
 
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
-include = ["src", "tests", "trace_cases"]
+include = ["src", "tests", "trace_cases", "scripts"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 
 [tool.ruff]
-src = ["src", "tests"]
+src = ["src", "tests", "trace_cases", "scripts"]
 target-version = "py311"
 
 [tool.ruff.lint]

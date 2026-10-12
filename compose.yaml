@@ -1,0 +1,18 @@
+services:
+  toyapp:
+    image: ${TOYAPP_DOCKER_IMAGE:-agentic-eval-toyapp:local}
+    env_file:
+      - .env
+    environment:
+      TOYAPP_HOST: 0.0.0.0
+      TOYAPP_PORT: 8000
+      TOYAPP_GENERATION_PROVIDER: ${TOYAPP_GENERATION_PROVIDER:-openai}
+      TOYAPP_LANGFUSE_ENABLED: ${TOYAPP_LANGFUSE_ENABLED:-false}
+      TOYAPP_EMBEDDING_CACHE_DIR: /opt/models
+      TOYAPP_EMBEDDING_LOCAL_FILES_ONLY: "true"
+    ports:
+      - "${TOYAPP_PORT:-8000}:8000"
+    init: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true

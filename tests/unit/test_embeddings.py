@@ -1,5 +1,9 @@
 """Tests for embedding validation and deterministic providers."""
 
+import sys
+from pathlib import Path
+from types import ModuleType
+
 import numpy as np
 import pytest
 
@@ -7,9 +11,44 @@ from agentic_eval_toyapp.embeddings import (
     DeterministicEmbeddingProvider,
     EmbeddingProvider,
     EmbeddingValidationError,
+    SentenceTransformerEmbeddingProvider,
     l2_normalize_embeddings,
     validate_embedding_matrix,
 )
+
+
+def test_sentence_transformer_provider_propagates_local_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Container configuration must reach the model-loading boundary."""
+    captured: dict[str, object] = {}
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_id: str, **options: object) -> None:
+            captured["model_id"] = model_id
+            captured.update(options)
+
+        def get_embedding_dimension(self) -> int:
+            return 384
+
+    fake_module = ModuleType("sentence_transformers")
+    fake_module.SentenceTransformer = FakeSentenceTransformer  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+
+    provider = SentenceTransformerEmbeddingProvider(
+        model_id="sentence-transformers/test-model",
+        revision="immutable-revision",
+        cache_dir=tmp_path,
+        local_files_only=True,
+    )
+
+    assert provider.dimension == 384
+    assert captured["model_id"] == "sentence-transformers/test-model"
+    assert captured["revision"] == "immutable-revision"
+    assert captured["cache_folder"] == str(tmp_path)
+    assert captured["local_files_only"] is True
+    assert captured["trust_remote_code"] is False
 
 
 def test_validate_embedding_matrix_returns_contiguous_float32() -> None:
