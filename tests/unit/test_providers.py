@@ -52,9 +52,9 @@ def test_openai_client_enables_langfuse_generation_capture_only_when_requested(
             self.chat = SimpleNamespace(completions=_FakeCompletions())
 
     monkeypatch.setattr(
-        providers_module.langfuse.openai,
-        "OpenAI",
-        _FakeLangfuseOpenAI,
+        providers_module,
+        "_langfuse_openai_client_class",
+        lambda: _FakeLangfuseOpenAI,
     )
     client = OpenAICompatibleChatClient(
         api_key="test-key",
@@ -84,6 +84,56 @@ def test_openai_client_enables_langfuse_generation_capture_only_when_requested(
     assert completion_arguments[0]["metadata"] == {
         "operation": "structured_action_selection"
     }
+
+
+def test_openai_client_does_not_load_langfuse_wrapper_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An uninstrumented call must not create a duplicate OpenAI generation."""
+    completion_arguments: list[dict[str, object]] = []
+
+    class _FakeCompletions:
+        def create(self, **values: object) -> object:
+            completion_arguments.append(values)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(message=SimpleNamespace(content='{"ok":true}'))
+                ]
+            )
+
+    class _FakeOpenAI:
+        def __init__(self, **values: object) -> None:
+            del values
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    def fail_if_loaded() -> None:
+        raise AssertionError("Langfuse OpenAI wrapper should not be loaded")
+
+    monkeypatch.setattr(providers_module, "OpenAI", _FakeOpenAI)
+    monkeypatch.setattr(
+        providers_module,
+        "_langfuse_openai_client_class",
+        fail_if_loaded,
+    )
+    client = OpenAICompatibleChatClient(
+        api_key="test-key",
+        base_url="https://platform.example/v1",
+        timeout_seconds=12,
+        instrument_with_langfuse=False,
+    )
+
+    assert (
+        client.create(
+            model="platform-model",
+            messages=({"role": "user", "content": "Question"},),
+            response_schema={"type": "object"},
+            temperature=0.0,
+            max_tokens=100,
+        )
+        == '{"ok":true}'
+    )
+    assert "name" not in completion_arguments[0]
+    assert "metadata" not in completion_arguments[0]
 
 
 def _request(call_number: int = 1) -> ModelRequest:
