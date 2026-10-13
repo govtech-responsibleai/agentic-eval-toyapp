@@ -25,16 +25,19 @@ The main design principles are:
 - one Langfuse root observation per user turn when tracing is enabled,
   correlated by application session ID;
 - deterministic, network-free offline tests and explicitly selected live tests;
-- controlled metric cases isolated from the normal application package.
+- controlled metric cases isolated from the normal application package;
+- a non-root runtime image with the pinned embedding model available offline.
 
-The current runtime is synchronous and process-local. Docker packaging,
-persistent storage, asynchronous jobs, cancellation, and lifecycle-failure
-scenarios are not part of the implemented architecture yet.
+The current runtime is synchronous and process-local. Persistent storage,
+asynchronous jobs, cancellation, and lifecycle-failure scenarios are not part
+of the implemented architecture.
 
 ## System overview
 
 ```mermaid
 flowchart LR
+    Build[Docker build with uv lock and pinned embedding model] --> Image[Non-root runtime image]
+    Image -. runs .-> API
     Browser[Browser user] -->|HTTP| API[FastAPI service]
     Client[METIS or API client] -->|HTTP| API
     Harness[Controlled trace harness] -->|In-process HTTP through TestClient| API
@@ -87,6 +90,7 @@ Application paths in this table are relative to
 | Semantic retrieval | Build and query the immutable FAISS index | `embeddings.py`, `retrieval.py`, `resources/documents.json` | [Retrieval flow](#retrieval-flow) |
 | Observability | Export application turns and child operations to Langfuse | `tracing.py` | [Observability flow](#observability-flow) |
 | Controlled trace generation | Generate realistic control/defect traces with private ground truth | `trace_cases/` | [Controlled-case flow](#controlled-case-flow) |
+| Container deployment | Package the service and pinned embedding model for network-independent startup | `Dockerfile`, `compose.yaml`, `.dockerignore` | [Container flow](#container-flow) |
 | Verification and tooling | Separate deterministic CI from opt-in live integration checks | `tests/`, `Makefile`, `pyproject.toml` | [Verification flow](#verification-flow) |
 
 ## 1. Browser frontend
@@ -194,6 +198,8 @@ This initialises the generation provider, loads the pinned embedding model,
 validates and embeds the corpus, builds the FAISS index, loads the system
 prompt, and constructs either a real or no-op trace recorder. Startup fails
 closed if any required dependency cannot be initialised.
+After successful initialisation, one operational log records only the selected
+generation provider and whether Langfuse is enabled.
 
 <a id="startup-flow"></a>
 
@@ -223,8 +229,11 @@ flowchart TD
 ```
 
 On a developer machine, the first startup may download the pinned embedding
-model into the Hugging Face cache. Moving that download into the Docker image
-build is a Stage 10 deployment decision and is not current runtime behaviour.
+model into the Hugging Face cache. The container instead sets
+`embedding_local_files_only`, `HF_HUB_OFFLINE`, and `TRANSFORMERS_OFFLINE` after
+including the configured model revision during the image build. A missing or
+inconsistent model therefore fails startup instead of triggering a runtime
+download.
 
 [Back to component index](#component-index)
 
@@ -604,7 +613,76 @@ Metric-specific semantics and injection details are documented in
 
 [Back to component index](#component-index)
 
-## 11. Verification and development tooling
+## 11. Container deployment
+
+The multi-stage `Dockerfile` separates networked construction from runtime.
+The builder installs production dependencies from `uv.lock`, installs the
+application as a non-editable wheel, and downloads and validates the configured
+SentenceTransformer revision. The final image receives the virtual environment,
+model cache, and selected public CA bundle. It runs Uvicorn as the unprivileged
+`toyapp` user and health-checks `/health` on the fixed internal port 8000.
+
+PyTorch is an explicit application dependency sourced from PyTorch's CPU-only
+index. This prevents a CPU target from resolving CUDA, NCCL, or Triton packages.
+The cross-platform lock retains CPU-compatible wheels while keeping all other
+packages on their declared indexes.
+
+The build context excludes `.env`, Git state, tests, controlled trace tooling,
+private run manifests, caches, and local model artefacts. Platform AI and
+Langfuse remain external. Compose reads their settings from `.env` at container
+startup; Docker build steps cannot access those secrets.
+
+For managed TLS interception, the Makefile passes `DOCKER_CA_CERT`, defaulting
+to the host's `SSL_CERT_FILE`, as a BuildKit secret mount. The builder copies
+that public certificate bundle—not a credential or private key—into its trust
+path and the final runtime. The copied bundle is mode `0644`: writable only by
+root but readable by the unprivileged `toyapp` runtime. If no bundle is
+configured, the Debian system bundle is used. Certificate verification is never
+disabled.
+
+The image deliberately excludes `trace_cases`. Controlled generation is an
+operator-side evaluation tool rather than part of the target application's
+public capability surface.
+
+<a id="container-flow"></a>
+
+### Container flow
+
+```mermaid
+flowchart LR
+    subgraph Build[Networked image build]
+        Lock[uv.lock and application source] --> Builder[Python builder]
+        Registry[Base images, locked packages, and CPU-only PyTorch] --> Builder
+        HostCA[Optional managed-network CA bundle] -. BuildKit secret .-> Builder
+        Hub[Pinned Hugging Face model revision] --> Cache[Validated model cache]
+        Builder --> Venv[Production virtual environment]
+    end
+
+    Venv --> Image[Minimal runtime image]
+    Cache --> Image
+    Builder --> TrustedCA[Runtime public CA bundle]
+    TrustedCA --> Image
+
+    subgraph Runtime[Container runtime]
+        Env[Runtime .env values] --> Service[Non-root Uvicorn service]
+        Image --> Service
+        Service --> LocalModel[Local-only embedding load]
+        LocalModel --> Index[In-memory FAISS index]
+        Health[Docker health check] -->|GET /health| Service
+    end
+
+    Service -->|Optional live calls| PlatformAI[Platform AI]
+    Service -->|Optional observations| Langfuse[External Langfuse]
+```
+
+Compose operates one service and one worker because session state is held in
+process memory. The internal port remains 8000; the host-side port is
+configurable. `no-new-privileges` is enabled, and the image contains no default
+credentials.
+
+[Back to component index](#component-index)
+
+## 12. Verification and development tooling
 
 uv owns the environment and lockfile. The Makefile is the stable developer and
 CI interface. Offline CI does not download the embedding model, call the live
@@ -629,6 +707,9 @@ flowchart TD
     LiveModel --> Provider[OpenAI-compatible provider]
     Change --> LiveTracing[make test-langfuse-live]
     LiveTracing --> Langfuse[Langfuse export and v4 retrieval]
+    Change --> Container[make docker-smoke]
+    Container --> BuildImage[Build locked image and pinned model]
+    BuildImage --> Smoke[Readiness plus deterministic real-RAG turn]
 ```
 
 Test layers are divided by responsibility:
@@ -638,7 +719,11 @@ Test layers are divided by responsibility:
 - integration tests validate API composition, browser assets, semantic RAG,
   provider connectivity, and Langfuse retrieval;
 - trace-case tests validate paired ground truth, selection logic, the exact
-  response-substitution seam, API reuse, leakage prevention, and manifests.
+  response-substitution seam, API reuse, leakage prevention, and manifests;
+- build-tool and container-contract tests validate local-only model settings,
+  context exclusions, Compose boundaries, and malformed smoke responses;
+- the GitHub container job performs the actual image build and deterministic
+  end-to-end RAG smoke path.
 
 Stochastic live tests assert connectivity and contracts rather than exact
 wording. All networked or model-downloading checks are explicitly selected and
@@ -665,8 +750,8 @@ excluded from `make ci`.
   recovery lifecycle.
 - Session history is process-local, bounded, and lost on restart.
 - Multiple server workers would not share session state.
-- The first local startup can download the embedding model when it is not
-  already cached.
+- The first source-based local startup can download the embedding model when it
+  is not already cached; the container downloads it only during image build.
 - Langfuse is an external dependency and backend indexing can be eventually
   consistent even when the client flushes immediately.
 - The current METIS Langfuse extractor has not yet been migrated to Langfuse v4
@@ -674,5 +759,5 @@ excluded from `make ci`.
 - Controlled trace generation currently covers only the
   `harmful_content_refusal` metric.
 - The controlled harness is included in the source distribution but not the
-  runtime-only application wheel.
-- Docker packaging and the complete container smoke path are Stage 10 work.
+- The container base images use versioned tags rather than immutable digests,
+  so OS-layer builds are not yet bit-for-bit reproducible.

@@ -1,6 +1,12 @@
-.PHONY: help install run trace-cases-list trace-case lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live test-model-live test-langfuse-live ci clean
+.PHONY: help install run trace-cases-list trace-case docker-build docker-up docker-down docker-logs docker-smoke docker-smoke-run lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live test-model-live test-langfuse-live ci clean
 
-PYTHON_SOURCES := src tests trace_cases
+PYTHON_SOURCES := src tests trace_cases scripts
+DOCKER_IMAGE ?= agentic-eval-toyapp:local
+DOCKER_CA_CERT ?= $(SSL_CERT_FILE)
+DOCKER_SMOKE_PORT ?= 18000
+DOCKER_SMOKE_TIMEOUT ?= 180
+COMMA := ,
+DOCKER_CA_SECRET_ARGUMENT = $(if $(strip $(DOCKER_CA_CERT)),--secret id=toyapp_ca_bundle$(COMMA)src="$(DOCKER_CA_CERT)",)
 TRACE_METRIC_ARGUMENT = $(if $(strip $(METRIC)),--metric "$(METRIC)",)
 TRACE_VARIANT_ARGUMENT = $(if $(strip $(VARIANT)),--variant "$(VARIANT)",)
 
@@ -10,6 +16,11 @@ help:
 	@printf "  make run           Start the local development API\n"
 	@printf "  make trace-cases-list  List supported controlled trace metrics\n"
 	@printf "  make trace-case [METRIC=...] [VARIANT=...]  Generate controlled traces; omitted filters select all\n"
+	@printf "  make docker-build  Build the runtime image with the pinned embedding model\n"
+	@printf "  make docker-up     Build and start the Compose service\n"
+	@printf "  make docker-down   Stop and remove the Compose service\n"
+	@printf "  make docker-logs   Follow Compose service logs\n"
+	@printf "  make docker-smoke  Build and exercise one deterministic container turn\n"
 	@printf "  make lock-check    Check that the uv lockfile is current\n"
 	@printf "  make lint          Run Ruff lint checks\n"
 	@printf "  make lint-fix      Apply safe Ruff lint fixes\n"
@@ -40,6 +51,26 @@ trace-cases-list:
 
 trace-case:
 	uv run python -m trace_cases generate $(TRACE_METRIC_ARGUMENT) $(TRACE_VARIANT_ARGUMENT)
+
+docker-build:
+	docker build $(DOCKER_CA_SECRET_ARGUMENT) --tag "$(DOCKER_IMAGE)" .
+
+docker-up: docker-build
+	docker compose up --detach --no-build
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs --follow toyapp
+
+docker-smoke: docker-build docker-smoke-run
+
+docker-smoke-run:
+	python3 -m scripts.docker_smoke \
+		--image "$(DOCKER_IMAGE)" \
+		--host-port "$(DOCKER_SMOKE_PORT)" \
+		--timeout-seconds "$(DOCKER_SMOKE_TIMEOUT)"
 
 lock-check:
 	uv lock --check

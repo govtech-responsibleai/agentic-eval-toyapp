@@ -19,6 +19,7 @@ _SETTING_ENV_VARS = (
     "TOYAPP_EMBEDDING_MODEL_ID",
     "TOYAPP_EMBEDDING_MODEL_REVISION",
     "TOYAPP_EMBEDDING_CACHE_DIR",
+    "TOYAPP_EMBEDDING_LOCAL_FILES_ONLY",
     "TOYAPP_EMBEDDING_DEVICE",
     "TOYAPP_RETRIEVAL_TOP_K",
     "TOYAPP_RETRIEVAL_MIN_SIMILARITY",
@@ -69,6 +70,7 @@ def test_settings_defaults_select_the_live_runtime_without_storing_credentials()
     assert settings.embedding_model_revision == (
         "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
     )
+    assert settings.embedding_local_files_only is False
     assert settings.embedding_device == "cpu"
     assert settings.retrieval_top_k == 3
     assert settings.retrieval_min_similarity == 0.25
@@ -100,6 +102,7 @@ def test_settings_load_prefixed_environment_variables(
     monkeypatch.setenv("TOYAPP_PORT", "9000")
     monkeypatch.setenv("TOYAPP_LOG_LEVEL", "DEBUG")
     monkeypatch.setenv("TOYAPP_EMBEDDING_DEVICE", "mps")
+    monkeypatch.setenv("TOYAPP_EMBEDDING_LOCAL_FILES_ONLY", "true")
     monkeypatch.setenv("TOYAPP_RETRIEVAL_TOP_K", "5")
     monkeypatch.setenv("TOYAPP_RETRIEVAL_MIN_SIMILARITY", "0.4")
     monkeypatch.setenv("TOYAPP_AGENT_MAX_MODEL_CALLS", "4")
@@ -127,6 +130,7 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.port == 9000
     assert settings.log_level is LogLevel.DEBUG
     assert settings.embedding_device == "mps"
+    assert settings.embedding_local_files_only is True
     assert settings.retrieval_top_k == 5
     assert settings.retrieval_min_similarity == 0.4
     assert settings.agent_max_model_calls == 4

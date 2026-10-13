@@ -2,13 +2,18 @@
 
 from collections.abc import Sequence
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.app import create_app
-from agentic_eval_toyapp.config import AppSettings, LogLevel
+from agentic_eval_toyapp.config import (
+    AppSettings,
+    GenerationProviderKind,
+    LogLevel,
+)
 from agentic_eval_toyapp.models import AgentTurnResult, ConversationMessage
 from agentic_eval_toyapp.sessions import AgentRunner
 
@@ -101,6 +106,27 @@ def test_startup_initialises_the_agent_factory_exactly_once() -> None:
         assert client.get("/ready").json()["status"] == "ready"
         assert client.get("/ready").json()["status"] == "ready"
         assert factory_calls == 1
+
+
+def test_startup_logs_safe_runtime_modes() -> None:
+    """Operators should see provider and tracing modes without credentials."""
+    settings = AppSettings(
+        generation_provider=GenerationProviderKind.DETERMINISTIC,
+        langfuse_enabled=False,
+    )
+    application = create_app(settings, agent=_IntrospectionAgent())
+
+    with (
+        patch("agentic_eval_toyapp.app.LOGGER.info") as log_info,
+        TestClient(application),
+    ):
+        pass
+
+    log_info.assert_called_once_with(
+        "application_started generation_provider=%s langfuse_enabled=%s",
+        "deterministic",
+        "false",
+    )
 
 
 def test_capabilities_advertise_only_operational_chat_features() -> None:
