@@ -669,5 +669,5 @@ def test_default_system_prompt_names_every_supported_policy() -> None:
     corpus_titles = {chunk.title for chunk in load_corpus().chunks}
 
     assert "chatbot assisting employees" in prompt
-    assert len(corpus_titles) == 8
+    assert len(corpus_titles) == 16
     assert all(title in prompt for title in corpus_titles)

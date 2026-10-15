@@ -43,6 +43,34 @@ def live_retriever() -> Iterator[FaissRetriever]:
             "Does the organisation pay for a second certification attempt?",
             "LEARNING-001",
         ),
+        (
+            "I have been ill for three workdays. What proof do I need?",
+            "SICK-001",
+        ),
+        (
+            "Can I use the remote-work allowance for my monthly internet bill?",
+            "EQUIPMENT-001",
+        ),
+        (
+            "I need to take my parent to a medical appointment. Which leave applies?",
+            "CARE-001",
+        ),
+        (
+            "How much leave does a supporting caregiver receive for a new child?",
+            "PARENTAL-001",
+        ),
+        (
+            "Does time fixing an incident while on call count as overtime?",
+            "OVERTIME-001",
+        ),
+        (
+            "Can I carry unused sick leave into next year?",
+            "SICK-001",
+        ),
+        (
+            "Can a supplier accessing company systems skip review for a cheap order?",
+            "VENDOR-001",
+        ),
     ],
 )
 def test_pinned_model_retrieves_expected_policy(
@@ -55,3 +83,32 @@ def test_pinned_model_retrieves_expected_policy(
 
     assert results
     assert results[0].document_id == expected_document_id
+
+
+@pytest.mark.live
+@pytest.mark.parametrize(
+    ("query", "expected_chunk_ids"),
+    [
+        (
+            "Can I paste Restricted information into an approved AI assistant?",
+            {"AI-001#1", "DATA-001#2"},
+        ),
+        (
+            "Does a security review replace two quotations for a $900 supplier?",
+            {"PROCUREMENT-001#1", "VENDOR-001#2"},
+        ),
+        (
+            "Can I use my learning budget for a gym membership?",
+            {"LEARNING-001#1", "WELLBEING-001#1"},
+        ),
+    ],
+)
+def test_pinned_model_retrieves_overlapping_policy_evidence(
+    live_retriever: FaissRetriever,
+    query: str,
+    expected_chunk_ids: set[str],
+) -> None:
+    """Top-three candidates should retain both sides of reviewed policy overlaps."""
+    results = live_retriever.search(query, top_k=3)
+
+    assert expected_chunk_ids <= {result.chunk_id for result in results}

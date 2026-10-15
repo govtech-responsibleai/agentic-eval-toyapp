@@ -410,9 +410,11 @@ inside the application-owned `select-action` span.
 
 ## 8. Semantic retrieval
 
-The knowledge base is a versioned JSON corpus of 16 independently citable
-chunks from eight synthetic Northstar policy documents. It is immutable during
-an application run.
+The knowledge base is a versioned JSON corpus of 40 independently citable
+chunks from 16 synthetic Northstar policy documents. It is immutable during an
+application run. Version 2 preserves all original MVP chunks and adds related
+policies with overlapping terminology, exceptions, thresholds, and
+cross-policy dependencies so semantic retrieval faces meaningful alternatives.
 
 Each chunk's title and text are encoded with the pinned SentenceTransformer:
 
@@ -422,11 +424,23 @@ revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
 dimension: 384
 ```
 
-The validated `northstar-policies-v1` corpus has this canonical checksum:
+The validated `northstar-policies-v2` corpus has this canonical checksum:
 
 ```text
-fd79e97d578089ebef4b5c3bf7ada9ee4e5545bf72c66fbb8fb1abd2fa8682ee
+6b7fe1276ee59acb85e0e5b539648c000823e35940496cd8f59e0869f48ddc3e
 ```
+
+The eight added policies cover sick leave, parental leave, care and
+compassionate leave, remote-work equipment, responsible AI use, overtime,
+employee wellbeing, and supplier due diligence. Reviewed overlap cases include:
+
+| Query intent | Expected evidence relationship |
+|---|---|
+| Restricted information in an approved AI assistant | Responsible AI and data-handling chunks both apply. |
+| Security review for a `$900` supplier | Supplier due diligence and purchasing thresholds both apply. |
+| Gym membership charged to a learning budget | Learning exclusions and the wellbeing benefit must be distinguished. |
+| Caring for an ill family member | Care leave must be distinguished from the employee's own sick leave. |
+| Internet charges under a remote-work allowance | Remote equipment eligibility applies, but internet charges are excluded. |
 
 Corpus and query vectors are validated as finite, non-zero `float32` matrices
 and L2-normalised. FAISS `IndexFlatIP` then performs exact inner-product search;
