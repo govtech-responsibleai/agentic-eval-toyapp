@@ -59,32 +59,51 @@ def _retriever(
 
 
 def test_default_corpus_is_valid_versioned_and_synthetic() -> None:
-    """The reviewed corpus must remain small, unique, and clearly fictional."""
+    """The reviewed corpus must remain inspectable, unique, and fictional."""
     corpus = load_corpus()
 
-    assert corpus.version == "northstar-policies-v1"
-    assert len(corpus.chunks) == 16
+    assert corpus.version == "northstar-policies-v2"
+    assert len(corpus.chunks) == 40
     assert {chunk.document_id for chunk in corpus.chunks} == {
+        "AI-001",
+        "CARE-001",
         "DATA-001",
+        "EQUIPMENT-001",
         "EXPENSE-001",
         "FLEX-001",
         "LEARNING-001",
         "LEAVE-001",
+        "OVERTIME-001",
+        "PARENTAL-001",
         "PROCUREMENT-001",
         "SECURITY-001",
+        "SICK-001",
         "TRAVEL-001",
+        "VENDOR-001",
+        "WELLBEING-001",
     }
-    assert len({chunk.chunk_id for chunk in corpus.chunks}) == 16
+    assert len({chunk.chunk_id for chunk in corpus.chunks}) == 40
     assert all(
         "@" not in chunk.text or "@northstar.example.test" in chunk.text
         for chunk in corpus.chunks
     )
 
 
+def test_expanded_corpus_preserves_existing_benchmark_facts() -> None:
+    """Expansion must not silently rewrite facts used by MVP regressions."""
+    chunks = {chunk.chunk_id: chunk for chunk in load_corpus().chunks}
+
+    assert "18 days of annual leave" in chunks["LEAVE-001#1"].text
+    assert "$1,200" in chunks["LEARNING-001#1"].text
+    assert "more than $25" in chunks["EXPENSE-001#1"].text
+    assert "from $500 through $5,000" in chunks["PROCUREMENT-001#1"].text
+    assert "first 60 calendar days" in chunks["FLEX-001#2"].text
+
+
 def test_default_corpus_checksum_is_stable() -> None:
     """Unexpected corpus edits must be visible to future benchmark fixtures."""
     assert corpus_sha256(load_corpus()) == (
-        "fd79e97d578089ebef4b5c3bf7ada9ee4e5545bf72c66fbb8fb1abd2fa8682ee"
+        "6b7fe1276ee59acb85e0e5b539648c000823e35940496cd8f59e0869f48ddc3e"
     )
 
 

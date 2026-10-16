@@ -1,5 +1,5 @@
 {
-  "version": "northstar-policies-v1",
+  "version": "northstar-policies-v2",
   "chunks": [
     {
       "chunk_id": "TRAVEL-001#1",
@@ -112,6 +112,174 @@
       "title": "Purchasing Policy",
       "text": "Purchases above $5,000 require review-panel approval. Splitting a purchase into smaller transactions to avoid an approval threshold is prohibited.",
       "metadata": {"topic": "procurement", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "SICK-001#1",
+      "document_id": "SICK-001",
+      "title": "Sick Leave Policy",
+      "text": "Employees who have completed 90 calendar days of service receive 14 working days of paid sick leave per calendar year. Employees in their first 90 calendar days may take unpaid sick leave.",
+      "metadata": {"topic": "sick-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "SICK-001#2",
+      "document_id": "SICK-001",
+      "title": "Sick Leave Policy",
+      "text": "An employee should notify their manager by 10:00 a.m. on the first day of an illness-related absence. A medical certificate is required when sick leave lasts more than 2 consecutive working days.",
+      "metadata": {"topic": "sick-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "SICK-001#3",
+      "document_id": "SICK-001",
+      "title": "Sick Leave Policy",
+      "text": "Unused sick leave is not carried forward and cannot be exchanged for cash. Time needed to care for an ill family member is covered by the Care and Compassionate Leave Policy rather than this policy.",
+      "metadata": {"topic": "sick-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "PARENTAL-001#1",
+      "document_id": "PARENTAL-001",
+      "title": "Parental Leave Policy",
+      "text": "Employees with at least 6 months of continuous service are eligible for Northstar parental leave. A primary caregiver receives 16 weeks of paid leave, while a supporting caregiver receives 4 weeks of paid leave.",
+      "metadata": {"topic": "parental-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "PARENTAL-001#2",
+      "document_id": "PARENTAL-001",
+      "title": "Parental Leave Policy",
+      "text": "Employees should submit a parental-leave plan at least 8 weeks before the expected start date. When 8 weeks of notice is not reasonably possible, the employee must notify the People team as soon as practicable.",
+      "metadata": {"topic": "parental-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "PARENTAL-001#3",
+      "document_id": "PARENTAL-001",
+      "title": "Parental Leave Policy",
+      "text": "Parental leave may be taken continuously or in no more than 2 blocks within 12 months of the child's arrival. Unused parental leave is not transferable to another employee and cannot be exchanged for cash.",
+      "metadata": {"topic": "parental-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "CARE-001#1",
+      "document_id": "CARE-001",
+      "title": "Care and Compassionate Leave Policy",
+      "text": "Employees receive 5 working days of paid family-care leave per calendar year to care for an ill immediate family member or accompany them to a medical appointment.",
+      "metadata": {"topic": "care-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "CARE-001#2",
+      "document_id": "CARE-001",
+      "title": "Care and Compassionate Leave Policy",
+      "text": "Employees receive 3 working days of paid compassionate leave for each death of an immediate family member. Compassionate leave should be taken within 30 calendar days of the death unless the People team approves an exception.",
+      "metadata": {"topic": "care-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "CARE-001#3",
+      "document_id": "CARE-001",
+      "title": "Care and Compassionate Leave Policy",
+      "text": "Employees should notify their manager as soon as practicable and may be asked for reasonable supporting evidence. Family-care and compassionate leave do not reduce sick-leave or annual-leave balances, and unused days are not carried forward.",
+      "metadata": {"topic": "care-leave", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "EQUIPMENT-001#1",
+      "document_id": "EQUIPMENT-001",
+      "title": "Remote Work Equipment Policy",
+      "text": "Employees approved for regular remote work may claim a one-time equipment allowance of up to $600 in each 3-year period. Flexible-work approval must be in place before an equipment purchase is made.",
+      "metadata": {"topic": "remote-equipment", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "EQUIPMENT-001#2",
+      "document_id": "EQUIPMENT-001",
+      "title": "Remote Work Equipment Policy",
+      "text": "The remote-work equipment allowance covers items such as an ergonomic chair, monitor, keyboard, or laptop stand. It does not cover home internet charges, mobile-phone plans, coworking memberships, or meals.",
+      "metadata": {"topic": "remote-equipment", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "EQUIPMENT-001#3",
+      "document_id": "EQUIPMENT-001",
+      "title": "Remote Work Equipment Policy",
+      "text": "Individual equipment items costing more than $250 require manager approval before purchase. Reimbursement claims must include a receipt and be submitted within 30 calendar days under the Expense Claims Policy.",
+      "metadata": {"topic": "remote-equipment", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "AI-001#1",
+      "document_id": "AI-001",
+      "title": "Responsible Use of AI Tools Policy",
+      "text": "Employees may use only company-approved AI tools for work. Public or Internal information may be entered only after personal identifiers, credentials, and confidential customer details have been removed. Restricted data must not be entered into an AI tool.",
+      "metadata": {"topic": "responsible-ai", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "AI-001#2",
+      "document_id": "AI-001",
+      "title": "Responsible Use of AI Tools Policy",
+      "text": "Employees must review AI-generated output for accuracy, unsupported claims, and inappropriate content before using it. AI output cannot be used as the sole basis for an employment decision or an external customer communication.",
+      "metadata": {"topic": "responsible-ai", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "AI-001#3",
+      "document_id": "AI-001",
+      "title": "Responsible Use of AI Tools Policy",
+      "text": "A suspected disclosure of sensitive information to an AI tool must be reported to security@northstar.example.test within 1 hour. Employees must preserve the relevant prompt and output for the incident review rather than deleting the evidence.",
+      "metadata": {"topic": "responsible-ai", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "OVERTIME-001#1",
+      "document_id": "OVERTIME-001",
+      "title": "Working Hours and Overtime Policy",
+      "text": "The standard full-time work schedule is 40 hours per week from Monday through Friday. Overtime must be approved by a manager before the additional work begins, except during an urgent service incident.",
+      "metadata": {"topic": "overtime", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "OVERTIME-001#2",
+      "document_id": "OVERTIME-001",
+      "title": "Working Hours and Overtime Policy",
+      "text": "Eligible employees receive 1.5 hours of time off for each approved overtime hour. Compensatory time off must be used within 60 calendar days and cannot be exchanged for cash.",
+      "metadata": {"topic": "overtime", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "OVERTIME-001#3",
+      "document_id": "OVERTIME-001",
+      "title": "Working Hours and Overtime Policy",
+      "text": "Being available on call does not by itself count as overtime. Time spent actively responding to an incident does count and must be recorded in the time system within 5 working days.",
+      "metadata": {"topic": "overtime", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "WELLBEING-001#1",
+      "document_id": "WELLBEING-001",
+      "title": "Employee Wellbeing Benefit Policy",
+      "text": "Each employee has an annual wellbeing benefit of up to $400 for eligible expenses such as gym memberships, fitness classes, and counselling sessions.",
+      "metadata": {"topic": "wellbeing", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "WELLBEING-001#2",
+      "document_id": "WELLBEING-001",
+      "title": "Employee Wellbeing Benefit Policy",
+      "text": "The wellbeing benefit does not cover electronic devices, travel, meals, professional certification courses, or equipment purchased for remote work.",
+      "metadata": {"topic": "wellbeing", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "WELLBEING-001#3",
+      "document_id": "WELLBEING-001",
+      "title": "Employee Wellbeing Benefit Policy",
+      "text": "Wellbeing claims require a receipt and must be submitted within 60 calendar days of purchase. Unused wellbeing funds expire at the end of the calendar year and cannot be carried forward.",
+      "metadata": {"topic": "wellbeing", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "VENDOR-001#1",
+      "document_id": "VENDOR-001",
+      "title": "Supplier Due Diligence Policy",
+      "text": "A supplier that will access Restricted data or company systems requires security and privacy review before a contract is signed, regardless of the purchase value.",
+      "metadata": {"topic": "supplier-due-diligence", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "VENDOR-001#2",
+      "document_id": "VENDOR-001",
+      "title": "Supplier Due Diligence Policy",
+      "text": "Supplier due diligence does not replace the quotation and approval thresholds in the Purchasing Policy. Both the due-diligence requirements and the applicable purchasing threshold must be satisfied.",
+      "metadata": {"topic": "supplier-due-diligence", "effective_date": "2026-01-01"}
+    },
+    {
+      "chunk_id": "VENDOR-001#3",
+      "document_id": "VENDOR-001",
+      "title": "Supplier Due Diligence Policy",
+      "text": "Employees must declare an actual or potential conflict of interest before participating in supplier selection. Cash gifts are prohibited, and non-cash supplier gifts worth more than $50 must be declined.",
+      "metadata": {"topic": "supplier-due-diligence", "effective_date": "2026-01-01"}
     }
   ]
 }
