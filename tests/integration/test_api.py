@@ -1,6 +1,7 @@
 """End-to-end tests for the synchronous versioned chat API."""
 
-from collections.abc import Callable
+import hashlib
+from collections.abc import Callable, Sequence
 from datetime import date
 from typing import cast
 from uuid import uuid4
@@ -15,12 +16,16 @@ from agentic_eval_toyapp.config import AppSettings, GenerationProviderKind
 from agentic_eval_toyapp.models import (
     AgentAction,
     AgentActionKind,
+    AgentTurnResult,
+    AgentTurnStatus,
     AnswerAction,
     ClarifyAction,
+    ConversationMessage,
     DocumentMetadata,
     ModelRequest,
     RetrievedChunk,
     SearchAction,
+    TerminationReason,
 )
 from agentic_eval_toyapp.providers import (
     ExtractiveGenerationProvider,
@@ -68,6 +73,32 @@ class _FailingGenerationProvider:
 
     def generate_action(self, request: ModelRequest) -> AgentAction:
         raise GenerationProviderError("private upstream transport detail")
+
+
+class _CountingAgent:
+    """Record turn invocations without depending on retrieval behavior."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(
+        self,
+        user_message: str,
+        *,
+        history: Sequence[ConversationMessage] = (),
+        session_id: str | None = None,
+    ) -> AgentTurnResult:
+        del history, session_id
+        self.calls += 1
+        question = f"Clarify: {user_message}"
+        return AgentTurnResult(
+            status=AgentTurnStatus.CLARIFICATION_REQUIRED,
+            message=question,
+            termination_reason=TerminationReason.CLARIFICATION_REQUIRED,
+            model_calls=1,
+            searches=0,
+            model_actions=(ClarifyAction(question=question),),
+        )
 
 
 def _build_agent(retriever: _PolicyRetriever | None = None) -> RagAgent:
@@ -144,12 +175,16 @@ def test_session_message_and_snapshot_flow_uses_the_rag_agent() -> None:
         "controller_events",
         "validation_findings",
         "model_actions",
+        "execution_steps",
+        "report_references",
         "termination_reason",
         "model_calls",
         "searches",
     }
     assert "18 days" in payload["result"]["message"]
     assert retriever.queries == ["How much annual leave do employees receive?"]
+    assert payload["result"]["execution_steps"] == []
+    assert payload["result"]["report_references"] == []
 
     snapshot: Response = client.get(f"/api/v1/sessions/{session_id}")
     assert snapshot.status_code == 200
@@ -164,6 +199,151 @@ def test_session_message_and_snapshot_flow_uses_the_rag_agent() -> None:
             "content": payload["result"]["message"],
         },
     ]
+
+
+def test_report_upload_is_separate_from_message_submission() -> None:
+    """Uploading should retain metadata without running an agent or adding a turn."""
+    agent = _CountingAgent()
+    client = _build_client(agent=agent)
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+    content = b"# Quarterly report\n\nRevenue increased by 12%."
+
+    uploaded: Response = client.post(
+        f"/api/v1/sessions/{session_id}/files",
+        files={"file": ("report.md", content, "text/markdown")},
+    )
+
+    assert uploaded.status_code == 201
+    payload = uploaded.json()
+    assert payload == {
+        "file_id": payload["file_id"],
+        "filename": "report.md",
+        "media_type": "text/markdown",
+        "byte_size": len(content),
+        "extracted_text_length": len(content.decode()),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "page_count": None,
+    }
+    assert agent.calls == 0
+    assert client.get(f"/api/v1/sessions/{session_id}").json() == {
+        "session_id": session_id,
+        "messages": [],
+        "retained_turns": 0,
+    }
+
+    answered = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "message": "How much annual leave do employees receive?",
+            "file_ids": [payload["file_id"]],
+        },
+    )
+
+    assert answered.status_code == 200
+    assert answered.json()["result"]["status"] == "clarification_required"
+    assert agent.calls == 1
+
+
+def test_report_references_are_isolated_by_session() -> None:
+    """Missing and cross-session IDs must fail before agent execution or history."""
+    retriever = _PolicyRetriever()
+    client = _build_client(agent=_build_agent(retriever))
+    owner_id = client.post("/api/v1/sessions").json()["session_id"]
+    other_id = client.post("/api/v1/sessions").json()["session_id"]
+    uploaded = client.post(
+        f"/api/v1/sessions/{owner_id}/files",
+        files={"file": ("report.txt", b"Private finding", "text/plain")},
+    ).json()
+
+    for session_id, file_id in (
+        (other_id, uploaded["file_id"]),
+        (owner_id, str(uuid4())),
+    ):
+        response: Response = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"message": "Use the report", "file_ids": [file_id]},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["code"] == "report_not_found"
+
+    assert retriever.queries == []
+    assert client.get(f"/api/v1/sessions/{owner_id}").json()["messages"] == []
+    assert client.get(f"/api/v1/sessions/{other_id}").json()["messages"] == []
+
+
+def test_report_endpoint_returns_stable_public_validation_errors() -> None:
+    """Unsupported, malformed, and oversized reports should expose safe errors."""
+    settings = AppSettings(upload_max_bytes=8)
+    application = create_app(
+        settings,
+        session_store=InMemorySessionStore(),
+        agent=_build_agent(),
+    )
+    client = cast(Client, TestClient(application))
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+
+    cases = (
+        (
+            ("report.csv", b"a,b", "text/csv"),
+            415,
+            "unsupported_file_type",
+        ),
+        (
+            ("report.pdf", b"%PDF-bad", "application/pdf"),
+            422,
+            "report_processing_failed",
+        ),
+        (
+            ("report.txt", b"123456789", "text/plain"),
+            413,
+            "report_too_large",
+        ),
+    )
+
+    for file_value, status_code, code in cases:
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/files",
+            files={"file": file_value},
+        )
+        assert response.status_code == status_code
+        assert response.json()["code"] == code
+        assert set(response.json()) == {"code", "message"}
+
+
+def test_report_limits_and_invalid_session_fail_before_agent_execution() -> None:
+    """Attachment-count and session validation should precede agent execution."""
+    retriever = _PolicyRetriever()
+    client = _build_client(agent=_build_agent(retriever))
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+
+    too_many = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "message": "Use these reports",
+            "file_ids": [str(uuid4()), str(uuid4())],
+        },
+    )
+    duplicate = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "message": "Use this report",
+            "file_ids": ["00000000-0000-0000-0000-000000000001"] * 2,
+        },
+    )
+    unknown_session = client.post(
+        f"/api/v1/sessions/{uuid4()}/files",
+        files={"file": ("report.txt", b"Finding", "text/plain")},
+    )
+
+    assert too_many.status_code == 422
+    assert too_many.json()["code"] == "too_many_report_files"
+    assert duplicate.status_code == 422
+    assert duplicate.json()["code"] == "invalid_request"
+    assert unknown_session.status_code == 404
+    assert unknown_session.json()["code"] == "session_not_found"
+    assert retriever.queries == []
+    assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []
 
 
 def test_api_session_history_is_bounded_by_complete_turns() -> None:

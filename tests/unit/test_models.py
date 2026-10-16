@@ -20,13 +20,21 @@ from agentic_eval_toyapp.models import (
     DocumentChunk,
     DocumentMetadata,
     ErrorResponse,
+    ExecutionAgent,
+    ExecutionStatus,
+    ExecutionStep,
     FeatureAvailability,
     HealthResponse,
     KnowledgeCorpus,
     LifecycleMode,
     ModelRequest,
+    PageReportLocator,
+    ReportMediaType,
+    ReportReference,
+    ReportUploadResponse,
     RetrievedChunk,
     SearchAction,
+    SectionReportLocator,
     SessionMessageRequest,
     SessionResponse,
     TerminationReason,
@@ -367,6 +375,128 @@ def test_session_message_request_strips_and_preserves_unicode() -> None:
     request = SessionMessageRequest(message="  休暇ポリシーは何ですか？  ")
 
     assert request.message == "休暇ポリシーは何ですか？"
+    assert request.file_ids == ()
+
+
+def test_session_message_request_accepts_one_unique_file_id() -> None:
+    """One optional report reference should preserve its UUID exactly."""
+    file_id = uuid4()
+
+    request = SessionMessageRequest(message="Analyse this", file_ids=(file_id,))
+
+    assert request.file_ids == (file_id,)
+
+
+def test_session_message_request_rejects_invalid_file_ids() -> None:
+    """Duplicate and unbounded attachment lists must fail schema validation."""
+    file_id = uuid4()
+    with pytest.raises(ValidationError):
+        SessionMessageRequest(
+            message="Analyse this",
+            file_ids=(file_id, file_id),
+        )
+    with pytest.raises(ValidationError):
+        SessionMessageRequest(
+            message="Analyse this",
+            file_ids=tuple(uuid4() for _ in range(11)),
+        )
+
+
+def test_report_upload_metadata_requires_media_specific_page_count() -> None:
+    """PDF page counts and non-PDF metadata must remain internally consistent."""
+    file_id = uuid4()
+
+    pdf = ReportUploadResponse(
+        file_id=file_id,
+        filename="report.pdf",
+        media_type=ReportMediaType.PDF,
+        byte_size=10,
+        extracted_text_length=5,
+        sha256="0" * 64,
+        page_count=2,
+    )
+
+    assert pdf.page_count == 2
+    with pytest.raises(ValidationError, match="page_count"):
+        ReportUploadResponse(
+            file_id=file_id,
+            filename="report.pdf",
+            media_type=ReportMediaType.PDF,
+            byte_size=10,
+            extracted_text_length=5,
+            sha256="0" * 64,
+        )
+    with pytest.raises(ValidationError, match="page_count"):
+        ReportUploadResponse(
+            file_id=file_id,
+            filename="report.txt",
+            media_type=ReportMediaType.TEXT,
+            byte_size=10,
+            extracted_text_length=5,
+            sha256="0" * 64,
+            page_count=1,
+        )
+
+
+def test_report_references_keep_page_and_section_locators_typed() -> None:
+    """Report evidence must remain distinct from policy chunk citations."""
+    file_id = uuid4()
+    page_reference = ReportReference(
+        file_id=file_id,
+        locator=PageReportLocator(page_number=3),
+        excerpt="Revenue increased by 12%.",
+    )
+    section_reference = ReportReference(
+        file_id=file_id,
+        locator=SectionReportLocator(section="Risk summary"),
+        excerpt="Supplier concentration remains high.",
+    )
+
+    assert page_reference.locator.kind == "page"
+    assert section_reference.locator.kind == "section"
+    with pytest.raises(ValidationError):
+        PageReportLocator(page_number=0)
+    with pytest.raises(ValidationError):
+        ReportReference(
+            file_id=file_id,
+            locator=SectionReportLocator(section="Risk"),
+            excerpt=" ",
+        )
+
+
+def test_agent_result_requires_contiguous_execution_step_sequence() -> None:
+    """Execution timelines should be stable, ordered, and one-indexed."""
+    action = AnswerAction(markdown="Answer", citations=())
+    step = ExecutionStep(
+        sequence=1,
+        agent=ExecutionAgent.RAG,
+        action="answer",
+        status=ExecutionStatus.COMPLETED,
+        summary="Returned an answer.",
+        duration_ms=1.5,
+    )
+    result = AgentTurnResult(
+        status=AgentTurnStatus.ANSWERED,
+        message="Answer",
+        termination_reason=TerminationReason.ANSWERED,
+        model_calls=1,
+        searches=0,
+        model_actions=(action,),
+        execution_steps=(step,),
+    )
+
+    assert result.execution_steps == (step,)
+    assert result.report_references == ()
+    with pytest.raises(ValidationError, match="contiguous"):
+        AgentTurnResult(
+            status=AgentTurnStatus.ANSWERED,
+            message="Answer",
+            termination_reason=TerminationReason.ANSWERED,
+            model_calls=1,
+            searches=0,
+            model_actions=(action,),
+            execution_steps=(step.model_copy(update={"sequence": 2}),),
+        )
 
 
 @pytest.mark.parametrize(

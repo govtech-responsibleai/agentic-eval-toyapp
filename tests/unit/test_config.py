@@ -45,6 +45,11 @@ _SETTING_ENV_VARS = (
     "TOYAPP_LANGFUSE_ENVIRONMENT",
     "TOYAPP_LANGFUSE_FLUSH_ON_TURN",
     "TOYAPP_SESSION_MAX_TURNS",
+    "TOYAPP_UPLOAD_MAX_BYTES",
+    "TOYAPP_UPLOAD_MAX_PDF_PAGES",
+    "TOYAPP_UPLOAD_MAX_EXTRACTED_CHARACTERS",
+    "TOYAPP_UPLOAD_MAX_FILES_PER_MESSAGE",
+    "TOYAPP_UPLOAD_MAX_REPORTS_PER_SESSION",
 )
 
 
@@ -91,6 +96,11 @@ def test_settings_defaults_select_the_live_runtime_without_storing_credentials()
     assert settings.langfuse_environment == "development"
     assert settings.langfuse_flush_on_turn is True
     assert settings.session_max_turns == 10
+    assert settings.upload_max_bytes == 5 * 1024 * 1024
+    assert settings.upload_max_pdf_pages == 50
+    assert settings.upload_max_extracted_characters == 100_000
+    assert settings.upload_max_files_per_message == 1
+    assert settings.upload_max_reports_per_session == 10
 
 
 def test_settings_load_prefixed_environment_variables(
@@ -122,6 +132,11 @@ def test_settings_load_prefixed_environment_variables(
     monkeypatch.setenv("TOYAPP_LANGFUSE_ENVIRONMENT", "test")
     monkeypatch.setenv("TOYAPP_LANGFUSE_FLUSH_ON_TURN", "false")
     monkeypatch.setenv("TOYAPP_SESSION_MAX_TURNS", "20")
+    monkeypatch.setenv("TOYAPP_UPLOAD_MAX_BYTES", "4096")
+    monkeypatch.setenv("TOYAPP_UPLOAD_MAX_PDF_PAGES", "25")
+    monkeypatch.setenv("TOYAPP_UPLOAD_MAX_EXTRACTED_CHARACTERS", "50000")
+    monkeypatch.setenv("TOYAPP_UPLOAD_MAX_FILES_PER_MESSAGE", "2")
+    monkeypatch.setenv("TOYAPP_UPLOAD_MAX_REPORTS_PER_SESSION", "15")
 
     settings = AppSettings()
 
@@ -153,6 +168,11 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.langfuse_environment == "test"
     assert settings.langfuse_flush_on_turn is False
     assert settings.session_max_turns == 20
+    assert settings.upload_max_bytes == 4096
+    assert settings.upload_max_pdf_pages == 25
+    assert settings.upload_max_extracted_characters == 50_000
+    assert settings.upload_max_files_per_message == 2
+    assert settings.upload_max_reports_per_session == 15
 
 
 def test_live_configuration_requires_both_shared_openai_values() -> None:
@@ -251,6 +271,13 @@ def test_settings_reject_blank_required_text(field: str) -> None:
         ("generation_timeout_seconds", 0),
         ("session_max_turns", 0),
         ("session_max_turns", 101),
+        ("upload_max_bytes", 0),
+        ("upload_max_pdf_pages", 0),
+        ("upload_max_extracted_characters", 0),
+        ("upload_max_files_per_message", 0),
+        ("upload_max_files_per_message", 11),
+        ("upload_max_reports_per_session", 0),
+        ("upload_max_reports_per_session", 101),
     ],
 )
 def test_settings_reject_invalid_retrieval_values(field: str, value: float) -> None:
