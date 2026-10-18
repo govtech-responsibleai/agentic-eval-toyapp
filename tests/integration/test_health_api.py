@@ -73,6 +73,11 @@ def test_ready_reports_session_and_agent_dependencies() -> None:
                 "detail": "retains up to 10 complete turns",
             },
             {
+                "name": "report_store",
+                "status": "pass",
+                "detail": "retains up to 10 processed reports per session",
+            },
+            {
                 "name": "langfuse_tracing",
                 "status": "pass",
                 "detail": "disabled",
@@ -143,6 +148,7 @@ def test_capabilities_advertise_only_operational_chat_features() -> None:
             "semantic_retrieval": True,
             "langfuse_tracing": False,
             "controlled_scenarios": False,
+            "file_uploads": True,
         },
         "actions": ["search", "clarify", "answer"],
         "output_formats": ["application/json"],
@@ -175,5 +181,6 @@ def test_openapi_contains_only_the_intended_application_routes() -> None:
         "/api/v1/capabilities",
         "/api/v1/sessions",
         "/api/v1/sessions/{session_id}",
+        "/api/v1/sessions/{session_id}/files",
         "/api/v1/sessions/{session_id}/messages",
     }

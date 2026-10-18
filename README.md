@@ -15,6 +15,8 @@ The application currently provides:
 - semantic retrieval using a pinned SentenceTransformer and in-memory FAISS;
 - live OpenAI-compatible generation or an explicit deterministic provider;
 - process-local multi-turn sessions;
+- session-scoped upload and validation for UTF-8 text, Markdown, and text-based
+  PDF reports;
 - browser and programmatic API access;
 - optional Langfuse tracing correlated by application session ID;
 - controlled traces for the `harmful_content_refusal` metric;
@@ -88,8 +90,8 @@ The application session UUID is also used as the Langfuse session ID. Keep
 sent before the HTTP turn completes. Set `TOYAPP_LANGFUSE_ENABLED=false` for a
 run that should not export traces.
 
-See [.env.example](.env.example) for model, retrieval, agent, session, and
-service settings.
+See [.env.example](.env.example) for model, retrieval, agent, session, report
+upload, and service settings.
 
 ## Run the application
 
@@ -207,6 +209,33 @@ curl -s -X POST \
   | uv run python -m json.tool
 ```
 
+Upload a report without sending a chat message:
+
+```bash
+curl -s -X POST \
+  http://127.0.0.1:8000/api/v1/sessions/<session_id>/files \
+  -F 'file=@./report.md;type=text/markdown' \
+  | uv run python -m json.tool
+```
+
+The response contains a session-scoped `file_id`, filename, media type, byte
+and extracted-text sizes, and a SHA-256 checksum. Attach that ID only when a
+message is explicitly submitted:
+
+```bash
+curl -s -X POST \
+  http://127.0.0.1:8000/api/v1/sessions/<session_id>/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Use the attached report.","file_ids":["<file_id>"]}' \
+  | uv run python -m json.tool
+```
+
+Upload and message submission are separate operations. An upload alone does
+not invoke the agent, add conversation history, generate an assistant message,
+or export an agent-turn trace. The current single RAG agent does not analyse
+uploaded content; file-aware routing and report analysis are separate
+multi-agent capabilities.
+
 Retrieve the retained public conversation:
 
 ```bash
@@ -228,6 +257,7 @@ the user from submitting additional turns.
 | `GET /ready` | Report initialised chat dependencies. |
 | `GET /api/v1/capabilities` | Advertise the available target features and actions. |
 | `POST /api/v1/sessions` | Create an empty process-local conversation session. |
+| `POST /api/v1/sessions/{session_id}/files` | Validate and retain one session-scoped report without invoking an agent. |
 | `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one synchronous agent turn. |
 | `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |
 
@@ -340,6 +370,7 @@ agentic-eval-toyapp/
 │       ├── prompts/
 │       │   └── system.md                     # Version-controlled agent role and action instructions
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
+│       ├── reports.py                        # Bounded report extraction and session-scoped storage
 │       ├── resources/
 │       │   └── documents.json                # Synthetic Northstar policy corpus
 │       ├── sessions.py                       # Thread-safe bounded in-memory conversation state
@@ -375,6 +406,7 @@ agentic-eval-toyapp/
         ├── test_package.py                   # Package/distribution version consistency test
         ├── test_providers.py                 # Live and deterministic provider boundary tests
         ├── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
+        ├── test_reports.py                   # Report extraction, limits, hashing, and isolation tests
         ├── test_sessions.py                  # Session isolation, history, and truncation tests
         └── test_tracing.py                   # Offline trace shape and session-correlation tests
 ```
@@ -385,6 +417,10 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 ## Current runtime constraints
 
 - Sessions are stored in one process and are lost on restart.
+- Extracted reports are process-local, bounded, and lost on restart; raw upload
+  bytes are not retained after processing.
+- Text-based PDFs are supported, but scanned PDFs and OCR are not.
+- The current RAG agent does not consume report contents.
 - Agent turns are synchronous; there is no cancellation or background job API.
 - The runtime image contains the application only; controlled trace generation
   remains source-repository tooling.

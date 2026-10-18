@@ -8,6 +8,18 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+FilenameString = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
+]
+BoundedSummaryString = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+]
+ReportExcerptString = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=2_000),
+]
 UserMessageString = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=8_000),
@@ -76,6 +88,7 @@ class FeatureAvailability(ApiModel):
     semantic_retrieval: bool = False
     langfuse_tracing: bool = False
     controlled_scenarios: bool = False
+    file_uploads: bool = False
 
 
 class CapabilityResponse(ApiModel):
@@ -281,6 +294,89 @@ class ControllerEvent(ApiModel):
     detail: NonEmptyString
 
 
+class ReportMediaType(StrEnum):
+    """Supported, explicitly validated report media types."""
+
+    TEXT = "text/plain"
+    MARKDOWN = "text/markdown"
+    PDF = "application/pdf"
+
+
+class ReportUploadResponse(ApiModel):
+    """Safe metadata returned after one report is processed and retained."""
+
+    file_id: UUID
+    filename: FilenameString
+    media_type: ReportMediaType
+    byte_size: int = Field(gt=0)
+    extracted_text_length: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page_count: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_page_count(self) -> Self:
+        """Only PDF reports expose a page count."""
+        if self.media_type is ReportMediaType.PDF and self.page_count is None:
+            raise ValueError("PDF reports require page_count")
+        if self.media_type is not ReportMediaType.PDF and self.page_count is not None:
+            raise ValueError("non-PDF reports cannot declare page_count")
+        return self
+
+
+class PageReportLocator(ApiModel):
+    """One one-indexed PDF page supporting an analysis claim."""
+
+    kind: Literal["page"] = "page"
+    page_number: int = Field(ge=1)
+
+
+class SectionReportLocator(ApiModel):
+    """One named text or Markdown section supporting an analysis claim."""
+
+    kind: Literal["section"] = "section"
+    section: NonEmptyString
+
+
+ReportLocator = Annotated[
+    PageReportLocator | SectionReportLocator,
+    Field(discriminator="kind"),
+]
+
+
+class ReportReference(ApiModel):
+    """A source reference into an uploaded report, separate from RAG citations."""
+
+    file_id: UUID
+    locator: ReportLocator
+    excerpt: ReportExcerptString
+
+
+class ExecutionAgent(StrEnum):
+    """Public agent roles that may appear in a Phase 2 execution timeline."""
+
+    COORDINATOR = "coordinator"
+    RAG = "rag"
+    ANALYSIS = "analysis"
+
+
+class ExecutionStatus(StrEnum):
+    """Public completion states for one execution step."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ExecutionStep(ApiModel):
+    """One ordered public action without hidden reasoning or prompt content."""
+
+    sequence: int = Field(ge=1)
+    agent: ExecutionAgent
+    action: NonEmptyString
+    status: ExecutionStatus
+    summary: BoundedSummaryString
+    duration_ms: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
+
+
 class AgentTurnStatus(StrEnum):
     """Public outcome categories for one agent turn."""
 
@@ -312,6 +408,8 @@ class AgentTurnResult(ApiModel):
     controller_events: tuple[ControllerEvent, ...] = ()
     validation_findings: tuple[ValidationFinding, ...] = ()
     model_actions: tuple[AgentAction, ...] = ()
+    execution_steps: tuple[ExecutionStep, ...] = ()
+    report_references: tuple[ReportReference, ...] = ()
     termination_reason: TerminationReason
     model_calls: int = Field(ge=0)
     searches: int = Field(ge=0)
@@ -321,6 +419,12 @@ class AgentTurnResult(ApiModel):
         """Keep status, evidence, citations, and counters internally consistent."""
         if self.searches > self.model_calls:
             raise ValueError("searches cannot exceed model_calls")
+        if tuple(step.sequence for step in self.execution_steps) != tuple(
+            range(1, len(self.execution_steps) + 1)
+        ):
+            raise ValueError(
+                "execution step sequence must be contiguous and one-indexed"
+            )
 
         if self.status is AgentTurnStatus.ANSWERED:
             if self.termination_reason is not TerminationReason.ANSWERED:
@@ -372,6 +476,14 @@ class SessionMessageRequest(ApiModel):
     """One bounded user message submitted to an existing session."""
 
     message: UserMessageString
+    file_ids: tuple[UUID, ...] = Field(default=(), max_length=10)
+
+    @model_validator(mode="after")
+    def validate_unique_file_ids(self) -> Self:
+        """Reject ambiguous duplicate attachment references."""
+        if len(self.file_ids) != len(set(self.file_ids)):
+            raise ValueError("file_ids must be unique")
+        return self
 
 
 class SessionResponse(ApiModel):

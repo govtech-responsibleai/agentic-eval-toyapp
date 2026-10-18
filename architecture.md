@@ -25,6 +25,7 @@ The main design principles are:
 - one Langfuse root observation per user turn when tracing is enabled,
   correlated by application session ID;
 - deterministic, network-free offline tests and explicitly selected live tests;
+- bounded session-scoped report extraction without implicit agent execution;
 - controlled metric cases isolated from the normal application package;
 - a non-root runtime image with the pinned embedding model available offline.
 
@@ -43,6 +44,7 @@ flowchart LR
     Harness[Controlled trace harness] -->|In-process HTTP through TestClient| API
 
     API --> Sessions[In-memory session store]
+    API --> Reports[Session-scoped report store]
     Sessions --> Agent[Bounded RAG agent]
     Agent --> Provider[Generation provider]
     Provider -->|Live mode| Model[OpenAI-compatible model API]
@@ -59,7 +61,8 @@ flowchart LR
     Runs -. session ID join after scoring .-> Comparison
 ```
 
-The browser and programmatic clients use the same FastAPI routes. A message is
+The browser and programmatic clients use the same FastAPI routes. Programmatic
+clients may upload a report independently of message submission. A message is
 executed synchronously inside its session lock. The session store supplies
 bounded public history to the agent, the configured generation provider selects
 the next structured action, and the agent may call retrieval before returning
@@ -85,6 +88,7 @@ Application paths in this table are relative to
 | Startup and configuration | Validate settings and initialise runtime dependencies before serving requests | `config.py`, `app.py` | [Startup flow](#startup-flow) |
 | Shared contracts | Validate corpus, actions, results, sessions, and API payloads | `models.py` | [Contract flow](#contract-flow) |
 | Session store | Isolate sessions and retain bounded complete turns | `sessions.py` | [Session flow](#session-flow) |
+| Report service | Validate, extract, hash, and isolate uploaded reports without invoking an agent | `reports.py`, `app.py` | [Report flow](#report-flow) |
 | RAG agent and controller | Run the bounded structured-action loop | `agent.py`, `prompts/system.md` | [Agent flow](#agent-flow) |
 | Generation providers | Convert model or fixture output into one validated action | `providers.py` | [Provider flow](#provider-flow) |
 | Semantic retrieval | Build and query the immutable FAISS index | `embeddings.py`, `retrieval.py`, `resources/documents.json` | [Retrieval flow](#retrieval-flow) |
@@ -149,6 +153,7 @@ both use this same application factory.
 | `GET /api/v1/capabilities` | Advertise the synchronous chat, semantic retrieval, tracing state, and available actions. |
 | `POST /api/v1/sessions` | Create an empty process-local session. |
 | `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |
+| `POST /api/v1/sessions/{session_id}/files` | Validate and retain one report without creating a conversation turn. |
 | `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one synchronous agent turn. |
 
 The public API uses stable error bodies for missing sessions, invalid requests,
@@ -166,9 +171,14 @@ flowchart TD
     Validation --> Route{Route}
     Route -->|Create session| Create[Session store create]
     Route -->|Get session| Snapshot[Session store snapshot]
+    Route -->|Upload report| FileLookup[Validate session exists]
+    FileLookup --> FileProcess[Bound, validate, hash, and extract]
+    FileProcess --> FileStore[Retain extracted text under session]
+    FileStore --> Response
     Route -->|Submit message| Lookup[Validate session exists]
     Lookup -->|Missing| Error404[404 session_not_found]
-    Lookup --> Resolve[Resolve initialised agent]
+    Lookup --> Attachments[Resolve authorized file IDs]
+    Attachments --> Resolve[Resolve initialised agent]
     Resolve -->|Unavailable| Error503[503 agent_unavailable]
     Resolve --> Turn[Session store run_turn]
     Turn --> Result[Typed SessionMessageResponse]
@@ -176,6 +186,11 @@ flowchart TD
     Snapshot --> Response
     Result --> Response
 ```
+
+The upload route never resolves or invokes the agent. The message route checks
+that each supplied file ID belongs to the session before starting a turn. The
+current RAG agent receives only message text; extracted report content remains
+reserved for the coordinator architecture.
 
 The message route does not expose controlled-case selectors. Consequently,
 normal frontend or API users cannot choose a defect case accidentally.
@@ -191,7 +206,8 @@ printing their values.
 
 The default generation provider is the live OpenAI-compatible provider. A
 deterministic provider must be selected explicitly. Langfuse is independently
-opt-in.
+opt-in. Report byte, PDF-page, extracted-character, per-message attachment,
+and per-session retention bounds are validated settings.
 
 FastAPI lifespan startup resolves the agent before Uvicorn accepts requests.
 This initialises the generation provider, loads the pinned embedding model,
@@ -249,7 +265,9 @@ The main model groups are:
 - corpus contracts: documents, chunks, metadata, and retrieval provenance;
 - action contracts: discriminated `search`, `clarify`, and `answer` actions;
 - execution contracts: model requests, action summaries, findings, controller
-  events, status, termination reason, and final result;
+  events, execution steps, status, termination reason, and final result;
+- report contracts: upload metadata, typed page/section references, and
+  session-message file IDs;
 - session contracts: user messages, retained histories, and message responses.
 
 `AgentTurnResult` enforces consistency between the public status, termination
@@ -314,6 +332,55 @@ flowchart TD
 
 Sessions disappear on process restart and are not shared across multiple
 worker processes. A persistent database is intentionally outside the MVP.
+
+[Back to component index](#component-index)
+
+<a id="report-flow"></a>
+
+## 5A. Report ingestion and storage
+
+`ReportProcessor` treats every upload as untrusted data. It accepts strict
+UTF-8 `.txt`, Markdown `.md`, and text-based `.pdf` files only when the filename
+extension, declared media type, and PDF signature where applicable agree. It
+normalises line endings, calculates SHA-256 over the original bytes, extracts
+PDF text page by page, and enforces byte, page, and extracted-character limits.
+Encrypted, malformed, image-only, empty, and whitespace-only reports fail
+closed. OCR is not performed.
+
+`InMemoryReportStore` allocates a random UUID and retains immutable extracted
+text, page boundaries, and public metadata under the owning application
+session. It does not retain the original bytes. Missing and cross-session IDs
+produce the same public error so callers cannot discover another session's
+files. Stored reports disappear on process restart and are not shared between
+workers.
+
+```mermaid
+flowchart TD
+    Upload[Multipart upload] --> Session[Validate owning session]
+    Session --> Bytes[Read at most byte limit plus one]
+    Bytes --> Type[Validate extension, media type, and signature]
+    Type --> Hash[SHA-256 original bytes]
+    Hash --> Extract{Format}
+    Extract -->|Text or Markdown| UTF8[Strict UTF-8 decode]
+    Extract -->|PDF| Pages[Strict parse and page-by-page extraction]
+    UTF8 --> Bounds[Normalise and enforce text limit]
+    Pages --> Bounds
+    Bounds --> Record[Immutable extracted record]
+    Record --> Store[Session-scoped in-memory report store]
+    Store --> Metadata[Return file ID and metadata]
+    Metadata -. no agent call .-> End[Upload complete]
+
+    Message[Later message plus file ID] --> Ownership[Resolve session ownership]
+    Ownership --> Agent[Existing text-only agent turn]
+```
+
+Message requests accept optional file IDs. Omission preserves the original API
+behavior. Stage 11 validates attachment ownership but deliberately withholds
+report content from the single RAG agent; later coordinator and analysis-agent
+components consume the typed stored records. `execution_steps` and
+`report_references` are additive empty-by-default result fields until those
+components populate them. Report references use page or section locators and
+remain separate from FAISS chunk citations.
 
 [Back to component index](#component-index)
 
@@ -729,7 +796,7 @@ flowchart TD
 Test layers are divided by responsibility:
 
 - unit tests validate settings, schemas, embeddings, retrieval, providers,
-  controller behaviour, sessions, and trace shapes;
+  controller behaviour, sessions, report processing/storage, and trace shapes;
 - integration tests validate API composition, browser assets, semantic RAG,
   provider connectivity, and Langfuse retrieval;
 - trace-case tests validate paired ground truth, selection logic, the exact
@@ -752,6 +819,8 @@ excluded from `make ci`.
 | Synthetic policy corpus | Version-controlled JSON | Immutable across a run | Retrieved chunks only when searched |
 | FAISS index and corpus embeddings | Process memory | Rebuilt at application startup | Provenance only; returned chunks appear in search observations |
 | Conversation history | Process-local session store | Until eviction or process exit | Current user input plus history count; model generation contains serialized public context |
+| Extracted report text and metadata | Process-local report store under owning session | Until process exit | No during upload; future agent turns may trace explicitly submitted report context |
+| Original uploaded report bytes | Request-scoped temporary upload | Discarded after extraction | No |
 | Model credentials | `.env` or process environment | Process configuration | No |
 | Langfuse credentials | `.env` or process environment | Process configuration | No |
 | Normal turn traces | Langfuse | Backend retention policy | Yes |
@@ -764,6 +833,12 @@ excluded from `make ci`.
   recovery lifecycle.
 - Session history is process-local, bounded, and lost on restart.
 - Multiple server workers would not share session state.
+- Uploaded reports are process-local, have no delete endpoint, and disappear on
+  restart. Per-session capacity prevents unbounded abandoned uploads.
+- PDF support is limited to extractable text. OCR, scanned-image analysis, and
+  office-document formats are not supported.
+- Report content is not passed to the current RAG agent; coordinator routing
+  and report analysis are separate capabilities.
 - The first source-based local startup can download the embedding model when it
   is not already cached; the container downloads it only during image build.
 - Langfuse is an external dependency and backend indexing can be eventually

@@ -94,6 +94,15 @@ class AppSettings(BaseSettings):
     langfuse_environment: str = "development"
     langfuse_flush_on_turn: bool = True
     session_max_turns: int = Field(default=10, ge=1, le=100)
+    upload_max_bytes: int = Field(default=5 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
+    upload_max_pdf_pages: int = Field(default=50, ge=1, le=1_000)
+    upload_max_extracted_characters: int = Field(
+        default=100_000,
+        ge=1,
+        le=1_000_000,
+    )
+    upload_max_files_per_message: int = Field(default=1, ge=1, le=10)
+    upload_max_reports_per_session: int = Field(default=10, ge=1, le=100)
 
     @field_validator(
         "app_name",
