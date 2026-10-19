@@ -14,6 +14,7 @@ from agentic_eval_toyapp.models import (
     SessionMessageRequest,
     SessionResponse,
 )
+from agentic_eval_toyapp.reports import StoredReport
 
 
 class SessionNotFoundError(LookupError):
@@ -29,8 +30,9 @@ class AgentRunner(Protocol):
         *,
         history: Sequence[ConversationMessage] = (),
         session_id: str | None = None,
+        reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
-        """Execute one agent turn using explicit prior conversation history."""
+        """Execute one turn using explicit history and authorized reports."""
         ...
 
 
@@ -95,6 +97,7 @@ class InMemorySessionStore:
         user_message: str,
         *,
         agent: AgentRunner,
+        reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
         """Run and append one complete turn atomically within its session."""
         validated_request = SessionMessageRequest(message=user_message)
@@ -109,6 +112,7 @@ class InMemorySessionStore:
                 user.content,
                 history=history,
                 session_id=str(session_id),
+                reports=reports,
             )
             assistant = ConversationMessage(
                 role=ConversationRole.ASSISTANT,

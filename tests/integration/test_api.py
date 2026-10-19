@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.agent import RagAgent
 from agentic_eval_toyapp.app import AgentInitialisationError, create_app
-from agentic_eval_toyapp.config import AppSettings, GenerationProviderKind
+from agentic_eval_toyapp.config import AgentMode, AppSettings, GenerationProviderKind
 from agentic_eval_toyapp.models import (
     AgentAction,
     AgentActionKind,
@@ -32,6 +32,7 @@ from agentic_eval_toyapp.providers import (
     GenerationProviderError,
     ScriptedGenerationProvider,
 )
+from agentic_eval_toyapp.reports import StoredReport
 from agentic_eval_toyapp.sessions import AgentRunner, InMemorySessionStore
 
 
@@ -87,8 +88,9 @@ class _CountingAgent:
         *,
         history: Sequence[ConversationMessage] = (),
         session_id: str | None = None,
+        reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
-        del history, session_id
+        del history, session_id, reports
         self.calls += 1
         question = f"Clarify: {user_message}"
         return AgentTurnResult(
@@ -344,6 +346,59 @@ def test_report_limits_and_invalid_session_fail_before_agent_execution() -> None
     assert unknown_session.json()["code"] == "session_not_found"
     assert retriever.queries == []
     assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []
+
+
+def test_opt_in_coordinator_mode_routes_api_turns_without_initialising_rag() -> None:
+    """Stage 12 wiring should expose direct and deferred routes through the API."""
+    application = create_app(
+        AppSettings(
+            agent_mode=AgentMode.COORDINATOR,
+            generation_provider=GenerationProviderKind.DETERMINISTIC,
+            langfuse_enabled=False,
+        )
+    )
+    with TestClient(application) as raw_client:
+        client = cast(Client, raw_client)
+        session_id = client.post("/api/v1/sessions").json()["session_id"]
+
+        direct = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"message": "Hello"},
+        )
+        policy = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"message": "What is the sick leave policy?"},
+        )
+        uploaded = client.post(
+            f"/api/v1/sessions/{session_id}/files",
+            files={
+                "file": (
+                    "quarterly.md",
+                    b"Revenue increased while supplier risk remained high.",
+                    "text/markdown",
+                )
+            },
+        ).json()
+        analysis = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={
+                "message": "Summarise the main findings.",
+                "file_ids": [uploaded["file_id"]],
+            },
+        )
+
+    assert direct.status_code == 200
+    assert direct.json()["result"]["status"] == "answered"
+    assert [step["action"] for step in direct.json()["result"]["execution_steps"]] == [
+        "inspect_input",
+        "answer",
+    ]
+    assert policy.json()["result"]["termination_reason"] == ("specialist_unavailable")
+    assert policy.json()["result"]["execution_steps"][-1]["action"] == "route_rag"
+    assert analysis.json()["result"]["termination_reason"] == ("specialist_unavailable")
+    assert analysis.json()["result"]["execution_steps"][-1]["action"] == (
+        "route_analysis"
+    )
 
 
 def test_api_session_history_is_bounded_by_complete_turns() -> None:

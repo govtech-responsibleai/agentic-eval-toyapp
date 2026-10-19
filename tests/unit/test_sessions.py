@@ -14,6 +14,7 @@ from agentic_eval_toyapp.models import (
     ConversationRole,
     TerminationReason,
 )
+from agentic_eval_toyapp.reports import StoredReport
 from agentic_eval_toyapp.sessions import InMemorySessionStore, SessionNotFoundError
 
 
@@ -28,7 +29,9 @@ class _RecordingAgent:
         *,
         history: Sequence[ConversationMessage] = (),
         session_id: str | None = None,
+        reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
+        del reports
         self.session_ids.append(session_id)
         self.calls.append((user_message, tuple(history)))
         return AgentTurnResult(
@@ -48,8 +51,9 @@ class _FailingAgent:
         *,
         history: Sequence[ConversationMessage] = (),
         session_id: str | None = None,
+        reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
-        del session_id
+        del session_id, reports
         raise RuntimeError("unexpected agent failure")
 
 
