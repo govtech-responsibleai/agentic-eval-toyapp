@@ -103,12 +103,12 @@ Start the default live-model application:
 make run
 ```
 
-In the default RAG mode, startup validates configuration, loads the pinned
-embedding model, embeds the corpus, and builds the FAISS index before the
-service accepts requests. The first local run downloads the embedding model to
-the Hugging Face cache if it is not already present. Coordinator mode does not
-initialise FAISS until its RAG specialist is connected. `/ready` becomes
-available after the selected top-level agent is initialised.
+In both RAG and coordinator modes, startup validates configuration, loads the
+pinned embedding model, embeds the corpus, and builds the FAISS index before
+the service accepts requests. The first local run downloads the embedding model
+to the Hugging Face cache if it is not already present. `/ready` becomes
+available after the selected top-level agent and its required dependencies are
+initialised.
 
 To run without a live generation request or model-provider credentials, select
 the deterministic provider explicitly:
@@ -130,10 +130,11 @@ make run
 ```
 
 Coordinator mode accepts the same session and message API. It can answer or
-clarify directly and records `inspect_input` plus its selected action in
-`execution_steps`. Its `route_rag` and `route_analysis` decisions currently
-return `specialist_unavailable`; the specialists are connected separately.
-Coordinator-mode Langfuse export is also not advertised as operational yet.
+clarify directly and records public coordinator and RAG actions in
+`execution_steps`. A `route_rag` decision delegates one focused policy task to
+the existing FAISS-backed RAG agent; a `route_analysis` decision still returns
+`specialist_unavailable` until the analysis specialist is connected.
+Coordinator-mode Langfuse export is not advertised as operational yet.
 
 Open these local endpoints:
 
@@ -255,8 +256,10 @@ not invoke the agent, add conversation history, generate an assistant message,
 or export an agent-turn trace. The default RAG runtime does not consume uploaded
 content. In coordinator mode, authorized extracted content is supplied to the
 coordinator only when the user submits the message with its file ID. The
-coordinator can select a typed route, but report analysis is not performed until
-the analysis specialist is connected.
+coordinator may derive a focused policy task from that content and route it to
+the RAG specialist, but uploaded text never becomes policy evidence or enters
+FAISS. Report analysis is not performed until the analysis specialist is
+connected.
 
 Retrieve the retained public conversation:
 
@@ -383,7 +386,7 @@ agentic-eval-toyapp/
 ├── src/
 │   └── agentic_eval_toyapp/
 │       ├── __init__.py                       # Package version
-│       ├── agent.py                          # Bounded structured-action RAG loop
+│       ├── agent.py                          # Bounded RAG loop and coordinator specialist adapter
 │       ├── app.py                            # FastAPI factory, dependency wiring, and routes
 │       ├── config.py                         # Validated environment-backed settings
 │       ├── coordinator.py                    # Bounded coordinator decisions and specialist dispatch
@@ -448,8 +451,9 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
   bytes are not retained after processing.
 - Text-based PDFs are supported, but scanned PDFs and OCR are not.
 - The default RAG agent does not consume report contents.
-- Coordinator mode can answer and clarify directly; RAG/analysis specialist
-  adapters and coordinator trace export are not connected yet.
+- Coordinator mode can answer, clarify, and delegate policy tasks to the RAG
+  specialist. The analysis specialist and coordinator trace export are not
+  connected yet.
 - Agent turns are synchronous; there is no cancellation or background job API.
 - The runtime image contains the application only; controlled trace generation
   remains source-repository tooling.

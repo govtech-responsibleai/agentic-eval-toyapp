@@ -15,6 +15,10 @@ from agentic_eval_toyapp.models import (
     ControllerEvent,
     ControllerEventKind,
     ConversationMessage,
+    ExecutionAction,
+    ExecutionAgent,
+    ExecutionStatus,
+    ExecutionStep,
     ModelRequest,
     RetrievedChunk,
     SearchAction,
@@ -22,6 +26,7 @@ from agentic_eval_toyapp.models import (
     ValidationFinding,
     ValidationFindingCode,
 )
+from agentic_eval_toyapp.orchestration_models import RagHandoffRequest
 from agentic_eval_toyapp.providers import (
     GenerationProvider,
     GenerationProviderError,
@@ -115,6 +120,29 @@ class RagAgent:
             )
             trace.complete(result)
             return result
+
+    def run_delegated(
+        self,
+        user_message: str,
+        *,
+        history: Sequence[ConversationMessage] = (),
+    ) -> AgentTurnResult:
+        """Run beneath a coordinator without creating a standalone trace root."""
+        stripped_message = user_message.strip()
+        if not stripped_message:
+            raise ValueError("user_message must not be blank")
+
+        no_op_recorder = NoOpTraceRecorder()
+        with no_op_recorder.start_turn(
+            session_id=None,
+            user_message=stripped_message,
+            history_message_count=len(history),
+        ) as trace:
+            return self._execute_turn(
+                stripped_message,
+                history=history,
+                trace=trace,
+            )
 
     def _execute_turn(
         self,
@@ -431,3 +459,75 @@ class RagAgent:
             model_calls=model_calls,
             searches=searches,
         )
+
+
+class RagSpecialistAdapter:
+    """Adapt the existing RAG loop to the coordinator handoff contract."""
+
+    _ACTION_MAP = {
+        AgentActionKind.SEARCH: ExecutionAction.SEARCH,
+        AgentActionKind.CLARIFY: ExecutionAction.CLARIFY,
+        AgentActionKind.ANSWER: ExecutionAction.ANSWER,
+    }
+    _FAILED_SEARCH_SUMMARIES = {
+        TerminationReason.RETRIEVAL_ERROR: "Knowledge-base retrieval failed.",
+        TerminationReason.REPEATED_SEARCH: "Rejected a repeated RAG search.",
+        TerminationReason.SEARCH_LIMIT: (
+            "Rejected a RAG search after the search budget was exhausted."
+        ),
+    }
+
+    def __init__(self, agent: RagAgent) -> None:
+        self._agent = agent
+
+    def run(
+        self,
+        request: RagHandoffRequest,
+        *,
+        session_id: str | None = None,
+    ) -> AgentTurnResult:
+        """Execute only the focused task and return public RAG observations."""
+        del session_id  # Stage 16 will attach this work to the coordinator trace.
+        result = self._agent.run_delegated(
+            request.task,
+            history=request.history,
+        )
+        if result.execution_steps:
+            return result
+        return result.model_copy(
+            update={"execution_steps": self._execution_steps(result)}
+        )
+
+    def shutdown(self) -> None:
+        """Release resources owned by the adapted RAG agent."""
+        self._agent.shutdown()
+
+    @classmethod
+    def _execution_steps(
+        cls,
+        result: AgentTurnResult,
+    ) -> tuple[ExecutionStep, ...]:
+        steps = [
+            ExecutionStep(
+                sequence=index,
+                agent=ExecutionAgent.RAG,
+                action=cls._ACTION_MAP[summary.action],
+                status=ExecutionStatus.COMPLETED,
+                summary=summary.detail,
+            )
+            for index, summary in enumerate(result.action_summaries, start=1)
+        ]
+        failed_search_summary = cls._FAILED_SEARCH_SUMMARIES.get(
+            result.termination_reason
+        )
+        if failed_search_summary is not None:
+            steps.append(
+                ExecutionStep(
+                    sequence=len(steps) + 1,
+                    agent=ExecutionAgent.RAG,
+                    action=ExecutionAction.SEARCH,
+                    status=ExecutionStatus.FAILED,
+                    summary=failed_search_summary,
+                )
+            )
+        return tuple(steps)

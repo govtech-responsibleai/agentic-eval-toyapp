@@ -10,9 +10,15 @@ import pytest
 from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
-from agentic_eval_toyapp.agent import RagAgent
+from agentic_eval_toyapp.agent import RagAgent, RagSpecialistAdapter
 from agentic_eval_toyapp.app import AgentInitialisationError, create_app
 from agentic_eval_toyapp.config import AgentMode, AppSettings, GenerationProviderKind
+from agentic_eval_toyapp.coordinator import (
+    CoordinatorAgent,
+    DeterministicCoordinatorGenerationProvider,
+    ScriptedCoordinatorGenerationProvider,
+    load_coordinator_prompt,
+)
 from agentic_eval_toyapp.models import (
     AgentAction,
     AgentActionKind,
@@ -27,6 +33,7 @@ from agentic_eval_toyapp.models import (
     SearchAction,
     TerminationReason,
 )
+from agentic_eval_toyapp.orchestration_models import CoordinatorRouteRagAction
 from agentic_eval_toyapp.providers import (
     ExtractiveGenerationProvider,
     GenerationProviderError,
@@ -108,6 +115,15 @@ def _build_agent(retriever: _PolicyRetriever | None = None) -> RagAgent:
         provider=ExtractiveGenerationProvider(),
         retriever=retriever or _PolicyRetriever(),
         system_prompt="Search before answering and cite retrieved evidence.",
+    )
+
+
+def _build_coordinator(retriever: _PolicyRetriever | None = None) -> CoordinatorAgent:
+    rag_agent = _build_agent(retriever)
+    return CoordinatorAgent(
+        provider=DeterministicCoordinatorGenerationProvider(),
+        system_prompt=load_coordinator_prompt(),
+        rag_specialist=RagSpecialistAdapter(rag_agent),
     )
 
 
@@ -348,14 +364,16 @@ def test_report_limits_and_invalid_session_fail_before_agent_execution() -> None
     assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []
 
 
-def test_opt_in_coordinator_mode_routes_api_turns_without_initialising_rag() -> None:
-    """Stage 12 wiring should expose direct and deferred routes through the API."""
+def test_opt_in_coordinator_mode_delegates_policy_turns_to_rag() -> None:
+    """Coordinator mode should return the existing grounded RAG result."""
+    retriever = _PolicyRetriever()
     application = create_app(
         AppSettings(
             agent_mode=AgentMode.COORDINATOR,
             generation_provider=GenerationProviderKind.DETERMINISTIC,
             langfuse_enabled=False,
-        )
+        ),
+        agent=_build_coordinator(retriever),
     )
     with TestClient(application) as raw_client:
         client = cast(Client, raw_client)
@@ -367,7 +385,7 @@ def test_opt_in_coordinator_mode_routes_api_turns_without_initialising_rag() -> 
         )
         policy = client.post(
             f"/api/v1/sessions/{session_id}/messages",
-            json={"message": "What is the sick leave policy?"},
+            json={"message": "How many annual leave days do employees receive?"},
         )
         uploaded = client.post(
             f"/api/v1/sessions/{session_id}/files",
@@ -393,12 +411,156 @@ def test_opt_in_coordinator_mode_routes_api_turns_without_initialising_rag() -> 
         "inspect_input",
         "answer",
     ]
-    assert policy.json()["result"]["termination_reason"] == ("specialist_unavailable")
-    assert policy.json()["result"]["execution_steps"][-1]["action"] == "route_rag"
+    policy_result = policy.json()["result"]
+    assert policy_result["status"] == "answered"
+    assert policy_result["termination_reason"] == "answered"
+    assert policy_result["citations"] == ["LEAVE-001#1"]
+    assert policy_result["model_calls"] == 3
+    assert policy_result["searches"] == 1
+    assert [
+        (step["agent"], step["action"]) for step in policy_result["execution_steps"]
+    ] == [
+        ("coordinator", "inspect_input"),
+        ("coordinator", "route_rag"),
+        ("rag", "search"),
+        ("rag", "answer"),
+        ("coordinator", "return_response"),
+    ]
+    assert retriever.queries == ["How many annual leave days do employees receive?"]
     assert analysis.json()["result"]["termination_reason"] == ("specialist_unavailable")
     assert analysis.json()["result"]["execution_steps"][-1]["action"] == (
         "route_analysis"
     )
+
+
+def test_file_derived_policy_task_uses_only_corpus_evidence() -> None:
+    """File text may define the task but only corpus chunks may become evidence."""
+    retriever = _PolicyRetriever()
+    application = create_app(
+        AppSettings(
+            agent_mode=AgentMode.COORDINATOR,
+            generation_provider=GenerationProviderKind.DETERMINISTIC,
+            langfuse_enabled=False,
+        ),
+        agent=_build_coordinator(retriever),
+    )
+    with TestClient(application) as raw_client:
+        client = cast(Client, raw_client)
+        session_id = client.post("/api/v1/sessions").json()["session_id"]
+        uploaded = client.post(
+            f"/api/v1/sessions/{session_id}/files",
+            files={
+                "file": (
+                    "policy-question.md",
+                    b"How many annual leave days do employees receive?",
+                    "text/markdown",
+                )
+            },
+        ).json()
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={
+                "message": "Please answer the question in this file.",
+                "file_ids": [uploaded["file_id"]],
+            },
+        )
+
+    result = response.json()["result"]
+    assert response.status_code == 200
+    assert result["status"] == "answered"
+    assert retriever.queries == ["How many annual leave days do employees receive?"]
+    assert result["citations"] == ["LEAVE-001#1"]
+    assert [chunk["chunk_id"] for chunk in result["retrieved_chunks"]] == [
+        "LEAVE-001#1"
+    ]
+    assert all(
+        chunk["text"] != "How many annual leave days do employees receive?"
+        for chunk in result["retrieved_chunks"]
+    )
+
+
+def test_coordinator_rag_delegation_preserves_multi_turn_history() -> None:
+    """A delegated follow-up should retain complete prior public turns."""
+    chunk = _PolicyRetriever().search("fixture")[0]
+    provider = ScriptedGenerationProvider(
+        (
+            SearchAction(query="annual leave"),
+            AnswerAction(
+                markdown="Annual leave policy. [LEAVE-001#1]",
+                citations=("LEAVE-001#1",),
+            ),
+            SearchAction(query="annual leave eligibility"),
+            AnswerAction(
+                markdown="Provide supporting evidence. [LEAVE-001#1]",
+                citations=("LEAVE-001#1",),
+            ),
+        )
+    )
+    rag_agent = RagAgent(
+        provider=provider,
+        retriever=_PolicyRetriever(),
+        system_prompt="Search before answering.",
+    )
+    coordinator = CoordinatorAgent(
+        provider=DeterministicCoordinatorGenerationProvider(),
+        system_prompt=load_coordinator_prompt(),
+        rag_specialist=RagSpecialistAdapter(rag_agent),
+    )
+    client = _build_client(agent=coordinator)
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+
+    first = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"message": "What is the annual leave policy?"},
+    )
+    second = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"message": "What evidence do I need?"},
+    )
+
+    assert first.json()["result"]["retrieved_chunks"] == [chunk.model_dump(mode="json")]
+    assert second.json()["result"]["status"] == "answered"
+    assert [message.content for message in provider.requests[2].history] == [
+        "What is the annual leave policy?",
+        "Annual leave policy. [LEAVE-001#1]",
+    ]
+
+
+def test_coordinator_preserves_zero_evidence_rag_answer() -> None:
+    """An empty search should return the RAG agent's observation-first answer."""
+    rag_agent = RagAgent(
+        provider=ExtractiveGenerationProvider(),
+        retriever=_EmptyRetriever(),
+        system_prompt="Search before answering.",
+    )
+    coordinator = CoordinatorAgent(
+        provider=ScriptedCoordinatorGenerationProvider(
+            (CoordinatorRouteRagAction(task="Unsupported policy question"),)
+        ),
+        system_prompt=load_coordinator_prompt(),
+        rag_specialist=RagSpecialistAdapter(rag_agent),
+    )
+    client = _build_client(agent=coordinator)
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+
+    response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"message": "Tell me about an unsupported policy."},
+    )
+
+    result = response.json()["result"]
+    assert result["status"] == "answered"
+    assert result["retrieved_chunks"] == []
+    assert result["citations"] == []
+    assert result["model_calls"] == 3
+    assert result["searches"] == 1
+    assert [step["action"] for step in result["execution_steps"]] == [
+        "inspect_input",
+        "route_rag",
+        "search",
+        "answer",
+        "return_response",
+    ]
 
 
 def test_api_session_history_is_bounded_by_complete_turns() -> None:

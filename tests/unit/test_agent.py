@@ -1,12 +1,18 @@
 """Tests for the bounded single-agent RAG loop."""
 
 from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from datetime import date
 from pathlib import Path
 
 import pytest
 
-from agentic_eval_toyapp.agent import PromptLoadError, RagAgent, load_system_prompt
+from agentic_eval_toyapp.agent import (
+    PromptLoadError,
+    RagAgent,
+    RagSpecialistAdapter,
+    load_system_prompt,
+)
 from agentic_eval_toyapp.models import (
     AgentAction,
     AgentActionKind,
@@ -17,17 +23,22 @@ from agentic_eval_toyapp.models import (
     ConversationMessage,
     ConversationRole,
     DocumentMetadata,
+    ExecutionAction,
+    ExecutionAgent,
+    ExecutionStatus,
     ModelRequest,
     RetrievedChunk,
     SearchAction,
     TerminationReason,
     ValidationFindingCode,
 )
+from agentic_eval_toyapp.orchestration_models import RagHandoffRequest
 from agentic_eval_toyapp.providers import (
     InvalidGenerationActionError,
     ScriptedGenerationProvider,
 )
 from agentic_eval_toyapp.retrieval import load_corpus
+from agentic_eval_toyapp.tracing import TurnTrace
 
 
 def _chunk(chunk_id: str = "TRAVEL-001#1") -> RetrievedChunk:
@@ -91,6 +102,33 @@ class _AlwaysInvalidProvider:
     def generate_action(self, request: ModelRequest) -> AgentAction:
         self.requests.append(request)
         raise InvalidGenerationActionError("invalid fixture action")
+
+
+class _ForbiddenRootTraceRecorder:
+    """Fail if delegated execution tries to create a standalone trace root."""
+
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def start_turn(
+        self,
+        *,
+        session_id: str | None,
+        user_message: str,
+        history_message_count: int,
+    ) -> AbstractContextManager[TurnTrace]:
+        del session_id, user_message, history_message_count
+        raise AssertionError("delegated RAG must not create a root trace")
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
 
 
 def _agent(
@@ -619,6 +657,118 @@ def test_agent_accepts_unicode_user_message() -> None:
 
     assert result.status is AgentTurnStatus.CLARIFICATION_REQUIRED
     assert provider.requests[0].user_message == "休暇ポリシーは何ですか？"
+
+
+def test_rag_specialist_adapter_preserves_grounded_result_and_public_steps() -> None:
+    """Delegation should expose executed RAG work without changing its result."""
+    chunk = _chunk()
+    agent, provider = _agent(
+        (
+            SearchAction(query="domestic meals"),
+            AnswerAction(
+                markdown="The limit is $50 per day. [TRAVEL-001#1]",
+                citations=("TRAVEL-001#1",),
+            ),
+        ),
+        _StubRetriever({"domestic meals": (chunk,)}),
+    )
+    history = (
+        ConversationMessage(
+            role=ConversationRole.USER,
+            content="Earlier policy question",
+        ),
+        ConversationMessage(
+            role=ConversationRole.ASSISTANT,
+            content="Earlier policy answer",
+        ),
+    )
+
+    result = RagSpecialistAdapter(agent).run(
+        RagHandoffRequest(task="Explain domestic meal limits", history=history),
+        session_id="session-123",
+    )
+
+    assert provider.requests[0].user_message == "Explain domestic meal limits"
+    assert provider.requests[0].history == history
+    assert result.citations == ("TRAVEL-001#1",)
+    assert result.retrieved_chunks == (chunk,)
+    assert [step.agent for step in result.execution_steps] == [
+        ExecutionAgent.RAG,
+        ExecutionAgent.RAG,
+    ]
+    assert [step.action for step in result.execution_steps] == [
+        ExecutionAction.SEARCH,
+        ExecutionAction.ANSWER,
+    ]
+    assert all(
+        step.status is ExecutionStatus.COMPLETED for step in result.execution_steps
+    )
+
+
+def test_rag_specialist_adapter_bypasses_standalone_trace_root() -> None:
+    """Stage 13 must not create a second root before shared tracing exists."""
+    recorder = _ForbiddenRootTraceRecorder()
+    agent = RagAgent(
+        provider=ScriptedGenerationProvider(
+            (AnswerAction(markdown="Direct policy answer", citations=()),)
+        ),
+        retriever=_StubRetriever({}),
+        system_prompt="Search, clarify, or answer.",
+        trace_recorder=recorder,
+    )
+    adapter = RagSpecialistAdapter(agent)
+
+    result = adapter.run(RagHandoffRequest(task="Policy question"))
+    adapter.shutdown()
+
+    assert result.status is AgentTurnStatus.ANSWERED
+    assert recorder.shutdown_calls == 1
+
+
+def test_rag_adapter_marks_retrieval_failure_without_private_detail() -> None:
+    """A failed delegated search should remain observable and safely bounded."""
+    agent, _provider = _agent(
+        (SearchAction(query="domestic meals"),),
+        _StubRetriever({}, error=RuntimeError("private retrieval detail")),
+    )
+
+    result = RagSpecialistAdapter(agent).run(
+        RagHandoffRequest(task="Explain domestic meal limits")
+    )
+
+    assert result.termination_reason is TerminationReason.RETRIEVAL_ERROR
+    assert len(result.execution_steps) == 1
+    assert result.execution_steps[0].agent is ExecutionAgent.RAG
+    assert result.execution_steps[0].action is ExecutionAction.SEARCH
+    assert result.execution_steps[0].status is ExecutionStatus.FAILED
+    assert "private" not in result.execution_steps[0].summary
+
+
+def test_rag_specialist_adapter_records_rejected_repeated_search() -> None:
+    """A terminal duplicate search should appear after the completed retrieval."""
+    chunk = _chunk()
+    agent, _provider = _agent(
+        (
+            SearchAction(query="domestic meals"),
+            SearchAction(query="  DOMESTIC   meals  "),
+        ),
+        _StubRetriever({"domestic meals": (chunk,)}),
+        max_model_calls=2,
+    )
+
+    result = RagSpecialistAdapter(agent).run(
+        RagHandoffRequest(task="Explain domestic meal limits")
+    )
+
+    assert result.termination_reason is TerminationReason.REPEATED_SEARCH
+    assert [step.action for step in result.execution_steps] == [
+        ExecutionAction.SEARCH,
+        ExecutionAction.SEARCH,
+    ]
+    assert [step.status for step in result.execution_steps] == [
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.FAILED,
+    ]
 
 
 @pytest.mark.parametrize(

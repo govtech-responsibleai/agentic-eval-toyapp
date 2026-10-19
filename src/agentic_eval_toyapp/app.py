@@ -18,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from agentic_eval_toyapp import __version__
-from agentic_eval_toyapp.agent import RagAgent, load_system_prompt
+from agentic_eval_toyapp.agent import RagAgent, RagSpecialistAdapter, load_system_prompt
 from agentic_eval_toyapp.config import (
     AgentMode,
     AppSettings,
@@ -126,11 +126,20 @@ class _AgentResolver:
             self._agent.shutdown()
 
 
-def _build_generation_provider(settings: AppSettings) -> GenerationProvider:
+def _build_generation_provider(
+    settings: AppSettings,
+    *,
+    instrument_with_langfuse: bool | None = None,
+) -> GenerationProvider:
     """Construct the explicitly selected process-level generation provider."""
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
         return ExtractiveGenerationProvider()
     api_key, base_url = settings.require_openai_configuration()
+    tracing_enabled = (
+        settings.langfuse_enabled
+        if instrument_with_langfuse is None
+        else instrument_with_langfuse
+    )
     return OpenAIChatGenerationProvider(
         api_key=api_key,
         base_url=base_url,
@@ -139,7 +148,7 @@ def _build_generation_provider(settings: AppSettings) -> GenerationProvider:
         temperature=settings.generation_temperature,
         max_tokens=settings.generation_max_tokens,
         timeout_seconds=settings.generation_timeout_seconds,
-        instrument_with_langfuse=settings.langfuse_enabled,
+        instrument_with_langfuse=tracing_enabled,
     )
 
 
@@ -177,9 +186,21 @@ def _build_trace_recorder(
     )
 
 
-def _build_rag_agent(settings: AppSettings) -> RagAgent:
+def _build_rag_agent(
+    settings: AppSettings,
+    *,
+    trace_export_enabled: bool | None = None,
+) -> RagAgent:
     """Construct the configured RAG provider, retriever, and tracing boundary."""
-    generation_provider = _build_generation_provider(settings)
+    export_traces = (
+        settings.langfuse_enabled
+        if trace_export_enabled is None
+        else trace_export_enabled
+    )
+    generation_provider = _build_generation_provider(
+        settings,
+        instrument_with_langfuse=export_traces,
+    )
     embedding_provider = SentenceTransformerEmbeddingProvider(
         model_id=settings.embedding_model_id,
         revision=settings.embedding_model_revision,
@@ -194,11 +215,15 @@ def _build_rag_agent(settings: AppSettings) -> RagAgent:
         minimum_similarity=settings.retrieval_min_similarity,
     )
     system_prompt = load_system_prompt()
-    trace_recorder = _build_trace_recorder(
-        settings,
-        provider=generation_provider,
-        retriever=retriever,
-        system_prompt=system_prompt,
+    trace_recorder = (
+        _build_trace_recorder(
+            settings,
+            provider=generation_provider,
+            retriever=retriever,
+            system_prompt=system_prompt,
+        )
+        if export_traces
+        else NoOpTraceRecorder()
     )
     return RagAgent(
         provider=generation_provider,
@@ -212,7 +237,7 @@ def _build_rag_agent(settings: AppSettings) -> RagAgent:
 
 
 def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
-    """Construct the opt-in Stage 12 coordinator without specialist adapters."""
+    """Construct the coordinator with its Stage 13 RAG specialist."""
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
         provider = DeterministicCoordinatorGenerationProvider()
     else:
@@ -226,10 +251,14 @@ def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
             max_tokens=settings.generation_max_tokens,
             timeout_seconds=settings.generation_timeout_seconds,
         )
+    rag_specialist = RagSpecialistAdapter(
+        _build_rag_agent(settings, trace_export_enabled=False)
+    )
     return CoordinatorAgent(
         provider=provider,
         system_prompt=load_coordinator_prompt(),
         max_model_calls=settings.coordinator_max_model_calls,
+        rag_specialist=rag_specialist,
     )
 
 
@@ -264,7 +293,7 @@ async def _handle_agent_initialisation_error(
     return _public_error(
         status_code=503,
         code="agent_unavailable",
-        message="The RAG agent is not ready.",
+        message="The configured agent runtime is not ready.",
     )
 
 
@@ -534,7 +563,7 @@ def create_app(
             service_version=__version__,
             features=FeatureAvailability(
                 session_chat=True,
-                semantic_retrieval=resolved_settings.agent_mode is AgentMode.RAG,
+                semantic_retrieval=True,
                 langfuse_tracing=tracing_operational,
                 file_uploads=True,
             ),
