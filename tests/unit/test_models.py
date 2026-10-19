@@ -20,6 +20,7 @@ from agentic_eval_toyapp.models import (
     DocumentChunk,
     DocumentMetadata,
     ErrorResponse,
+    ExecutionAction,
     ExecutionAgent,
     ExecutionStatus,
     ExecutionStep,
@@ -470,7 +471,7 @@ def test_agent_result_requires_contiguous_execution_step_sequence() -> None:
     step = ExecutionStep(
         sequence=1,
         agent=ExecutionAgent.RAG,
-        action="answer",
+        action=ExecutionAction.ANSWER,
         status=ExecutionStatus.COMPLETED,
         summary="Returned an answer.",
         duration_ms=1.5,

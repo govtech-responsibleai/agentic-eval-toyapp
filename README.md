@@ -12,6 +12,8 @@ known expected metric outcomes.
 The application currently provides:
 
 - a single bounded agent with `search`, `clarify`, and `answer` actions;
+- an opt-in coordinator that can answer, clarify, or select one typed specialist
+  route from combined text and authorized report input;
 - semantic retrieval using a pinned SentenceTransformer and in-memory FAISS;
 - live OpenAI-compatible generation or an explicit deterministic provider;
 - process-local multi-turn sessions;
@@ -101,10 +103,12 @@ Start the default live-model application:
 make run
 ```
 
-Startup validates configuration, loads the pinned embedding model, embeds the
-corpus, and builds the FAISS index before the service accepts requests. The
-first local run downloads the embedding model to the Hugging Face cache if it
-is not already present. `/ready` becomes available after startup completes.
+In the default RAG mode, startup validates configuration, loads the pinned
+embedding model, embeds the corpus, and builds the FAISS index before the
+service accepts requests. The first local run downloads the embedding model to
+the Hugging Face cache if it is not already present. Coordinator mode does not
+initialise FAISS until its RAG specialist is connected. `/ready` becomes
+available after the selected top-level agent is initialised.
 
 To run without a live generation request or model-provider credentials, select
 the deterministic provider explicitly:
@@ -114,6 +118,22 @@ TOYAPP_GENERATION_PROVIDER=deterministic make run
 ```
 
 This still uses the real pinned embedding model and FAISS retriever.
+
+To inspect the coordinator routing path without changing the verified RAG
+default, select it explicitly:
+
+```bash
+TOYAPP_AGENT_MODE=coordinator \
+TOYAPP_GENERATION_PROVIDER=deterministic \
+TOYAPP_LANGFUSE_ENABLED=false \
+make run
+```
+
+Coordinator mode accepts the same session and message API. It can answer or
+clarify directly and records `inspect_input` plus its selected action in
+`execution_steps`. Its `route_rag` and `route_analysis` decisions currently
+return `specialist_unavailable`; the specialists are connected separately.
+Coordinator-mode Langfuse export is also not advertised as operational yet.
 
 Open these local endpoints:
 
@@ -153,8 +173,8 @@ make docker-logs
 make docker-down
 ```
 
-The startup log states the selected generation provider and whether Langfuse
-tracing is enabled.
+The startup log states the selected top-level agent, generation provider, and
+whether Langfuse tracing is enabled.
 
 The first image build needs network access for locked Python packages, the base
 images, and the pinned embedding model. Platform AI and Langfuse remain external
@@ -232,9 +252,11 @@ curl -s -X POST \
 
 Upload and message submission are separate operations. An upload alone does
 not invoke the agent, add conversation history, generate an assistant message,
-or export an agent-turn trace. The current single RAG agent does not analyse
-uploaded content; file-aware routing and report analysis are separate
-multi-agent capabilities.
+or export an agent-turn trace. The default RAG runtime does not consume uploaded
+content. In coordinator mode, authorized extracted content is supplied to the
+coordinator only when the user submits the message with its file ID. The
+coordinator can select a typed route, but report analysis is not performed until
+the analysis specialist is connected.
 
 Retrieve the retained public conversation:
 
@@ -364,11 +386,14 @@ agentic-eval-toyapp/
 │       ├── agent.py                          # Bounded structured-action RAG loop
 │       ├── app.py                            # FastAPI factory, dependency wiring, and routes
 │       ├── config.py                         # Validated environment-backed settings
+│       ├── coordinator.py                    # Bounded coordinator decisions and specialist dispatch
 │       ├── embeddings.py                     # Embedding interfaces, validation, and providers
 │       ├── models.py                         # API, retrieval, agent, and session contracts
+│       ├── orchestration_models.py           # Coordinator actions, attachments, and handoff contracts
 │       ├── providers.py                      # Live, deterministic, and scripted generation adapters
 │       ├── prompts/
-│       │   └── system.md                     # Version-controlled agent role and action instructions
+│       │   ├── coordinator.md                # Coordinator routing and trust-boundary instructions
+│       │   └── system.md                     # RAG role and action instructions
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
 │       ├── reports.py                        # Bounded report extraction and session-scoped storage
 │       ├── resources/
@@ -400,9 +425,11 @@ agentic-eval-toyapp/
     └── unit/
         ├── test_agent.py                     # Agent actions, bounds, repair, and findings tests
         ├── test_config.py                    # Defaults, environment aliases, and secret validation tests
+        ├── test_coordinator.py               # Coordinator routing, limits, providers, and handoff tests
         ├── test_build_scripts.py             # Container smoke validation and build-input edge cases
         ├── test_embeddings.py                # Embedding validation and normalization tests
         ├── test_models.py                    # Pydantic contract and consistency tests
+        ├── test_orchestration_models.py      # Coordinator action and handoff schema tests
         ├── test_package.py                   # Package/distribution version consistency test
         ├── test_providers.py                 # Live and deterministic provider boundary tests
         ├── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
@@ -420,7 +447,9 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 - Extracted reports are process-local, bounded, and lost on restart; raw upload
   bytes are not retained after processing.
 - Text-based PDFs are supported, but scanned PDFs and OCR are not.
-- The current RAG agent does not consume report contents.
+- The default RAG agent does not consume report contents.
+- Coordinator mode can answer and clarify directly; RAG/analysis specialist
+  adapters and coordinator trace export are not connected yet.
 - Agent turns are synchronous; there is no cancellation or background job API.
 - The runtime image contains the application only; controlled trace generation
   remains source-repository tooling.

@@ -10,11 +10,13 @@ from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.app import create_app
 from agentic_eval_toyapp.config import (
+    AgentMode,
     AppSettings,
     GenerationProviderKind,
     LogLevel,
 )
 from agentic_eval_toyapp.models import AgentTurnResult, ConversationMessage
+from agentic_eval_toyapp.reports import StoredReport
 from agentic_eval_toyapp.sessions import AgentRunner
 
 
@@ -25,8 +27,9 @@ class _IntrospectionAgent:
         *,
         history: Sequence[ConversationMessage] = (),
         session_id: str | None = None,
+        reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
-        del session_id
+        del session_id, reports
         raise AssertionError("introspection endpoints must not execute the agent")
 
 
@@ -85,7 +88,7 @@ def test_ready_reports_session_and_agent_dependencies() -> None:
             {
                 "name": "rag_agent",
                 "status": "pass",
-                "detail": "agent dependencies initialised",
+                "detail": "rag agent dependencies initialised",
             },
         ],
     }
@@ -128,10 +131,44 @@ def test_startup_logs_safe_runtime_modes() -> None:
         pass
 
     log_info.assert_called_once_with(
-        "application_started generation_provider=%s langfuse_enabled=%s",
+        "application_started agent_mode=%s generation_provider=%s langfuse_enabled=%s",
+        "rag",
         "deterministic",
         "false",
     )
+
+
+def test_coordinator_capabilities_exclude_deferred_specialists_and_tracing() -> None:
+    """Stage 12 must not advertise Stage 13, 14, or 16 behavior as operational."""
+    settings = AppSettings(
+        agent_mode=AgentMode.COORDINATOR,
+        generation_provider=GenerationProviderKind.DETERMINISTIC,
+        langfuse_enabled=True,
+    )
+    client = cast(
+        Client,
+        TestClient(create_app(settings, agent=_IntrospectionAgent())),
+    )
+
+    readiness = client.get("/ready").json()
+    capabilities = client.get("/api/v1/capabilities").json()
+
+    assert readiness["checks"][3]["detail"] == (
+        "coordinator trace export is deferred to Stage 16"
+    )
+    assert readiness["checks"][4] == {
+        "name": "coordinator_agent",
+        "status": "pass",
+        "detail": "coordinator agent dependencies initialised",
+    }
+    assert capabilities["features"]["semantic_retrieval"] is False
+    assert capabilities["features"]["langfuse_tracing"] is False
+    assert capabilities["actions"] == [
+        "answer",
+        "clarify",
+        "route_rag",
+        "route_analysis",
+    ]
 
 
 def test_capabilities_advertise_only_operational_chat_features() -> None:

@@ -359,6 +359,19 @@ class ExecutionAgent(StrEnum):
     ANALYSIS = "analysis"
 
 
+class ExecutionAction(StrEnum):
+    """Fixed public action vocabulary for the Phase 2 execution timeline."""
+
+    INSPECT_INPUT = "inspect_input"
+    ANSWER = "answer"
+    CLARIFY = "clarify"
+    ROUTE_RAG = "route_rag"
+    ROUTE_ANALYSIS = "route_analysis"
+    SEARCH = "search"
+    INSPECT_CONTENT = "inspect_content"
+    RETURN_RESPONSE = "return_response"
+
+
 class ExecutionStatus(StrEnum):
     """Public completion states for one execution step."""
 
@@ -371,7 +384,7 @@ class ExecutionStep(ApiModel):
 
     sequence: int = Field(ge=1)
     agent: ExecutionAgent
-    action: NonEmptyString
+    action: ExecutionAction
     status: ExecutionStatus
     summary: BoundedSummaryString
     duration_ms: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
@@ -395,6 +408,9 @@ class TerminationReason(StrEnum):
     SEARCH_LIMIT = "search_limit"
     PROVIDER_ERROR = "provider_error"
     RETRIEVAL_ERROR = "retrieval_error"
+    SPECIALIST_UNAVAILABLE = "specialist_unavailable"
+    INVALID_HANDOFF = "invalid_handoff"
+    DELEGATION_ERROR = "delegation_error"
 
 
 class AgentTurnResult(ApiModel):

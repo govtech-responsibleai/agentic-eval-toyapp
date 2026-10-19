@@ -8,10 +8,10 @@ For installation, configuration, and usage commands, see [README.md](README.md).
 
 ## Scope and design principles
 
-The application is a small, synchronous retrieval-augmented generation (RAG)
-target for METIS. It deliberately has one agent and a narrow action set so that
-evaluation results can be attributed to observable model and controller
-behaviour.
+The application is a small, synchronous agentic target for METIS. Its default
+runtime remains the verified RAG agent. An opt-in coordinator runtime adds
+typed direct-answer, clarification, and specialist-routing decisions while
+keeping unfinished specialist adapters outside the operational path.
 
 The main design principles are:
 
@@ -20,9 +20,11 @@ The main design principles are:
   boundaries;
 - model-selected `search`, `clarify`, and `answer` actions in the default
   live mode;
+- model-selected `answer`, `clarify`, `route_rag`, and `route_analysis`
+  decisions in coordinator mode;
 - bounded controller behaviour without replacing model-quality failures;
 - immutable, reproducible retrieval inputs and provenance;
-- one Langfuse root observation per user turn when tracing is enabled,
+- one Langfuse root observation per RAG user turn when tracing is enabled,
   correlated by application session ID;
 - deterministic, network-free offline tests and explicitly selected live tests;
 - bounded session-scoped report extraction without implicit agent execution;
@@ -45,10 +47,18 @@ flowchart LR
 
     API --> Sessions[In-memory session store]
     API --> Reports[Session-scoped report store]
-    Sessions --> Agent[Bounded RAG agent]
-    Agent --> Provider[Generation provider]
+    Sessions --> Runtime{Selected agent mode}
+    Reports -->|Authorized reports on message submission| Runtime
+    Runtime -->|Default| Agent[Bounded RAG agent]
+    Runtime -->|Opt-in| Coordinator[Coordinator agent]
+    Agent --> Provider[RAG generation provider]
+    Coordinator --> CoordinatorProvider[Coordinator generation provider]
     Provider -->|Live mode| Model[OpenAI-compatible model API]
+    CoordinatorProvider -->|Live mode| Model
     Provider -->|Deterministic mode| Extractive[Local extractive actions]
+    CoordinatorProvider -->|Deterministic mode| Routing[Local routing fixture]
+    Coordinator -->|Direct| Result[Answer or clarification]
+    Coordinator -. typed route; adapter deferred .-> Specialists[RAG or analysis specialist]
     Agent --> Retriever[FAISS retriever]
     Retriever --> Corpus[Synthetic policy corpus]
     Retriever --> Embedder[SentenceTransformer]
@@ -64,11 +74,12 @@ flowchart LR
 The browser and programmatic clients use the same FastAPI routes. Programmatic
 clients may upload a report independently of message submission. A message is
 executed synchronously inside its session lock. The session store supplies
-bounded public history to the agent, the configured generation provider selects
-the next structured action, and the agent may call retrieval before returning
-an answer or clarification. In the default live mode, action selection belongs
-to the model. When enabled, tracing observes the same execution without
-changing the public result.
+bounded public history and authorized report records to the selected top-level
+agent. In default RAG mode, the agent may call retrieval before returning an
+answer or clarification and ignores report content. In coordinator mode, the
+model selects a direct response or one typed specialist route from the combined
+input. Action and route selection belong to the model; controller validation
+does not silently replace a semantically poor decision.
 
 The controlled trace harness is repository tooling. It creates the normal
 FastAPI application with a case-scoped completion client, calls the normal
@@ -89,6 +100,7 @@ Application paths in this table are relative to
 | Shared contracts | Validate corpus, actions, results, sessions, and API payloads | `models.py` | [Contract flow](#contract-flow) |
 | Session store | Isolate sessions and retain bounded complete turns | `sessions.py` | [Session flow](#session-flow) |
 | Report service | Validate, extract, hash, and isolate uploaded reports without invoking an agent | `reports.py`, `app.py` | [Report flow](#report-flow) |
+| Coordinator | Inspect combined input, select one typed decision, and enforce one-delegation boundaries | `coordinator.py`, `orchestration_models.py`, `prompts/coordinator.md` | [Coordinator flow](#coordinator-flow) |
 | RAG agent and controller | Run the bounded structured-action loop | `agent.py`, `prompts/system.md` | [Agent flow](#agent-flow) |
 | Generation providers | Convert model or fixture output into one validated action | `providers.py` | [Provider flow](#provider-flow) |
 | Semantic retrieval | Build and query the immutable FAISS index | `embeddings.py`, `retrieval.py`, `resources/documents.json` | [Retrieval flow](#retrieval-flow) |
@@ -188,9 +200,10 @@ flowchart TD
 ```
 
 The upload route never resolves or invokes the agent. The message route checks
-that each supplied file ID belongs to the session before starting a turn. The
-current RAG agent receives only message text; extracted report content remains
-reserved for the coordinator architecture.
+that each supplied file ID belongs to the session before starting a turn. It
+then passes the authorized records through the session boundary. The default
+RAG agent explicitly ignores those records; the coordinator receives their
+metadata and extracted content as typed turn input.
 
 The message route does not expose controlled-case selectors. Consequently,
 normal frontend or API users cannot choose a defect case accidentally.
@@ -204,18 +217,20 @@ optional `.env` file. Settings are immutable after validation. Secret values
 use `SecretStr`, and configuration errors name missing variables without
 printing their values.
 
-The default generation provider is the live OpenAI-compatible provider. A
-deterministic provider must be selected explicitly. Langfuse is independently
-opt-in. Report byte, PDF-page, extracted-character, per-message attachment,
-and per-session retention bounds are validated settings.
+The default top-level agent is the RAG runtime and the default generation
+provider is the live OpenAI-compatible provider. Coordinator mode and the
+deterministic provider must each be selected explicitly. Langfuse is
+independently configured. Report byte, PDF-page, extracted-character,
+per-message attachment, and per-session retention bounds are validated
+settings.
 
-FastAPI lifespan startup resolves the agent before Uvicorn accepts requests.
-This initialises the generation provider, loads the pinned embedding model,
-validates and embeds the corpus, builds the FAISS index, loads the system
-prompt, and constructs either a real or no-op trace recorder. Startup fails
-closed if any required dependency cannot be initialised.
-After successful initialisation, one operational log records only the selected
-generation provider and whether Langfuse is enabled.
+FastAPI lifespan startup resolves the selected agent before Uvicorn accepts
+requests. RAG mode loads the pinned embedding model, corpus, FAISS index,
+system prompt, provider, and trace recorder. Coordinator mode loads its routing
+prompt and provider but does not initialise FAISS until the RAG specialist is
+connected. Startup fails closed if a dependency required by the selected mode
+cannot be initialised. One operational log records only the selected agent
+mode, generation provider, and whether Langfuse is enabled.
 
 <a id="startup-flow"></a>
 
@@ -227,11 +242,12 @@ flowchart TD
     Factory --> Settings[Load and validate AppSettings]
     Settings --> Resolver[Create lazy AgentResolver]
     Resolver --> Lifespan[FastAPI lifespan starts]
-    Lifespan --> Generation[Build selected generation provider]
-    Lifespan --> Embedding[Load pinned SentenceTransformer]
+    Lifespan --> Mode{Agent mode}
+    Mode -->|rag| Generation[Build RAG generation provider]
+    Mode -->|rag| Embedding[Load pinned SentenceTransformer]
     Embedding --> Corpus[Load and validate corpus]
     Corpus --> Index[Embed corpus and build FAISS index]
-    Lifespan --> Prompt[Load versioned system prompt]
+    Mode -->|rag| Prompt[Load RAG system prompt]
     Generation --> Tracing[Build Langfuse or no-op recorder]
     Index --> Tracing
     Prompt --> Tracing
@@ -239,7 +255,12 @@ flowchart TD
     Index --> Agent[Construct RagAgent]
     Prompt --> Agent
     Tracing --> Agent
+    Mode -->|coordinator| CoordinatorProvider[Build coordinator provider]
+    Mode -->|coordinator| CoordinatorPrompt[Load coordinator prompt]
+    CoordinatorProvider --> Coordinator[Construct CoordinatorAgent]
+    CoordinatorPrompt --> Coordinator
     Agent --> Ready[Server accepts requests]
+    Coordinator --> Ready
     Ready --> Shutdown[Application shutdown]
     Shutdown --> Flush[Flush and close tracing]
 ```
@@ -263,7 +284,9 @@ The main model groups are:
 
 - service contracts: health, readiness, capabilities, and public errors;
 - corpus contracts: documents, chunks, metadata, and retrieval provenance;
-- action contracts: discriminated `search`, `clarify`, and `answer` actions;
+- RAG action contracts: discriminated `search`, `clarify`, and `answer` actions;
+- coordinator contracts: discriminated direct and routing actions, authorized
+  attachments, and typed RAG/analysis handoff requests;
 - execution contracts: model requests, action summaries, findings, controller
   events, execution steps, status, termination reason, and final result;
 - report contracts: upload metadata, typed page/section references, and
@@ -283,11 +306,14 @@ flowchart LR
     JSON[HTTP JSON] --> Request[SessionMessageRequest]
     CorpusJSON[documents.json] --> Corpus[KnowledgeCorpus]
     ModelJSON[Structured model JSON] --> Action[AgentAction union]
+    CoordinatorJSON[Coordinator model JSON] --> Route[CoordinatorAction union]
     Request --> ModelRequest[ModelRequest context]
     Corpus --> Retrieved[RetrievedChunk candidates]
     Retrieved --> ModelRequest
     Action --> Controller[RAG controller]
+    Route --> Coordinator[Coordinator controller]
     Controller --> Result[AgentTurnResult]
+    Coordinator --> Result
     Result --> SessionResponse[SessionMessageResponse]
     SessionResponse --> JSONResponse[Validated HTTP JSON]
 ```
@@ -318,10 +344,10 @@ clarification results are still completed assistant messages and are retained.
 flowchart TD
     Create[Create session] --> UUID[Allocate unique UUID]
     UUID --> Record[Create bounded deque and per-session lock]
-    Message[Submit message] --> Lookup[Look up session]
+    Message[Submit message and authorized reports] --> Lookup[Look up session]
     Lookup --> Lock[Acquire session lock]
     Lock --> History[Flatten retained complete turns]
-    History --> Agent[Run agent with history and session ID]
+    History --> Agent[Run selected agent with history, session ID, and reports]
     Agent --> Pair[Create user and assistant pair]
     Pair --> Append[Append atomically]
     Append --> Trim{Retention bound exceeded?}
@@ -371,16 +397,77 @@ flowchart TD
     Metadata -. no agent call .-> End[Upload complete]
 
     Message[Later message plus file ID] --> Ownership[Resolve session ownership]
-    Ownership --> Agent[Existing text-only agent turn]
+    Ownership --> Mode{Selected agent mode}
+    Mode -->|rag| RAG[RAG turn; report content ignored]
+    Mode -->|coordinator| Coordinator[Typed metadata and extracted content]
 ```
 
 Message requests accept optional file IDs. Omission preserves the original API
-behavior. Stage 11 validates attachment ownership but deliberately withholds
-report content from the single RAG agent; later coordinator and analysis-agent
-components consume the typed stored records. `execution_steps` and
-`report_references` are additive empty-by-default result fields until those
-components populate them. Report references use page or section locators and
+behavior. Ownership is validated before agent execution. The default RAG agent
+does not treat uploaded content as policy evidence. The coordinator converts
+authorized stored records into typed attachment input and may select an
+analysis handoff, but only a connected analysis specialist may treat that
+content as report evidence. Report references use page or section locators and
 remain separate from FAISS chunk citations.
+
+[Back to component index](#component-index)
+
+<a id="coordinator-flow"></a>
+
+## 5B. Coordinator routing
+
+`CoordinatorAgent` is an opt-in implementation of the same session-facing
+agent interface as `RagAgent`. It receives the current message, bounded public
+history, session ID, and only the report records already authorized by the API.
+Each stored record is converted into an immutable `CoordinatorAttachment`
+containing public metadata, extracted text, and retained PDF page boundaries.
+
+The coordinator provider selects exactly one typed action:
+
+| Action | Meaning |
+|---|---|
+| `answer` | Return a direct response that needs no specialist. |
+| `clarify` | Ask one focused question before routing. |
+| `route_rag` | Produce one focused policy task without treating the report as policy evidence. |
+| `route_analysis` | Produce one focused report task and select authorized attachment IDs. |
+
+The controller validates structure, call limits, selected file ownership, and
+the single-delegation bound. It does not infer a different route when the model
+chooses poorly. A semantically wrong but structurally valid route is therefore
+preserved for evaluation. One malformed structured response may receive one
+schema-repair call; transport failures and invalid handoffs become typed,
+non-sensitive failures.
+
+```mermaid
+flowchart TD
+    Turn[Message, history, and authorized reports] --> Inspect[Record inspect_input step]
+    Inspect --> Request[Build CoordinatorRequest]
+    Request --> Provider{Coordinator provider}
+    Provider -->|Malformed once| Repair[Schema feedback]
+    Repair --> Request
+    Provider -->|answer| Direct[Return direct answer]
+    Provider -->|clarify| Clarify[Return clarification]
+    Provider -->|route_rag| RAGCheck{RAG specialist connected?}
+    Provider -->|route_analysis| Files{Selected file IDs authorized?}
+    Files -->|No| Invalid[Return invalid_handoff]
+    Files -->|Yes| AnalysisCheck{Analysis specialist connected?}
+    RAGCheck -->|No| Unavailable[Return specialist_unavailable]
+    AnalysisCheck -->|No| Unavailable
+    RAGCheck -. Stage 13 .-> RAG[RAG handoff]
+    AnalysisCheck -. Stage 14 .-> Analysis[Analysis handoff]
+    RAG --> Return[Return specialist result unchanged]
+    Analysis --> Return
+```
+
+`execution_steps` use a fixed action vocabulary and contain only public,
+bounded summaries. The initial inspection summary may include attachment IDs,
+filenames, counts, and extracted-character lengths, but never extracted report
+text, hidden prompts, or private reasoning.
+
+The live adapter reuses the OpenAI-compatible structured-completion transport.
+The deterministic coordinator is an explicit offline fixture. Coordinator mode
+does not advertise semantic retrieval or Langfuse tracing until its specialist
+and multi-agent tracing integrations are connected.
 
 [Back to component index](#component-index)
 
@@ -436,8 +523,9 @@ Important controller behaviour:
 
 ## 7. Generation providers
 
-`GenerationProvider` is the agent-facing interface. It returns exactly one
-typed action for a `ModelRequest`.
+`GenerationProvider` is the RAG-facing interface. It returns exactly one typed
+action for a `ModelRequest`. `CoordinatorGenerationProvider` independently
+returns one typed coordinator decision for a `CoordinatorRequest`.
 
 The runtime implementations are:
 
@@ -445,6 +533,10 @@ The runtime implementations are:
   OpenAI-compatible endpoint and parses the returned action;
 - `ExtractiveGenerationProvider`: deterministic local provider that searches
   once and returns retrieved chunks verbatim with citations.
+- `OpenAICoordinatorGenerationProvider`: sends combined public conversation and
+  authorized report context through a coordinator-specific strict schema;
+- `DeterministicCoordinatorGenerationProvider`: transparent offline routing
+  fixtures for CI and manual development.
 
 `ScriptedGenerationProvider` is a test fixture for exact action sequences. The
 lower-level `StructuredCompletionClient` boundary lets tests and the controlled
@@ -469,9 +561,11 @@ flowchart TD
     Convert --> Agent[Return Search, Clarify, or Answer]
 ```
 
-When normal Langfuse tracing is enabled, the OpenAI-compatible client uses the
-Langfuse OpenAI wrapper so the external model call appears as a generation
-inside the application-owned `select-action` span.
+When normal RAG Langfuse tracing is enabled, the OpenAI-compatible client uses
+the Langfuse OpenAI wrapper so the external model call appears as a generation
+inside the application-owned `select-action` span. Coordinator-mode export is
+deferred with the multi-agent trace hierarchy and is not advertised as an
+operational capability.
 
 [Back to component index](#component-index)
 
@@ -549,10 +643,12 @@ queries.
 
 ## 9. Observability and Langfuse
 
-Tracing is behind the `TraceRecorder` interface. `NoOpTraceRecorder` preserves
-the agent contract without exporting data. When enabled,
+RAG tracing is behind the `TraceRecorder` interface. `NoOpTraceRecorder`
+preserves the agent contract without exporting data. When enabled in RAG mode,
 `LangfuseTraceRecorder` creates one logical root for every user turn and
-flushes after the turn by default.
+flushes after the turn by default. Coordinator mode does not export a partial
+or misleading trace; its parent/child hierarchy is added with multi-agent
+tracing.
 
 The application session UUID is propagated as the Langfuse `session_id`.
 Therefore multiple user turns produce separate `agent-turn` roots that can be
@@ -819,7 +915,7 @@ excluded from `make ci`.
 | Synthetic policy corpus | Version-controlled JSON | Immutable across a run | Retrieved chunks only when searched |
 | FAISS index and corpus embeddings | Process memory | Rebuilt at application startup | Provenance only; returned chunks appear in search observations |
 | Conversation history | Process-local session store | Until eviction or process exit | Current user input plus history count; model generation contains serialized public context |
-| Extracted report text and metadata | Process-local report store under owning session | Until process exit | No during upload; future agent turns may trace explicitly submitted report context |
+| Extracted report text and metadata | Process-local report store under owning session | Until process exit | No; coordinator trace export is not connected yet |
 | Original uploaded report bytes | Request-scoped temporary upload | Discarded after extraction | No |
 | Model credentials | `.env` or process environment | Process configuration | No |
 | Langfuse credentials | `.env` or process environment | Process configuration | No |
@@ -837,8 +933,11 @@ excluded from `make ci`.
   restart. Per-session capacity prevents unbounded abandoned uploads.
 - PDF support is limited to extractable text. OCR, scanned-image analysis, and
   office-document formats are not supported.
-- Report content is not passed to the current RAG agent; coordinator routing
-  and report analysis are separate capabilities.
+- Report content is not passed to the RAG agent. The coordinator can inspect
+  authorized extracted content, but the RAG and analysis specialist adapters
+  are not connected yet.
+- Coordinator mode does not export Langfuse traces until the multi-agent trace
+  hierarchy is implemented.
 - The first source-based local startup can download the embedding model when it
   is not already cached; the container downloads it only during image build.
 - Langfuse is an external dependency and backend indexing can be eventually

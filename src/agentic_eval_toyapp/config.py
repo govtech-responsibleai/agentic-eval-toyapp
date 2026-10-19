@@ -25,6 +25,13 @@ class GenerationProviderKind(StrEnum):
     DETERMINISTIC = "deterministic"
 
 
+class AgentMode(StrEnum):
+    """Supported top-level agent runtimes."""
+
+    RAG = "rag"
+    COORDINATOR = "coordinator"
+
+
 class AppSettings(BaseSettings):
     """Validated service settings.
 
@@ -60,6 +67,8 @@ class AppSettings(BaseSettings):
     )
     agent_max_model_calls: int = Field(default=4, ge=1)
     agent_max_searches: int = Field(default=2, ge=1)
+    agent_mode: AgentMode = AgentMode.RAG
+    coordinator_max_model_calls: int = Field(default=2, ge=1, le=4)
     generation_provider: GenerationProviderKind = GenerationProviderKind.OPENAI
     generation_model: str = "gpt-5.6-luna"
     generation_model_revision: str = "provider-managed"

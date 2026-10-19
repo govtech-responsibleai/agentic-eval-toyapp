@@ -20,9 +20,16 @@ from starlette.concurrency import run_in_threadpool
 from agentic_eval_toyapp import __version__
 from agentic_eval_toyapp.agent import RagAgent, load_system_prompt
 from agentic_eval_toyapp.config import (
+    AgentMode,
     AppSettings,
     GenerationProviderKind,
     get_settings,
+)
+from agentic_eval_toyapp.coordinator import (
+    CoordinatorAgent,
+    DeterministicCoordinatorGenerationProvider,
+    build_openai_coordinator_provider,
+    load_coordinator_prompt,
 )
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
 from agentic_eval_toyapp.models import (
@@ -40,6 +47,7 @@ from agentic_eval_toyapp.models import (
     SessionMessageResponse,
     SessionResponse,
 )
+from agentic_eval_toyapp.orchestration_models import CoordinatorActionKind
 from agentic_eval_toyapp.providers import (
     ExtractiveGenerationProvider,
     GenerationProvider,
@@ -114,7 +122,7 @@ class _AgentResolver:
 
     def shutdown(self) -> None:
         """Release resources owned by the default agent, if initialised."""
-        if isinstance(self._agent, RagAgent):
+        if isinstance(self._agent, (RagAgent, CoordinatorAgent)):
             self._agent.shutdown()
 
 
@@ -169,8 +177,8 @@ def _build_trace_recorder(
     )
 
 
-def _build_default_agent(settings: AppSettings) -> RagAgent:
-    """Construct the configured generation provider and semantic retriever."""
+def _build_rag_agent(settings: AppSettings) -> RagAgent:
+    """Construct the configured RAG provider, retriever, and tracing boundary."""
     generation_provider = _build_generation_provider(settings)
     embedding_provider = SentenceTransformerEmbeddingProvider(
         model_id=settings.embedding_model_id,
@@ -201,6 +209,35 @@ def _build_default_agent(settings: AppSettings) -> RagAgent:
         retrieval_top_k=settings.retrieval_top_k,
         trace_recorder=trace_recorder,
     )
+
+
+def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
+    """Construct the opt-in Stage 12 coordinator without specialist adapters."""
+    if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
+        provider = DeterministicCoordinatorGenerationProvider()
+    else:
+        api_key, base_url = settings.require_openai_configuration()
+        provider = build_openai_coordinator_provider(
+            api_key=api_key,
+            base_url=base_url,
+            model=settings.generation_model,
+            revision=settings.generation_model_revision,
+            temperature=settings.generation_temperature,
+            max_tokens=settings.generation_max_tokens,
+            timeout_seconds=settings.generation_timeout_seconds,
+        )
+    return CoordinatorAgent(
+        provider=provider,
+        system_prompt=load_coordinator_prompt(),
+        max_model_calls=settings.coordinator_max_model_calls,
+    )
+
+
+def _build_default_agent(settings: AppSettings) -> AgentRunner:
+    """Construct the explicitly selected top-level agent runtime."""
+    if settings.agent_mode is AgentMode.COORDINATOR:
+        return _build_coordinator_agent(settings)
+    return _build_rag_agent(settings)
 
 
 def _public_error(*, status_code: int, code: str, message: str) -> JSONResponse:
@@ -332,7 +369,9 @@ def create_app(
         """Finish RAG initialisation before the server accepts requests."""
         resolver.get()
         LOGGER.info(
-            "application_started generation_provider=%s langfuse_enabled=%s",
+            "application_started agent_mode=%s generation_provider=%s "
+            "langfuse_enabled=%s",
+            resolved_settings.agent_mode.value,
             resolved_settings.generation_provider.value,
             str(resolved_settings.langfuse_enabled).lower(),
         )
@@ -435,18 +474,23 @@ def create_app(
                 name="langfuse_tracing",
                 status=CheckStatus.PASS,
                 detail=(
-                    "enabled and configured"
-                    if resolved_settings.langfuse_enabled
-                    else "disabled"
+                    "disabled"
+                    if not resolved_settings.langfuse_enabled
+                    else (
+                        "enabled and configured"
+                        if resolved_settings.agent_mode is AgentMode.RAG
+                        else "coordinator trace export is deferred to Stage 16"
+                    )
                 ),
             ),
         ]
+        agent_check_name = f"{resolved_settings.agent_mode.value}_agent"
         try:
             resolver.get()
         except AgentInitialisationError:
             checks.append(
                 ReadinessCheck(
-                    name="rag_agent",
+                    name=agent_check_name,
                     status=CheckStatus.FAIL,
                     detail="agent dependencies could not be initialised",
                 )
@@ -457,9 +501,12 @@ def create_app(
             )
         checks.append(
             ReadinessCheck(
-                name="rag_agent",
+                name=agent_check_name,
                 status=CheckStatus.PASS,
-                detail="agent dependencies initialised",
+                detail=(
+                    f"{resolved_settings.agent_mode.value} agent dependencies "
+                    "initialised"
+                ),
             )
         )
         return ReadinessResponse(
@@ -474,15 +521,24 @@ def create_app(
     )
     def capabilities() -> CapabilityResponse:
         """Advertise the synchronous session and semantic-retrieval path."""
+        tracing_operational = (
+            resolved_settings.langfuse_enabled
+            and resolved_settings.agent_mode is AgentMode.RAG
+        )
+        advertised_actions = (
+            tuple(action.value for action in CoordinatorActionKind)
+            if resolved_settings.agent_mode is AgentMode.COORDINATOR
+            else tuple(action.value for action in AgentActionKind)
+        )
         return CapabilityResponse(
             service_version=__version__,
             features=FeatureAvailability(
                 session_chat=True,
-                semantic_retrieval=True,
-                langfuse_tracing=resolved_settings.langfuse_enabled,
+                semantic_retrieval=resolved_settings.agent_mode is AgentMode.RAG,
+                langfuse_tracing=tracing_operational,
                 file_uploads=True,
             ),
-            actions=tuple(action.value for action in AgentActionKind),
+            actions=advertised_actions,
         )
 
     @application.post(
@@ -555,12 +611,13 @@ def create_app(
         resolved_store.get(session_id)
         if len(request.file_ids) > resolved_settings.upload_max_files_per_message:
             raise ReportAttachmentLimitError
-        resolved_report_store.resolve(session_id, request.file_ids)
+        reports = resolved_report_store.resolve(session_id, request.file_ids)
         resolved_agent = resolver.get()
         result = resolved_store.run_turn(
             session_id,
             request.message,
             agent=resolved_agent,
+            reports=reports,
         )
         return SessionMessageResponse(session_id=session_id, result=result)
 

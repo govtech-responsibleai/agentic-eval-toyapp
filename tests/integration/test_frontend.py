@@ -9,6 +9,7 @@ from starlette.testclient import TestClient
 from agentic_eval_toyapp.app import create_app
 from agentic_eval_toyapp.config import AppSettings
 from agentic_eval_toyapp.models import AgentTurnResult, ConversationMessage
+from agentic_eval_toyapp.reports import StoredReport
 
 
 class _FrontendAgent:
@@ -18,8 +19,9 @@ class _FrontendAgent:
         *,
         history: Sequence[ConversationMessage] = (),
         session_id: str | None = None,
+        reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
-        del session_id
+        del session_id, reports
         raise AssertionError("frontend asset tests must not execute an agent turn")
 
 

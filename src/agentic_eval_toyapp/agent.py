@@ -27,6 +27,7 @@ from agentic_eval_toyapp.providers import (
     GenerationProviderError,
     InvalidGenerationActionError,
 )
+from agentic_eval_toyapp.reports import StoredReport
 from agentic_eval_toyapp.retrieval import Retriever
 from agentic_eval_toyapp.tracing import NoOpTraceRecorder, TraceRecorder, TurnTrace
 
@@ -94,8 +95,10 @@ class RagAgent:
         *,
         history: Sequence[ConversationMessage] = (),
         session_id: str | None = None,
+        reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
         """Run one bounded turn without retaining session state."""
+        del reports  # The RAG-only mode never treats uploads as policy evidence.
         stripped_message = user_message.strip()
         if not stripped_message:
             raise ValueError("user_message must not be blank")

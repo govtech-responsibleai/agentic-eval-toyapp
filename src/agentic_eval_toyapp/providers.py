@@ -184,7 +184,7 @@ class _StructuredAgentAction(BaseModel):
         return AnswerAction(markdown=self.markdown, citations=self.citations)
 
 
-def _make_object_schemas_strict(node: object) -> None:
+def make_object_schemas_strict(node: object) -> None:
     """Require every declared property in nested JSON-schema objects."""
     if isinstance(node, dict):
         mapping = cast(dict[str, object], node)
@@ -194,15 +194,15 @@ def _make_object_schemas_strict(node: object) -> None:
             mapping["additionalProperties"] = False
             mapping["required"] = list(typed_properties)
         for value in mapping.values():
-            _make_object_schemas_strict(value)
+            make_object_schemas_strict(value)
     elif isinstance(node, list):
         for value in cast(list[object], node):
-            _make_object_schemas_strict(value)
+            make_object_schemas_strict(value)
 
 
 def _agent_action_schema() -> dict[str, Any]:
     schema = _StructuredAgentAction.model_json_schema()
-    _make_object_schemas_strict(schema)
+    make_object_schemas_strict(schema)
     return schema
 
 
