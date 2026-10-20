@@ -5,7 +5,7 @@ agent evaluation metrics.
 
 The app answers questions about a synthetic employee-policy corpus. It exposes
 the same workflow through a browser and a versioned FastAPI service, and can
-export each agent turn to Langfuse for evaluation retrieval and scoring.
+export standalone RAG turns to Langfuse for evaluation retrieval and scoring.
 Repository tooling can also generate controlled control/defect trace pairs with
 known expected metric outcomes.
 
@@ -14,6 +14,8 @@ The application currently provides:
 - a single bounded agent with `search`, `clarify`, and `answer` actions;
 - an opt-in coordinator that can answer, clarify, or select one typed specialist
   route from combined text and authorized report input;
+- a report analysis specialist that summarizes uploaded text, Markdown, and
+  text-based PDFs with validated page or section references;
 - semantic retrieval using a pinned SentenceTransformer and in-memory FAISS;
 - live OpenAI-compatible generation or an explicit deterministic provider;
 - process-local multi-turn sessions;
@@ -132,9 +134,14 @@ make run
 Coordinator mode accepts the same session and message API. It can answer or
 clarify directly and records public coordinator and RAG actions in
 `execution_steps`. A `route_rag` decision delegates one focused policy task to
-the existing FAISS-backed RAG agent; a `route_analysis` decision still returns
-`specialist_unavailable` until the analysis specialist is connected.
+the existing FAISS-backed RAG agent; a `route_analysis` decision sends selected
+report content to the analysis specialist. The specialist receives the full
+extracted report in one model call, using a separate 2,048-token output
+allowance by default. The result's
+`report_references` identify exact report pages or sections.
 Coordinator-mode Langfuse export is not advertised as operational yet.
+Report upload and analysis are currently available through the API; the
+browser file picker is planned for Stage 15.
 
 Open these local endpoints:
 
@@ -247,7 +254,7 @@ message is explicitly submitted:
 curl -s -X POST \
   http://127.0.0.1:8000/api/v1/sessions/<session_id>/messages \
   -H 'Content-Type: application/json' \
-  -d '{"message":"Use the attached report.","file_ids":["<file_id>"]}' \
+  -d '{"message":"Summarise the main findings and limitations.","file_ids":["<file_id>"]}' \
   | uv run python -m json.tool
 ```
 
@@ -258,8 +265,9 @@ content. In coordinator mode, authorized extracted content is supplied to the
 coordinator only when the user submits the message with its file ID. The
 coordinator may derive a focused policy task from that content and route it to
 the RAG specialist, but uploaded text never becomes policy evidence or enters
-FAISS. Report analysis is not performed until the analysis specialist is
-connected.
+FAISS. A report analysis route uses the selected report content and returns
+`report_references` separately from policy citations. An upload without a
+message is not analysed.
 
 Retrieve the retained public conversation:
 
@@ -387,6 +395,8 @@ agentic-eval-toyapp/
 │   └── agentic_eval_toyapp/
 │       ├── __init__.py                       # Package version
 │       ├── agent.py                          # Bounded RAG loop and coordinator specialist adapter
+│       ├── analysis.py                       # Report specialist, model adapters, and reference validation
+│       ├── analysis_models.py                # Typed report-analysis requests and model actions
 │       ├── app.py                            # FastAPI factory, dependency wiring, and routes
 │       ├── config.py                         # Validated environment-backed settings
 │       ├── coordinator.py                    # Bounded coordinator decisions and specialist dispatch
@@ -395,9 +405,11 @@ agentic-eval-toyapp/
 │       ├── orchestration_models.py           # Coordinator actions, attachments, and handoff contracts
 │       ├── providers.py                      # Live, deterministic, and scripted generation adapters
 │       ├── prompts/
+│       │   ├── analysis.md                   # Report grounding and findings instructions
 │       │   ├── coordinator.md                # Coordinator routing and trust-boundary instructions
 │       │   └── system.md                     # RAG role and action instructions
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
+│       ├── report_sources.py                 # Complete report text with stable page and section locators
 │       ├── reports.py                        # Bounded report extraction and session-scoped storage
 │       ├── resources/
 │       │   └── documents.json                # Synthetic Northstar policy corpus
@@ -409,6 +421,8 @@ agentic-eval-toyapp/
 │       └── templates/
 │           └── index.html                    # Accessible server-rendered chat page
 └── tests/
+    ├── fixtures/
+    │   └── stage14_report.md                 # Synthetic longer report for manual analysis verification
     ├── integration/
     │   ├── test_agent_retrieval.py           # Offline agent-to-FAISS composition test
     │   ├── test_api.py                       # Session/message API contract and failure tests
@@ -427,6 +441,7 @@ agentic-eval-toyapp/
     │   └── test_runner.py                    # API reuse and private-manifest tests
     └── unit/
         ├── test_agent.py                     # Agent actions, bounds, repair, and findings tests
+        ├── test_analysis.py                  # Report decisions, grounding, limits, and provider tests
         ├── test_config.py                    # Defaults, environment aliases, and secret validation tests
         ├── test_coordinator.py               # Coordinator routing, limits, providers, and handoff tests
         ├── test_build_scripts.py             # Container smoke validation and build-input edge cases
@@ -435,6 +450,7 @@ agentic-eval-toyapp/
         ├── test_orchestration_models.py      # Coordinator action and handoff schema tests
         ├── test_package.py                   # Package/distribution version consistency test
         ├── test_providers.py                 # Live and deterministic provider boundary tests
+        ├── test_report_sources.py            # Complete report source and locator edge cases
         ├── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
         ├── test_reports.py                   # Report extraction, limits, hashing, and isolation tests
         ├── test_sessions.py                  # Session isolation, history, and truncation tests
@@ -451,9 +467,8 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
   bytes are not retained after processing.
 - Text-based PDFs are supported, but scanned PDFs and OCR are not.
 - The default RAG agent does not consume report contents.
-- Coordinator mode can answer, clarify, and delegate policy tasks to the RAG
-  specialist. The analysis specialist and coordinator trace export are not
-  connected yet.
+- Coordinator mode can answer, clarify, delegate policy tasks to RAG, and
+  analyse selected reports. Coordinator trace export is deferred to Stage 16.
 - Agent turns are synchronous; there is no cancellation or background job API.
 - The runtime image contains the application only; controlled trace generation
   remains source-repository tooling.

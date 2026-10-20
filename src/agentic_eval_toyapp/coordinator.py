@@ -110,7 +110,7 @@ class RagSpecialist(Protocol):
 
 
 class AnalysisSpecialist(Protocol):
-    """Future report-analysis boundary implemented in Stage 14."""
+    """Report-analysis boundary receiving coordinator-selected content."""
 
     def run(
         self,
@@ -412,8 +412,7 @@ class DeterministicCoordinatorGenerationProvider:
             )
         return CoordinatorAnswerAction(
             markdown=(
-                "I can help with Northstar policy questions and, in a later stage, "
-                "analysis of uploaded reports."
+                "I can help with Northstar policy questions and analyse uploaded reports."
             )
         )
 

@@ -11,6 +11,11 @@ from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.agent import RagAgent, RagSpecialistAdapter
+from agentic_eval_toyapp.analysis import (
+    DeterministicAnalysisGenerationProvider,
+    ReportAnalysisAgent,
+    load_analysis_prompt,
+)
 from agentic_eval_toyapp.app import AgentInitialisationError, create_app
 from agentic_eval_toyapp.config import AgentMode, AppSettings, GenerationProviderKind
 from agentic_eval_toyapp.coordinator import (
@@ -431,6 +436,59 @@ def test_opt_in_coordinator_mode_delegates_policy_turns_to_rag() -> None:
     assert analysis.json()["result"]["execution_steps"][-1]["action"] == (
         "route_analysis"
     )
+
+
+def test_coordinator_analysis_uses_uploaded_report_only_after_message_send() -> None:
+    """The normal API should route a submitted report and return typed evidence."""
+    coordinator = CoordinatorAgent(
+        provider=DeterministicCoordinatorGenerationProvider(),
+        system_prompt=load_coordinator_prompt(),
+        analysis_specialist=ReportAnalysisAgent(
+            provider=DeterministicAnalysisGenerationProvider(),
+            system_prompt=load_analysis_prompt(),
+        ),
+    )
+    client = _build_client(agent=coordinator)
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+    uploaded = client.post(
+        f"/api/v1/sessions/{session_id}/files",
+        files={
+            "file": (
+                "quarterly.md",
+                b"# Findings\nRevenue rose 18%.\n# Limitation\nSingapore only.",
+                "text/markdown",
+            )
+        },
+    )
+    assert uploaded.status_code == 201
+    assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []
+
+    response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "message": "Summarise the main findings and limitation.",
+            "file_ids": [uploaded.json()["file_id"]],
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["status"] == "answered"
+    assert result["model_calls"] == 2
+    assert result["searches"] == 0
+    assert result["citations"] == []
+    assert result["retrieved_chunks"] == []
+    assert {item["locator"]["section"] for item in result["report_references"]} == {
+        "Findings",
+        "Limitation",
+    }
+    assert [(step["agent"], step["action"]) for step in result["execution_steps"]] == [
+        ("coordinator", "inspect_input"),
+        ("coordinator", "route_analysis"),
+        ("analysis", "inspect_content"),
+        ("analysis", "answer"),
+        ("coordinator", "return_response"),
+    ]
 
 
 def test_file_derived_policy_task_uses_only_corpus_evidence() -> None:

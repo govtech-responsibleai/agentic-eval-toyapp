@@ -69,6 +69,7 @@ class AppSettings(BaseSettings):
     agent_max_searches: int = Field(default=2, ge=1)
     agent_mode: AgentMode = AgentMode.RAG
     coordinator_max_model_calls: int = Field(default=2, ge=1, le=4)
+    analysis_max_output_tokens: int = Field(default=2_048, ge=1, le=16_384)
     generation_provider: GenerationProviderKind = GenerationProviderKind.OPENAI
     generation_model: str = "gpt-5.6-luna"
     generation_model_revision: str = "provider-managed"

@@ -11,8 +11,8 @@ For installation, configuration, and usage commands, see [README.md](README.md).
 The application is a small, synchronous agentic target for METIS. Its default
 runtime remains the verified RAG agent. An opt-in coordinator runtime adds
 typed direct-answer and clarification decisions, delegates policy tasks to the
-existing RAG workflow, and keeps unfinished report analysis outside the
-operational path.
+existing RAG workflow, and delegates selected uploaded reports to a bounded
+analysis specialist.
 
 The main design principles are:
 
@@ -60,7 +60,12 @@ flowchart LR
     CoordinatorProvider -->|Deterministic mode| Routing[Local routing fixture]
     Coordinator -->|Direct| Result[Answer or clarification]
     Coordinator -->|route_rag| RAGAdapter[RAG specialist adapter]
-    Coordinator -. route_analysis; Stage 14 .-> Analysis[Analysis specialist]
+    Coordinator -->|route_analysis| Analysis[Report analysis specialist]
+    Analysis --> Sources[Complete report sources with page or section labels]
+    Sources --> AnalysisProvider[One analysis generation call]
+    AnalysisProvider -->|Live mode| Model
+    AnalysisProvider -->|Deterministic mode| ExtractiveReport[Local extractive findings]
+    Analysis --> Result
     RAGAdapter --> Agent
     Agent --> Result
     Agent --> Retriever[FAISS retriever]
@@ -111,6 +116,7 @@ Application paths in this table are relative to
 | Session store | Isolate sessions and retain bounded complete turns | `sessions.py` | [Session flow](#session-flow) |
 | Report service | Validate, extract, hash, and isolate uploaded reports without invoking an agent | `reports.py`, `app.py` | [Report flow](#report-flow) |
 | Coordinator | Inspect combined input, select one typed decision, and enforce one-delegation boundaries | `coordinator.py`, `orchestration_models.py`, `prompts/coordinator.md` | [Coordinator flow](#coordinator-flow) |
+| Report analysis | Label complete authorized report content, request grounded findings once, and validate report references | `analysis.py`, `analysis_models.py`, `report_sources.py`, `prompts/analysis.md` | [Analysis flow](#analysis-flow) |
 | RAG agent and controller | Run the bounded structured-action loop | `agent.py`, `prompts/system.md` | [Agent flow](#agent-flow) |
 | Generation providers | Convert model or fixture output into one validated action | `providers.py` | [Provider flow](#provider-flow) |
 | Semantic retrieval | Build and query the immutable FAISS index | `embeddings.py`, `retrieval.py`, `resources/documents.json` | [Retrieval flow](#retrieval-flow) |
@@ -238,8 +244,9 @@ FastAPI lifespan startup resolves the selected agent before Uvicorn accepts
 requests. RAG mode loads the pinned embedding model, corpus, FAISS index,
 system prompt, provider, and trace recorder. Coordinator mode loads its routing
 prompt and provider plus the RAG provider, prompt, pinned embedding model,
-corpus, and FAISS index required by its connected specialist. Startup fails
-closed if a dependency required by the selected mode cannot be initialised.
+corpus, and FAISS index required by its connected specialist. It also loads
+the analysis prompt and provider. Startup fails closed if a dependency
+required by the selected mode cannot be initialised.
 One operational log records only the selected agent mode, generation provider,
 and whether Langfuse is enabled.
 
@@ -301,6 +308,8 @@ The main model groups are:
 - RAG action contracts: discriminated `search`, `clarify`, and `answer` actions;
 - coordinator contracts: discriminated direct and routing actions, authorized
   attachments, and typed RAG/analysis handoff requests;
+- analysis contracts: typed direct, map, and synthesis requests, answer or
+  clarification actions, and report references;
 - execution contracts: model requests, action summaries, findings, controller
   events, execution steps, status, termination reason, and final result;
 - report contracts: upload metadata, typed page/section references, and
@@ -420,9 +429,9 @@ Message requests accept optional file IDs. Omission preserves the original API
 behavior. Ownership is validated before agent execution. The default RAG agent
 does not treat uploaded content as policy evidence. The coordinator converts
 authorized stored records into typed attachment input and may select an
-analysis handoff, but only a connected analysis specialist may treat that
-content as report evidence. Report references use page or section locators and
-remain separate from FAISS chunk citations.
+analysis handoff. The analysis specialist uses only the content in that
+handoff. Report references use page or section locators and remain separate
+from FAISS chunk citations.
 
 [Back to component index](#component-index)
 
@@ -464,13 +473,12 @@ flowchart TD
     Provider -->|route_rag| RAG[RagHandoffRequest]
     Provider -->|route_analysis| Files{Selected file IDs authorized?}
     Files -->|No| Invalid[Return invalid_handoff]
-    Files -->|Yes| AnalysisCheck{Analysis specialist connected?}
-    AnalysisCheck -->|No| Unavailable[Return specialist_unavailable]
+    Files -->|Yes| Analysis[AnalysisHandoffRequest]
     RAG --> Adapter[RAG specialist adapter]
     Adapter --> Policy[Existing bounded RAG loop]
     Policy --> Return[Return specialist result unchanged]
-    AnalysisCheck -. Stage 14 .-> Analysis[Analysis handoff]
-    Analysis --> Return
+    Analysis --> Specialist[Report analysis specialist]
+    Specialist --> Return
 ```
 
 `execution_steps` use a fixed action vocabulary and contain only public,
@@ -483,6 +491,54 @@ The deterministic coordinator is an explicit offline fixture. Coordinator mode
 advertises semantic retrieval because its RAG specialist is operational, but
 does not advertise Langfuse tracing until the multi-agent hierarchy is
 connected.
+
+[Back to component index](#component-index)
+
+<a id="analysis-flow"></a>
+
+## 5C. Report analysis specialist
+
+The specialist accepts only an `AnalysisHandoffRequest`: a focused task,
+bounded public history, and coordinator-selected `CoordinatorAttachment`
+records. It has no report-store lookup or FAISS retriever. The report processor
+validates file type, size, extraction, and session ownership before the
+coordinator receives the attachments. After `route_analysis`, the coordinator
+checks that each model-selected file ID belongs to the attachments submitted
+with this message; it does not reprocess the upload.
+
+`report_sources.py` assigns stable PDF page locators and Markdown section
+locators. Repeated Markdown headings receive numbered names; plain text uses
+`Document`. The complete extracted text of every selected report is supplied
+in source order to one analysis-model call. There is no report retrieval,
+chunking, map phase, or synthesis phase. Upload-size, PDF-page, and
+extracted-character checks remain at the report service; there is no separate
+analysis-context cap or silent truncation. The configured provider can still
+reject an input beyond its own context or request limits. Analysis uses its own
+2,048-token output allowance by default; coordinator and policy-RAG calls keep
+the existing generation allowance.
+
+The model writes Markdown and selects report references. The controller checks
+each declared file ID, locator, and exact excerpt against the authorized
+source. Invalid references are omitted from the typed `report_references`
+field and recorded as non-blocking validation findings; the model's prose
+remains unchanged for evaluation. Semantic
+faithfulness is judged separately. The specialist returns public
+`inspect_content`, `answer`, or `clarify` steps and the coordinator adds
+`return_response`.
+
+```mermaid
+flowchart TD
+    Message[Submitted message plus file ID] --> Coordinator[Coordinator selects route_analysis]
+    Coordinator --> Selection[Validate selected IDs against authorized attachments]
+    Selection --> Handoff[AnalysisHandoffRequest]
+    Handoff --> Sources[Label complete report text by page or section]
+    Sources --> Direct[One model call over all selected sources]
+    Direct -->|clarify| Clarify[Return clarification]
+    Direct -->|answer| References[Validate exact report references]
+    References --> Result[Markdown, report references, findings, and execution steps]
+    Clarify --> CoordinatorReturn[Coordinator returns specialist result]
+    Result --> CoordinatorReturn
+```
 
 [Back to component index](#component-index)
 
@@ -561,6 +617,10 @@ The runtime implementations are:
   authorized report context through a coordinator-specific strict schema;
 - `DeterministicCoordinatorGenerationProvider`: transparent offline routing
   fixtures for CI and manual development.
+- `OpenAIAnalysisGenerationProvider`: strict answer or clarification actions
+  for source analysis and findings synthesis;
+- `DeterministicAnalysisGenerationProvider`: extractive report snippets for
+  offline path verification.
 
 `ScriptedGenerationProvider` is a test fixture for exact action sequences. The
 lower-level `StructuredCompletionClient` boundary lets tests and the controlled
@@ -959,8 +1019,8 @@ excluded from `make ci`.
   office-document formats are not supported.
 - Report content is not passed to the RAG agent. The coordinator can derive a
   focused policy task from authorized extracted content, but the RAG specialist
-  searches only the immutable policy corpus. The analysis specialist is not
-  connected yet.
+  searches only the immutable policy corpus. Report analysis uses selected
+  uploaded text and has no OCR or cross-report retrieval.
 - Coordinator mode does not export Langfuse traces until the multi-agent trace
   hierarchy is implemented.
 - The first source-based local startup can download the embedding model when it
