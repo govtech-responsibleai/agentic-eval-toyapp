@@ -270,6 +270,8 @@ class ValidationFindingCode(StrEnum):
     CITATION_NOT_RETRIEVED = "citation_not_retrieved"
     CITATION_DECLARATION_MISMATCH = "citation_declaration_mismatch"
     DUPLICATE_CITATION = "duplicate_citation"
+    REPORT_REFERENCE_INVALID = "report_reference_invalid"
+    REPORT_EXCERPT_NOT_FOUND = "report_excerpt_not_found"
 
 
 class ValidationFinding(ApiModel):

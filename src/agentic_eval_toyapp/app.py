@@ -19,6 +19,12 @@ from starlette.concurrency import run_in_threadpool
 
 from agentic_eval_toyapp import __version__
 from agentic_eval_toyapp.agent import RagAgent, RagSpecialistAdapter, load_system_prompt
+from agentic_eval_toyapp.analysis import (
+    DeterministicAnalysisGenerationProvider,
+    OpenAIAnalysisGenerationProvider,
+    ReportAnalysisAgent,
+    load_analysis_prompt,
+)
 from agentic_eval_toyapp.config import (
     AgentMode,
     AppSettings,
@@ -52,6 +58,7 @@ from agentic_eval_toyapp.providers import (
     ExtractiveGenerationProvider,
     GenerationProvider,
     OpenAIChatGenerationProvider,
+    OpenAICompatibleChatClient,
 )
 from agentic_eval_toyapp.reports import (
     InMemoryReportStore,
@@ -237,7 +244,7 @@ def _build_rag_agent(
 
 
 def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
-    """Construct the coordinator with its Stage 13 RAG specialist."""
+    """Construct the coordinator with RAG and report-analysis specialists."""
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
         provider = DeterministicCoordinatorGenerationProvider()
     else:
@@ -254,11 +261,32 @@ def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
     rag_specialist = RagSpecialistAdapter(
         _build_rag_agent(settings, trace_export_enabled=False)
     )
+    if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
+        analysis_provider = DeterministicAnalysisGenerationProvider()
+    else:
+        api_key, base_url = settings.require_openai_configuration()
+        analysis_provider = OpenAIAnalysisGenerationProvider(
+            model=settings.generation_model,
+            revision=settings.generation_model_revision,
+            temperature=settings.generation_temperature,
+            max_tokens=settings.analysis_max_output_tokens,
+            client=OpenAICompatibleChatClient(
+                api_key=api_key,
+                base_url=base_url,
+                timeout_seconds=settings.generation_timeout_seconds,
+                instrument_with_langfuse=False,
+            ),
+        )
+    analysis_specialist = ReportAnalysisAgent(
+        provider=analysis_provider,
+        system_prompt=load_analysis_prompt(),
+    )
     return CoordinatorAgent(
         provider=provider,
         system_prompt=load_coordinator_prompt(),
         max_model_calls=settings.coordinator_max_model_calls,
         rag_specialist=rag_specialist,
+        analysis_specialist=analysis_specialist,
     )
 
 

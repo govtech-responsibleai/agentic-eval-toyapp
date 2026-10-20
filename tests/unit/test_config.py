@@ -28,6 +28,7 @@ _SETTING_ENV_VARS = (
     "TOYAPP_AGENT_MAX_SEARCHES",
     "TOYAPP_AGENT_MODE",
     "TOYAPP_COORDINATOR_MAX_MODEL_CALLS",
+    "TOYAPP_ANALYSIS_MAX_OUTPUT_TOKENS",
     "TOYAPP_GENERATION_PROVIDER",
     "TOYAPP_GENERATION_MODEL",
     "TOYAPP_GENERATION_MODEL_REVISION",
@@ -86,6 +87,7 @@ def test_settings_defaults_select_the_live_runtime_without_storing_credentials()
     assert settings.agent_max_searches == 2
     assert settings.agent_mode is AgentMode.RAG
     assert settings.coordinator_max_model_calls == 2
+    assert settings.analysis_max_output_tokens == 2_048
     assert settings.generation_provider is GenerationProviderKind.OPENAI
     assert settings.generation_model == "gpt-5.6-luna"
     assert settings.generation_model_revision == "provider-managed"
@@ -124,6 +126,7 @@ def test_settings_load_prefixed_environment_variables(
     monkeypatch.setenv("TOYAPP_AGENT_MAX_SEARCHES", "1")
     monkeypatch.setenv("TOYAPP_AGENT_MODE", "coordinator")
     monkeypatch.setenv("TOYAPP_COORDINATOR_MAX_MODEL_CALLS", "3")
+    monkeypatch.setenv("TOYAPP_ANALYSIS_MAX_OUTPUT_TOKENS", "3072")
     monkeypatch.setenv("TOYAPP_GENERATION_PROVIDER", "deterministic")
     monkeypatch.setenv("TOYAPP_GENERATION_MODEL", "platform-model")
     monkeypatch.setenv("TOYAPP_GENERATION_MODEL_REVISION", "revision-7")
@@ -159,6 +162,7 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.agent_max_searches == 1
     assert settings.agent_mode is AgentMode.COORDINATOR
     assert settings.coordinator_max_model_calls == 3
+    assert settings.analysis_max_output_tokens == 3_072
     assert settings.generation_provider is GenerationProviderKind.DETERMINISTIC
     assert settings.generation_model == "platform-model"
     assert settings.generation_model_revision == "revision-7"
@@ -279,6 +283,8 @@ def test_settings_reject_blank_required_text(field: str) -> None:
         ("generation_temperature", -0.01),
         ("generation_temperature", 2.01),
         ("generation_max_tokens", 0),
+        ("analysis_max_output_tokens", 0),
+        ("analysis_max_output_tokens", 16_385),
         ("generation_timeout_seconds", 0),
         ("session_max_turns", 0),
         ("session_max_turns", 101),
