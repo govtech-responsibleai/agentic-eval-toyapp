@@ -82,6 +82,7 @@ class _RecordingRagSpecialist:
     def __init__(self) -> None:
         self.requests: list[RagHandoffRequest] = []
         self.session_ids: list[str | None] = []
+        self.shutdown_calls = 0
 
     def run(
         self,
@@ -92,6 +93,9 @@ class _RecordingRagSpecialist:
         self.requests.append(request)
         self.session_ids.append(session_id)
         return _answer_result("Policy specialist answer", agent=ExecutionAgent.RAG)
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
 
 
 class _RecordingAnalysisSpecialist:
@@ -198,6 +202,22 @@ def test_coordinator_returns_direct_answers_and_clarification() -> None:
     assert clarification.status is AgentTurnStatus.CLARIFICATION_REQUIRED
     assert clarification.termination_reason is TerminationReason.CLARIFICATION_REQUIRED
     assert clarification.execution_steps[-1].action is ExecutionAction.CLARIFY
+
+
+def test_coordinator_shutdown_releases_connected_specialist_resources() -> None:
+    """The process lifecycle should reach resources owned by the RAG specialist."""
+    rag = _RecordingRagSpecialist()
+    coordinator = CoordinatorAgent(
+        provider=ScriptedCoordinatorGenerationProvider(
+            (CoordinatorAnswerAction(markdown="Hello"),)
+        ),
+        system_prompt="Coordinate requests.",
+        rag_specialist=rag,
+    )
+
+    coordinator.shutdown()
+
+    assert rag.shutdown_calls == 1
 
 
 def test_coordinator_passes_history_and_safe_attachment_context() -> None:

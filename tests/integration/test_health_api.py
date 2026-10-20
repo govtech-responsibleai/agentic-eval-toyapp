@@ -138,8 +138,8 @@ def test_startup_logs_safe_runtime_modes() -> None:
     )
 
 
-def test_coordinator_capabilities_exclude_deferred_specialists_and_tracing() -> None:
-    """Stage 12 must not advertise Stage 13, 14, or 16 behavior as operational."""
+def test_coordinator_capabilities_advertise_rag_but_defer_tracing() -> None:
+    """Stage 13 enables RAG while analysis tracing remains deferred."""
     settings = AppSettings(
         agent_mode=AgentMode.COORDINATOR,
         generation_provider=GenerationProviderKind.DETERMINISTIC,
@@ -161,7 +161,7 @@ def test_coordinator_capabilities_exclude_deferred_specialists_and_tracing() -> 
         "status": "pass",
         "detail": "coordinator agent dependencies initialised",
     }
-    assert capabilities["features"]["semantic_retrieval"] is False
+    assert capabilities["features"]["semantic_retrieval"] is True
     assert capabilities["features"]["langfuse_tracing"] is False
     assert capabilities["actions"] == [
         "answer",

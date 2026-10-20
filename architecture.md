@@ -10,8 +10,9 @@ For installation, configuration, and usage commands, see [README.md](README.md).
 
 The application is a small, synchronous agentic target for METIS. Its default
 runtime remains the verified RAG agent. An opt-in coordinator runtime adds
-typed direct-answer, clarification, and specialist-routing decisions while
-keeping unfinished specialist adapters outside the operational path.
+typed direct-answer and clarification decisions, delegates policy tasks to the
+existing RAG workflow, and keeps unfinished report analysis outside the
+operational path.
 
 The main design principles are:
 
@@ -58,11 +59,14 @@ flowchart LR
     Provider -->|Deterministic mode| Extractive[Local extractive actions]
     CoordinatorProvider -->|Deterministic mode| Routing[Local routing fixture]
     Coordinator -->|Direct| Result[Answer or clarification]
-    Coordinator -. typed route; adapter deferred .-> Specialists[RAG or analysis specialist]
+    Coordinator -->|route_rag| RAGAdapter[RAG specialist adapter]
+    Coordinator -. route_analysis; Stage 14 .-> Analysis[Analysis specialist]
+    RAGAdapter --> Agent
+    Agent --> Result
     Agent --> Retriever[FAISS retriever]
     Retriever --> Corpus[Synthetic policy corpus]
     Retriever --> Embedder[SentenceTransformer]
-    Agent --> Recorder[Trace recorder]
+    Agent -->|Standalone RAG mode| Recorder[Trace recorder]
     Recorder --> Langfuse[Langfuse]
 
     Harness -. private ground truth .-> Runs[Gitignored run manifests]
@@ -80,6 +84,12 @@ answer or clarification and ignores report content. In coordinator mode, the
 model selects a direct response or one typed specialist route from the combined
 input. Action and route selection belong to the model; controller validation
 does not silently replace a semantically poor decision.
+
+For `route_rag`, the coordinator supplies only a focused policy task and
+bounded public history through `RagHandoffRequest`. The RAG specialist cannot
+resolve report IDs or access the upload store. A task may be derived from
+authorized file content, but retrieval evidence remains limited to the
+immutable policy corpus.
 
 The controlled trace harness is repository tooling. It creates the normal
 FastAPI application with a case-scoped completion client, calls the normal
@@ -227,10 +237,11 @@ settings.
 FastAPI lifespan startup resolves the selected agent before Uvicorn accepts
 requests. RAG mode loads the pinned embedding model, corpus, FAISS index,
 system prompt, provider, and trace recorder. Coordinator mode loads its routing
-prompt and provider but does not initialise FAISS until the RAG specialist is
-connected. Startup fails closed if a dependency required by the selected mode
-cannot be initialised. One operational log records only the selected agent
-mode, generation provider, and whether Langfuse is enabled.
+prompt and provider plus the RAG provider, prompt, pinned embedding model,
+corpus, and FAISS index required by its connected specialist. Startup fails
+closed if a dependency required by the selected mode cannot be initialised.
+One operational log records only the selected agent mode, generation provider,
+and whether Langfuse is enabled.
 
 <a id="startup-flow"></a>
 
@@ -257,12 +268,15 @@ flowchart TD
     Tracing --> Agent
     Mode -->|coordinator| CoordinatorProvider[Build coordinator provider]
     Mode -->|coordinator| CoordinatorPrompt[Load coordinator prompt]
+    Mode -->|coordinator| Specialist[Build RAG specialist without a trace root]
+    Specialist --> SpecialistIndex[Load corpus, embedding model, and FAISS]
     CoordinatorProvider --> Coordinator[Construct CoordinatorAgent]
     CoordinatorPrompt --> Coordinator
+    Specialist --> Coordinator
     Agent --> Ready[Server accepts requests]
     Coordinator --> Ready
     Ready --> Shutdown[Application shutdown]
-    Shutdown --> Flush[Flush and close tracing]
+    Shutdown --> Flush[Flush and close owned resources]
 ```
 
 On a developer machine, the first startup may download the pinned embedding
@@ -447,15 +461,15 @@ flowchart TD
     Repair --> Request
     Provider -->|answer| Direct[Return direct answer]
     Provider -->|clarify| Clarify[Return clarification]
-    Provider -->|route_rag| RAGCheck{RAG specialist connected?}
+    Provider -->|route_rag| RAG[RagHandoffRequest]
     Provider -->|route_analysis| Files{Selected file IDs authorized?}
     Files -->|No| Invalid[Return invalid_handoff]
     Files -->|Yes| AnalysisCheck{Analysis specialist connected?}
-    RAGCheck -->|No| Unavailable[Return specialist_unavailable]
-    AnalysisCheck -->|No| Unavailable
-    RAGCheck -. Stage 13 .-> RAG[RAG handoff]
+    AnalysisCheck -->|No| Unavailable[Return specialist_unavailable]
+    RAG --> Adapter[RAG specialist adapter]
+    Adapter --> Policy[Existing bounded RAG loop]
+    Policy --> Return[Return specialist result unchanged]
     AnalysisCheck -. Stage 14 .-> Analysis[Analysis handoff]
-    RAG --> Return[Return specialist result unchanged]
     Analysis --> Return
 ```
 
@@ -466,8 +480,9 @@ text, hidden prompts, or private reasoning.
 
 The live adapter reuses the OpenAI-compatible structured-completion transport.
 The deterministic coordinator is an explicit offline fixture. Coordinator mode
-does not advertise semantic retrieval or Langfuse tracing until its specialist
-and multi-agent tracing integrations are connected.
+advertises semantic retrieval because its RAG specialist is operational, but
+does not advertise Langfuse tracing until the multi-agent hierarchy is
+connected.
 
 [Back to component index](#component-index)
 
@@ -482,6 +497,15 @@ In live mode, the model chooses whether to search, clarify, or answer. The
 controller validates schemas and enforces operational bounds, but does not
 deterministically force retrieval or replace semantically poor answers. This
 keeps model behaviour observable for evaluation.
+
+`RagSpecialistAdapter` invokes the same bounded loop for a coordinator-supplied
+`RagHandoffRequest`. It forwards only the focused task and bounded conversation
+history, preserves the RAG result fields, and derives public RAG execution
+steps from actions that actually completed. Retrieval, provider, repeated
+search, citation, and clarification outcomes remain unchanged. Coordinator
+mode bypasses the RAG agent's standalone trace-root wrapper so Stage 13 cannot
+emit a second or orphaned root; Stage 16 supplies the shared multi-agent trace
+context.
 
 <a id="agent-flow"></a>
 
@@ -933,9 +957,10 @@ excluded from `make ci`.
   restart. Per-session capacity prevents unbounded abandoned uploads.
 - PDF support is limited to extractable text. OCR, scanned-image analysis, and
   office-document formats are not supported.
-- Report content is not passed to the RAG agent. The coordinator can inspect
-  authorized extracted content, but the RAG and analysis specialist adapters
-  are not connected yet.
+- Report content is not passed to the RAG agent. The coordinator can derive a
+  focused policy task from authorized extracted content, but the RAG specialist
+  searches only the immutable policy corpus. The analysis specialist is not
+  connected yet.
 - Coordinator mode does not export Langfuse traces until the multi-agent trace
   hierarchy is implemented.
 - The first source-based local startup can download the embedding model when it

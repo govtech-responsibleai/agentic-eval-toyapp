@@ -122,6 +122,15 @@ class AnalysisSpecialist(Protocol):
         ...
 
 
+@runtime_checkable
+class ShutdownableSpecialist(Protocol):
+    """Optional lifecycle hook for specialist-owned resources."""
+
+    def shutdown(self) -> None:
+        """Release process-level specialist resources."""
+        ...
+
+
 class _StructuredCoordinatorAction(BaseModel):
     """Gateway-friendly flat form of the coordinator decision union."""
 
@@ -432,8 +441,10 @@ class CoordinatorAgent:
         self._analysis_specialist = analysis_specialist
 
     def shutdown(self) -> None:
-        """Reserve a symmetric lifecycle hook for future specialist resources."""
-        return None
+        """Release resources owned by connected specialists."""
+        for specialist in (self._rag_specialist, self._analysis_specialist):
+            if isinstance(specialist, ShutdownableSpecialist):
+                specialist.shutdown()
 
     def run(
         self,
