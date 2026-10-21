@@ -14,7 +14,7 @@ from starlette.testclient import TestClient
 from agentic_eval_toyapp import __version__
 from agentic_eval_toyapp.agent import RagAgent, load_system_prompt
 from agentic_eval_toyapp.app import create_app
-from agentic_eval_toyapp.config import AppSettings, GenerationProviderKind
+from agentic_eval_toyapp.config import AgentMode, AppSettings, GenerationProviderKind
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
 from agentic_eval_toyapp.models import AnswerAction, SessionMessageResponse
 from agentic_eval_toyapp.providers import (
@@ -153,7 +153,10 @@ def _build_live_application(
         retrieval_top_k=settings.retrieval_top_k,
         trace_recorder=recorder,
     )
-    return create_app(settings, agent=agent), controlled_client
+    # Controlled cases exercise the standalone RAG trace contract even when
+    # normal browser and API traffic defaults to coordinator mode.
+    rag_settings = settings.model_copy(update={"agent_mode": AgentMode.RAG})
+    return create_app(rag_settings, agent=agent), controlled_client
 
 
 def _label_for_case(

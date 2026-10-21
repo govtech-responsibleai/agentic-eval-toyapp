@@ -93,6 +93,7 @@ class _CountingAgent:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.report_ids: list[tuple[str, ...]] = []
 
     def run(
         self,
@@ -102,8 +103,11 @@ class _CountingAgent:
         session_id: str | None = None,
         reports: Sequence[StoredReport] = (),
     ) -> AgentTurnResult:
-        del history, session_id, reports
+        del history, session_id
         self.calls += 1
+        self.report_ids.append(
+            tuple(str(report.metadata.file_id) for report in reports)
+        )
         question = f"Clarify: {user_message}"
         return AgentTurnResult(
             status=AgentTurnStatus.CLARIFICATION_REQUIRED,
@@ -265,6 +269,113 @@ def test_report_upload_is_separate_from_message_submission() -> None:
     assert answered.status_code == 200
     assert answered.json()["result"]["status"] == "clarification_required"
     assert agent.calls == 1
+
+
+def test_report_list_and_delete_are_session_scoped_and_do_not_run_agent() -> None:
+    """A stored report is reusable until its owner explicitly deletes it."""
+    agent = _CountingAgent()
+    client = _build_client(agent=agent)
+    owner = client.post("/api/v1/sessions").json()["session_id"]
+    other = client.post("/api/v1/sessions").json()["session_id"]
+    first = client.post(
+        f"/api/v1/sessions/{owner}/files",
+        files={"file": ("first.md", b"# First\nFinding A", "text/markdown")},
+    ).json()
+    second = client.post(
+        f"/api/v1/sessions/{owner}/files",
+        files={"file": ("second.txt", b"Finding B", "text/plain")},
+    ).json()
+
+    assert client.get(f"/api/v1/sessions/{owner}/files").json() == {
+        "files": [first, second]
+    }
+    assert "Finding A" not in client.get(f"/api/v1/sessions/{owner}/files").text
+    assert client.get(f"/api/v1/sessions/{other}/files").json() == {"files": []}
+    assert (
+        client.delete(f"/api/v1/sessions/{other}/files/{first['file_id']}").status_code
+        == 404
+    )
+    assert (
+        client.delete(f"/api/v1/sessions/{owner}/files/{uuid4()}").json()["code"]
+        == "report_not_found"
+    )
+    deleted = client.delete(f"/api/v1/sessions/{owner}/files/{first['file_id']}")
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+    assert client.get(f"/api/v1/sessions/{owner}/files").json() == {"files": [second]}
+    assert (
+        client.post(
+            f"/api/v1/sessions/{owner}/messages",
+            json={"message": "Use the deleted report", "file_ids": [first["file_id"]]},
+        ).status_code
+        == 404
+    )
+    assert client.get(f"/api/v1/sessions/{owner}").json()["messages"] == []
+    assert agent.calls == 0
+
+
+def test_report_list_and_delete_reject_unknown_sessions() -> None:
+    """File routes must not manufacture storage for an unknown session ID."""
+    client = _build_client(agent=_CountingAgent())
+    missing_session_id = uuid4()
+    missing_file_id = uuid4()
+
+    listed = client.get(f"/api/v1/sessions/{missing_session_id}/files")
+    deleted = client.delete(
+        f"/api/v1/sessions/{missing_session_id}/files/{missing_file_id}"
+    )
+
+    assert listed.status_code == 404
+    assert listed.json()["code"] == "session_not_found"
+    assert deleted.status_code == 404
+    assert deleted.json()["code"] == "session_not_found"
+
+
+def test_only_explicit_file_ids_reach_agent_on_each_message() -> None:
+    """Upload and previous turns must not implicitly attach stored files."""
+    agent = _CountingAgent()
+    client = _build_client(agent=agent)
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+    first = client.post(
+        f"/api/v1/sessions/{session_id}/files",
+        files={"file": ("first.txt", b"First finding", "text/plain")},
+    ).json()["file_id"]
+    second = client.post(
+        f"/api/v1/sessions/{session_id}/files",
+        files={"file": ("second.txt", b"Second finding", "text/plain")},
+    ).json()["file_id"]
+
+    for file_ids in ([], [first], [first], [], [second]):
+        response = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"message": "Analyse the selected report", "file_ids": file_ids},
+        )
+        assert response.status_code == 200
+
+    assert agent.report_ids == [(), (first,), (first,), (), (second,)]
+
+
+def test_deleting_used_report_preserves_prior_public_turn() -> None:
+    """Deleting source storage cannot retroactively remove a completed answer."""
+    agent = _CountingAgent()
+    client = _build_client(agent=agent)
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+    file_id = client.post(
+        f"/api/v1/sessions/{session_id}/files",
+        files={"file": ("report.txt", b"Past finding", "text/plain")},
+    ).json()["file_id"]
+    client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"message": "Use this report", "file_ids": [file_id]},
+    )
+    assert (
+        client.delete(f"/api/v1/sessions/{session_id}/files/{file_id}").status_code
+        == 204
+    )
+
+    assert client.get(f"/api/v1/sessions/{session_id}").json()["retained_turns"] == 1
+    assert client.get(f"/api/v1/sessions/{session_id}/files").json() == {"files": []}
+    assert agent.report_ids == [(file_id,)]
 
 
 def test_report_references_are_isolated_by_session() -> None:

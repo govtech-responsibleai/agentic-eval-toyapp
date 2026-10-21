@@ -13,7 +13,10 @@ from agentic_eval_toyapp.models import (
 )
 from agentic_eval_toyapp.report_sources import SourceBlock
 
-AnalysisText = Annotated[
+AnalysisAnswerText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32_000)
+]
+AnalysisQuestionText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=6_000)
 ]
 
@@ -29,15 +32,15 @@ class AnalysisAnswerAction(ApiModel):
     """Grounded Markdown plus model-selected report references."""
 
     kind: Literal["answer"] = "answer"
-    markdown: AnalysisText
-    references: tuple[ReportReference, ...] = Field(default=(), max_length=12)
+    markdown: AnalysisAnswerText
+    references: tuple[ReportReference, ...] = Field(default=(), max_length=64)
 
 
 class AnalysisClarifyAction(ApiModel):
     """Question required to complete the requested report analysis."""
 
     kind: Literal["clarify"] = "clarify"
-    question: AnalysisText
+    question: AnalysisQuestionText
 
 
 AnalysisAction = Annotated[

@@ -1,7 +1,7 @@
 # Agentic Eval Toy App
 
-A lightweight RAG application for demonstrating and regression-testing METIS
-agent evaluation metrics.
+A lightweight multi-agent application for demonstrating and regression-testing
+METIS agent evaluation metrics.
 
 The app answers questions about a synthetic employee-policy corpus. It exposes
 the same workflow through a browser and a versioned FastAPI service, and can
@@ -11,9 +11,9 @@ known expected metric outcomes.
 
 The application currently provides:
 
-- a single bounded agent with `search`, `clarify`, and `answer` actions;
-- an opt-in coordinator that can answer, clarify, or select one typed specialist
-  route from combined text and authorized report input;
+- a default coordinator that can answer, clarify, or select one typed
+  specialist route from combined text and authorized report input;
+- a standalone bounded RAG mode with `search`, `clarify`, and `answer` actions;
 - a report analysis specialist that summarizes uploaded text, Markdown, and
   text-based PDFs with validated page or section references;
 - semantic retrieval using a pinned SentenceTransformer and in-memory FAISS;
@@ -22,7 +22,8 @@ The application currently provides:
 - session-scoped upload and validation for UTF-8 text, Markdown, and text-based
   PDF reports;
 - browser and programmatic API access;
-- optional Langfuse tracing correlated by application session ID;
+- optional Langfuse tracing for standalone RAG mode, correlated by application
+  session ID; coordinator tracing is planned for Stage 16;
 - controlled traces for the `harmful_content_refusal` metric;
 - a non-root Docker image containing the pinned embedding model.
 
@@ -79,11 +80,13 @@ strict structured JSON output. Credentials and `.env` are excluded from Git.
 
 ### Langfuse tracing
 
-The environment template enables tracing for normal browser and API turns.
-Replace its Langfuse placeholders with working connection values:
+The environment template configures Langfuse, but the default coordinator
+does not export traces yet. To export standalone RAG turns, select
+`TOYAPP_AGENT_MODE=rag` and replace the Langfuse placeholders:
 
 ```dotenv
 TOYAPP_LANGFUSE_ENABLED=true
+TOYAPP_AGENT_MODE=rag
 LANGFUSE_PUBLIC_KEY=your-langfuse-public-key
 LANGFUSE_SECRET_KEY=your-langfuse-secret-key
 LANGFUSE_BASE_URL=https://your-langfuse-host
@@ -99,7 +102,7 @@ upload, and service settings.
 
 ## Run the application
 
-Start the default live-model application:
+Start the default live-model coordinator application:
 
 ```bash
 make run
@@ -121,11 +124,10 @@ TOYAPP_GENERATION_PROVIDER=deterministic make run
 
 This still uses the real pinned embedding model and FAISS retriever.
 
-To inspect the coordinator routing path without changing the verified RAG
-default, select it explicitly:
+To run the standalone RAG agent, select it explicitly:
 
 ```bash
-TOYAPP_AGENT_MODE=coordinator \
+TOYAPP_AGENT_MODE=rag \
 TOYAPP_GENERATION_PROVIDER=deterministic \
 TOYAPP_LANGFUSE_ENABLED=false \
 make run
@@ -136,12 +138,12 @@ clarify directly and records public coordinator and RAG actions in
 `execution_steps`. A `route_rag` decision delegates one focused policy task to
 the existing FAISS-backed RAG agent; a `route_analysis` decision sends selected
 report content to the analysis specialist. The specialist receives the full
-extracted report in one model call, using a separate 2,048-token output
-allowance by default. The result's
-`report_references` identify exact report pages or sections.
-Coordinator-mode Langfuse export is not advertised as operational yet.
-Report upload and analysis are currently available through the API; the
-browser file picker is planned for Stage 15.
+extracted report in one model call, using a separate configurable 16,384-token
+output allowance by default. The result's `report_references` identify exact
+report pages or sections.
+Coordinator-mode Langfuse export is not advertised as operational yet, even
+when credentials are configured. The coordinator exposes a browser file panel
+for uploaded reports.
 
 Open these local endpoints:
 
@@ -182,7 +184,8 @@ make docker-down
 ```
 
 The startup log states the selected top-level agent, generation provider, and
-whether Langfuse tracing is enabled.
+whether Langfuse is configured. `/ready` and `/api/v1/capabilities` report
+whether trace export is operational for that agent mode.
 
 The first image build needs network access for locked Python packages, the base
 images, and the pinned embedding model. Platform AI and Langfuse remain external
@@ -204,13 +207,33 @@ modify it. Supply public CA certificates only; do not include private keys.
 
 ## Use the browser
 
-The page creates a session automatically. Enter submits a message and
+The page creates a session automatically and restores it after a reload in
+the same browser tab while the server retains it. Enter submits a message and
 Shift+Enter inserts a newline. **New session** starts an independent
-conversation.
+conversation. Refreshing or starting a new session returns the page and panel
+scroll positions to the top. Assistant replies render sanitized Markdown;
+your messages remain literal text.
+
+In the default coordinator mode, use the paperclip beside **Send message** to
+upload a `.txt`, `.md`, or text-based `.pdf` report. The **Session file(s)** panel lists
+uploaded reports; its `?` icon explains selection. Uploading stores a file
+but does not contact an agent or send a message. Select one stored report to
+include it in messages. The selection remains active across turns until you
+deselect, delete, select another file, or start a new session. After a page
+reload, choose the file again from the restored list. The list and selected
+styling show file state without success notices; upload progress and errors
+remain visible. Delete removes stored content from this session, but not
+answers or traces already produced from it. The file panel and paperclip are
+hidden in standalone policy-only RAG mode.
+
+The default upload limit is 5 MiB per file, with separate limits of 50 PDF
+pages and 100,000 extracted characters. These values are configurable in
+`.env`; only one file can be selected for a browser message at a time.
 
 For each completed turn, the right panel shows:
 
 - citations and retrieved candidate chunks;
+- report references and the public agent/action timeline in coordinator mode;
 - similarity scores and source metadata;
 - public action summaries and structured model actions;
 - controller interventions and citation-validation findings;
@@ -247,8 +270,24 @@ curl -s -X POST \
 ```
 
 The response contains a session-scoped `file_id`, filename, media type, byte
-and extracted-text sizes, and a SHA-256 checksum. Attach that ID only when a
-message is explicitly submitted:
+and extracted-text sizes, and a SHA-256 checksum. List retained file metadata
+without invoking an agent:
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/sessions/<session_id>/files \
+  | uv run python -m json.tool
+```
+
+This lists the session's uploaded files without invoking an agent. To remove
+one stored file, including its extracted text:
+
+```bash
+curl -i -X DELETE \
+  http://127.0.0.1:8000/api/v1/sessions/<session_id>/files/<file_id>
+```
+
+A successful deletion returns HTTP 204. To analyse a retained file, submit
+its ID with a message:
 
 ```bash
 curl -s -X POST \
@@ -260,9 +299,10 @@ curl -s -X POST \
 
 Upload and message submission are separate operations. An upload alone does
 not invoke the agent, add conversation history, generate an assistant message,
-or export an agent-turn trace. The default RAG runtime does not consume uploaded
-content. In coordinator mode, authorized extracted content is supplied to the
-coordinator only when the user submits the message with its file ID. The
+or export an agent-turn trace. Standalone RAG mode does not consume uploaded
+content. In the default coordinator mode, authorized extracted content is
+supplied to the coordinator only when the user submits the message with its
+file ID. The
 coordinator may derive a focused policy task from that content and route it to
 the RAG specialist, but uploaded text never becomes policy evidence or enters
 FAISS. A report analysis route uses the selected report content and returns
@@ -291,6 +331,8 @@ the user from submitting additional turns.
 | `GET /api/v1/capabilities` | Advertise the available target features and actions. |
 | `POST /api/v1/sessions` | Create an empty process-local conversation session. |
 | `POST /api/v1/sessions/{session_id}/files` | Validate and retain one session-scoped report without invoking an agent. |
+| `GET /api/v1/sessions/{session_id}/files` | List safe metadata for that session's retained reports. |
+| `DELETE /api/v1/sessions/{session_id}/files/{file_id}` | Remove one owned report without changing past turns. |
 | `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one synchronous agent turn. |
 | `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |
 
@@ -337,7 +379,7 @@ for the metric-specific case contract.
 | `make ci` | Run the lock check, lint, format check, strict type check, and all offline tests. | No |
 | `make test` | Run all offline tests without the static checks. | No |
 | `make test-unit` | Run unit tests only. | No |
-| `make test-live` | Exercise natural-language retrieval and the default API with the pinned embedding model. | May download the embedding model |
+| `make test-live` | Exercise natural-language retrieval through standalone RAG and the default coordinator API with the pinned embedding model. | May download the embedding model |
 | `make test-model-live` | Verify live provider connectivity and structured-action support. | Live model request |
 | `make test-langfuse-live` | Export an API turn and retrieve its observations by session ID. | Live Langfuse request |
 | `make docker-build` | Build the non-root runtime image and cache the pinned embedding model in it. | Base images, packages, and embedding model during build |
@@ -416,8 +458,14 @@ agentic-eval-toyapp/
 │       ├── sessions.py                       # Thread-safe bounded in-memory conversation state
 │       ├── tracing.py                        # No-op and Langfuse turn recorders
 │       ├── static/
-│       │   ├── app.js                        # Browser API client and safe response rendering
-│       │   └── style.css                     # Responsive local browser styling
+│       │   ├── app.js                        # Browser API client and sanitized Markdown rendering
+│       │   ├── style.css                     # Responsive panel layout and browser styling
+│       │   └── vendor/
+│       │       ├── README.md                 # Pinned browser bundle versions and checksums
+│       │       ├── LICENSE.dompurify         # DOMPurify Apache license text
+│       │       ├── LICENSE.markdown-it       # markdown-it MIT license text
+│       │       ├── markdown-it.umd.min.js    # Local Markdown parser for assistant replies
+│       │       └── purify.min.js             # Local HTML sanitizer for rendered replies
 │       └── templates/
 │           └── index.html                    # Accessible server-rendered chat page
 └── tests/
@@ -466,8 +514,8 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 - Extracted reports are process-local, bounded, and lost on restart; raw upload
   bytes are not retained after processing.
 - Text-based PDFs are supported, but scanned PDFs and OCR are not.
-- The default RAG agent does not consume report contents.
-- Coordinator mode can answer, clarify, delegate policy tasks to RAG, and
+- Standalone RAG mode does not consume report contents.
+- The default coordinator can answer, clarify, delegate policy tasks to RAG, and
   analyse selected reports. Coordinator trace export is deferred to Stage 16.
 - Agent turns are synchronous; there is no cancellation or background job API.
 - The runtime image contains the application only; controlled trace generation

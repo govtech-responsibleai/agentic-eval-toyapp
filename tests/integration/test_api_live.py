@@ -1,4 +1,4 @@
-"""Opt-in smoke test for the default semantic chat API wiring."""
+"""Opt-in smoke tests for both agent modes with the pinned retriever."""
 
 from pathlib import Path
 from typing import cast
@@ -16,9 +16,12 @@ from agentic_eval_toyapp.config import (
 
 
 @pytest.mark.live
-def test_default_api_completes_a_semantic_retrieval_turn() -> None:
-    """The pinned embedder, FAISS, agent, sessions, and API should compose."""
-    settings = AppSettings(generation_provider=GenerationProviderKind.DETERMINISTIC)
+def test_standalone_rag_api_completes_a_semantic_retrieval_turn() -> None:
+    """The explicit RAG mode should keep its original retrieval contract."""
+    settings = AppSettings(
+        agent_mode=AgentMode.RAG,
+        generation_provider=GenerationProviderKind.DETERMINISTIC,
+    )
     with TestClient(create_app(settings)) as raw_client:
         client = cast(Client, raw_client)
         readiness: Response = client.get("/ready")

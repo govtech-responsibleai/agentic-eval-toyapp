@@ -9,7 +9,7 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from agentic_eval_toyapp.coordinator import CoordinatorAgent
-from agentic_eval_toyapp.models import ReportMediaType
+from agentic_eval_toyapp.models import ReportMediaType, SectionReportLocator
 from agentic_eval_toyapp.orchestration_models import (
     CoordinatorAttachment,
     CoordinatorAttachmentPage,
@@ -74,6 +74,43 @@ def test_long_unicode_and_unbroken_text_remains_one_complete_source() -> None:
     assert blocks[0].text == text
     assert blocks[0].locator.kind == "section"
     assert blocks[0].locator.section == "Document"
+
+
+def test_large_markdown_report_preserves_all_sections() -> None:
+    """A documentation-sized upload must retain every labeled source span."""
+    text = "\n".join(
+        f"## Section {index}\n" + (f"Finding {index} is documented. " * 65)
+        for index in range(34)
+    )
+    processor = ReportProcessor(
+        max_bytes=5 * 1024 * 1024,
+        max_pdf_pages=50,
+        max_extracted_characters=100_000,
+    )
+    processed = processor.process(
+        filename="architecture.md",
+        media_type="text/markdown",
+        content=text.encode(),
+    )
+
+    blocks = source_blocks(
+        (
+            CoordinatorAttachment(
+                file_id=uuid4(),
+                filename=processed.filename,
+                media_type=processed.media_type,
+                byte_size=processed.byte_size,
+                extracted_text=processed.extracted_text,
+            ),
+        )
+    )
+
+    assert len(text) > 50_000
+    assert len(blocks) == 34
+    locator = blocks[-1].locator
+    assert isinstance(locator, SectionReportLocator)
+    assert locator.section == "Section 33"
+    assert "Finding 33 is documented." in blocks[-1].text
 
 
 def test_pdf_pages_keep_original_numbers_and_ignore_blank_pages() -> None:

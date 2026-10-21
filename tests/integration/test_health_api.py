@@ -1,6 +1,7 @@
 """Integration tests for service-introspection endpoints."""
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
@@ -37,6 +38,7 @@ def build_client() -> Client:
     """Create an isolated API client with no `.env` file dependency."""
     settings = AppSettings(
         app_name="Test Evaluation Target",
+        agent_mode=AgentMode.COORDINATOR,
         host="127.0.0.1",
         port=8000,
         log_level=LogLevel.INFO,
@@ -86,16 +88,16 @@ def test_ready_reports_session_and_agent_dependencies() -> None:
                 "detail": "disabled",
             },
             {
-                "name": "rag_agent",
+                "name": "coordinator_agent",
                 "status": "pass",
-                "detail": "rag agent dependencies initialised",
+                "detail": "coordinator agent dependencies initialised",
             },
         ],
     }
 
 
 def test_startup_initialises_the_agent_factory_exactly_once() -> None:
-    """The server should finish RAG initialisation before serving readiness."""
+    """The server should finish agent initialisation before serving readiness."""
     factory_calls = 0
 
     def agent_factory() -> AgentRunner:
@@ -116,9 +118,35 @@ def test_startup_initialises_the_agent_factory_exactly_once() -> None:
         assert factory_calls == 1
 
 
+def test_default_startup_builds_the_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unset agent mode should select the coordinator at startup."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TOYAPP_AGENT_MODE", raising=False)
+    settings = AppSettings(
+        generation_provider=GenerationProviderKind.DETERMINISTIC,
+        langfuse_enabled=False,
+    )
+    with (
+        patch(
+            "agentic_eval_toyapp.app._build_coordinator_agent",
+            return_value=_IntrospectionAgent(),
+        ) as build_coordinator,
+        patch("agentic_eval_toyapp.app._build_rag_agent") as build_rag,
+        TestClient(create_app(settings)) as client,
+    ):
+        assert client.get("/ready").json()["status"] == "ready"
+
+    build_coordinator.assert_called_once_with(settings)
+    build_rag.assert_not_called()
+
+
 def test_startup_logs_safe_runtime_modes() -> None:
     """Operators should see provider and tracing modes without credentials."""
     settings = AppSettings(
+        agent_mode=AgentMode.COORDINATOR,
         generation_provider=GenerationProviderKind.DETERMINISTIC,
         langfuse_enabled=False,
     )
@@ -132,7 +160,7 @@ def test_startup_logs_safe_runtime_modes() -> None:
 
     log_info.assert_called_once_with(
         "application_started agent_mode=%s generation_provider=%s langfuse_enabled=%s",
-        "rag",
+        "coordinator",
         "deterministic",
         "false",
     )
@@ -187,9 +215,20 @@ def test_capabilities_advertise_only_operational_chat_features() -> None:
             "controlled_scenarios": False,
             "file_uploads": True,
         },
-        "actions": ["search", "clarify", "answer"],
+        "actions": ["answer", "clarify", "route_rag", "route_analysis"],
         "output_formats": ["application/json"],
     }
+
+
+def test_explicit_rag_mode_advertises_standalone_actions_and_tracing() -> None:
+    """The optional RAG runtime must retain its operational trace contract."""
+    settings = AppSettings(agent_mode=AgentMode.RAG, langfuse_enabled=True)
+    client = cast(Client, TestClient(create_app(settings, agent=_IntrospectionAgent())))
+
+    capabilities = client.get("/api/v1/capabilities").json()
+
+    assert capabilities["features"]["langfuse_tracing"] is True
+    assert capabilities["actions"] == ["search", "clarify", "answer"]
 
 
 def test_introspection_contract_ignores_local_langfuse_enablement(
@@ -219,5 +258,6 @@ def test_openapi_contains_only_the_intended_application_routes() -> None:
         "/api/v1/sessions",
         "/api/v1/sessions/{session_id}",
         "/api/v1/sessions/{session_id}/files",
+        "/api/v1/sessions/{session_id}/files/{file_id}",
         "/api/v1/sessions/{session_id}/messages",
     }

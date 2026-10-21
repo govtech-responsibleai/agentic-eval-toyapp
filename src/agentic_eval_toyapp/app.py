@@ -48,6 +48,7 @@ from agentic_eval_toyapp.models import (
     ReadinessCheck,
     ReadinessResponse,
     ReadinessStatus,
+    ReportListResponse,
     ReportUploadResponse,
     SessionMessageRequest,
     SessionMessageResponse,
@@ -649,6 +650,31 @@ def create_app(
         finally:
             await file.close()
         return resolved_report_store.add(session_id, processed)
+
+    @application.get(
+        f"{API_PREFIX}/sessions/{{session_id}}/files",
+        response_model=ReportListResponse,
+        responses={404: {"model": ErrorResponse}},
+        tags=["files"],
+    )
+    def list_reports(session_id: UUID) -> ReportListResponse:
+        """List safe metadata for reports retained by this session."""
+        resolved_store.get(session_id)
+        return ReportListResponse(
+            files=resolved_report_store.list_for_session(session_id)
+        )
+
+    @application.delete(
+        f"{API_PREFIX}/sessions/{{session_id}}/files/{{file_id}}",
+        status_code=204,
+        responses={404: {"model": ErrorResponse}},
+        tags=["files"],
+    )
+    def delete_report(session_id: UUID, file_id: UUID) -> Response:
+        """Remove one owned report without changing past conversation turns."""
+        resolved_store.get(session_id)
+        resolved_report_store.delete(session_id, file_id)
+        return Response(status_code=204)
 
     @application.post(
         f"{API_PREFIX}/sessions/{{session_id}}/messages",

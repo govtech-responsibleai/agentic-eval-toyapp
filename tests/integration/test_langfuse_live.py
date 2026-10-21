@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 from agentic_eval_toyapp import __version__
 from agentic_eval_toyapp.agent import RagAgent
 from agentic_eval_toyapp.app import create_app
-from agentic_eval_toyapp.config import AppSettings
+from agentic_eval_toyapp.config import AgentMode, AppSettings
 from agentic_eval_toyapp.models import (
     AnswerAction,
     DocumentMetadata,
@@ -56,7 +56,7 @@ def _decode_observation_io(value: object) -> object:
 @pytest.mark.langfuse_live
 def test_api_turn_is_retrievable_by_app_session_id() -> None:
     """Use the same session query contract consumed by METIS's extractor."""
-    settings = AppSettings()
+    settings = AppSettings(agent_mode=AgentMode.RAG)
     if not settings.langfuse_enabled:
         pytest.fail("TOYAPP_LANGFUSE_ENABLED must be true for the live trace test")
     public_key, secret_key, base_url = settings.require_langfuse_configuration()

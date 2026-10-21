@@ -6,6 +6,8 @@
     <meta name="description" content="A controlled RAG application for METIS evaluation demos.">
     <title>{{ app_name }}</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <script src="{{ url_for('static', path='/vendor/markdown-it.umd.min.js') }}" defer></script>
+    <script src="{{ url_for('static', path='/vendor/purify.min.js') }}" defer></script>
     <script src="{{ url_for('static', path='/app.js') }}" defer></script>
   </head>
   <body>
@@ -17,8 +19,8 @@
         </p>
         <h1>{{ app_name }}</h1>
         <p class="intro">
-          Ask questions about the synthetic Northstar Services policy corpus.
-          Responses show their retrieved evidence and agent actions.
+          Ask about Northstar policies or analyse a report. Responses show the
+          agents involved and the evidence they used.
         </p>
       </div>
       <a class="api-link" href="/docs">
@@ -39,7 +41,7 @@
           </button>
         </div>
 
-        <h2 id="chat-heading" class="visually-hidden">Policy chat</h2>
+        <h2 id="chat-heading" class="visually-hidden">Northstar assistant chat</h2>
         <ol
           id="transcript"
           class="transcript"
@@ -51,34 +53,74 @@
           <li class="conversation-welcome">
             <span class="welcome-mark" aria-hidden="true">N</span>
             <div>
-              <h3>Ask about Northstar policies</h3>
+              <h3>Ask about policies or a report</h3>
               <p>
-                Try annual leave, flexible work, learning allowances, or another
-                topic from the synthetic employee handbook.
+                Ask a policy question, or upload a report and select it when you
+                want the assistant to use it.
               </p>
             </div>
           </li>
         </ol>
 
+        <section id="files-panel" class="files-panel" aria-labelledby="files-heading" hidden>
+          <div class="files-header">
+            <h3 id="files-heading">Session file(s)</h3>
+            <div class="tooltip-anchor">
+              <button
+                class="file-help-button"
+                type="button"
+                aria-label="How to use session files"
+                aria-describedby="file-help-tooltip"
+              >?</button>
+              <div id="file-help-tooltip" class="tooltip-bubble file-help-tooltip" role="tooltip">
+                <ul>
+                  <li>Select a file and start messaging to analyse it.</li>
+                  <li>Deselect a file to exclude it from your messages.</li>
+                  <li>Only one file can be analysed at a time.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <p id="upload-status" class="upload-status" role="status" aria-live="polite"></p>
+          <ul id="uploaded-files" class="uploaded-files" aria-label="Uploaded reports"></ul>
+        </section>
         <form id="chat-form" class="message-form">
           <div class="composer-shell">
-            <label for="message-input">Your policy question</label>
+            <label for="message-input">Your message</label>
             <textarea
               id="message-input"
               name="message"
-              rows="3"
+              rows="2"
               maxlength="8000"
               required
               disabled
-              placeholder="Ask a question about Northstar policies"
+              placeholder="Ask about a policy or a selected report"
             ></textarea>
             <div class="form-footer">
-              <p id="app-status" class="app-status" role="status" aria-live="polite">
-                Initialising a new session…
-              </p>
-              <button id="send-message" class="primary-button" type="submit" disabled>
-                Send question
-              </button>
+              <p id="app-status" class="app-status" role="status" aria-live="polite">Initialising a new session…</p>
+              <div class="composer-actions">
+                <span id="upload-control" class="tooltip-anchor" hidden>
+                  <button
+                    id="upload-report-button"
+                    class="upload-button"
+                    type="button"
+                    aria-label="Upload report"
+                    aria-describedby="upload-tooltip"
+                    disabled
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m20.5 11.5-8.7 8.7a5.5 5.5 0 0 1-7.8-7.8l9.4-9.4a3.7 3.7 0 0 1 5.2 5.2l-9.5 9.5a1.9 1.9 0 0 1-2.7-2.7l8.8-8.8"/>
+                    </svg>
+                  </button>
+                  <span id="upload-tooltip" class="tooltip-bubble upload-tooltip" role="tooltip">
+                    Choose a .txt/.md/.pdf file to analyse
+                  </span>
+                </span>
+                <input id="report-upload" type="file" accept=".txt,.md,.pdf" hidden disabled>
+                <button id="send-message" class="primary-button" type="submit" disabled>
+                  Send message
+                </button>
+              </div>
             </div>
           </div>
         </form>
@@ -93,65 +135,77 @@
           <span id="turn-status" class="status-badge status-idle">Waiting</span>
         </div>
 
-        <p id="details-empty" class="empty-state">
-          Submit a question to inspect citations, retrieved sources, and public
-          action summaries.
-        </p>
+        <div class="details-scroll">
+          <p id="details-empty" class="empty-state">
+            Submit a question to inspect citations, retrieved sources, and public
+            action summaries.
+          </p>
 
-        <div id="turn-details" hidden>
-          <section class="detail-section" aria-labelledby="citations-heading">
-            <h3 id="citations-heading">Citations</h3>
-            <ul id="citations" class="citation-list"></ul>
-          </section>
+          <div id="turn-details" hidden>
+            <section class="detail-section" aria-labelledby="citations-heading">
+              <h3 id="citations-heading">Citations</h3>
+              <ul id="citations" class="citation-list"></ul>
+            </section>
 
-          <section class="detail-section" aria-labelledby="sources-heading">
-            <h3 id="sources-heading">Retrieved sources</h3>
-            <div id="sources" class="source-list"></div>
-          </section>
+            <section class="detail-section" aria-labelledby="sources-heading">
+              <h3 id="sources-heading">Retrieved sources</h3>
+              <div id="sources" class="source-list"></div>
+            </section>
 
-          <details id="execution-details" class="execution-details" open>
-            <summary>Execution details</summary>
-            <div class="execution-content">
-              <dl class="turn-metadata">
-                <div>
-                  <dt>Outcome reason</dt>
-                  <dd id="termination-reason">—</dd>
-                </div>
-                <div>
-                  <dt>Model calls</dt>
-                  <dd id="model-calls">—</dd>
-                </div>
-                <div>
-                  <dt>Searches</dt>
-                  <dd id="searches">—</dd>
-                </div>
-                <div>
-                  <dt>Final model action</dt>
-                  <dd id="model-action">—</dd>
-                </div>
-              </dl>
+            <section class="detail-section" aria-labelledby="report-references-heading">
+              <h3 id="report-references-heading">Report references</h3>
+              <ul id="report-references" class="compact-list"></ul>
+            </section>
 
-              <section aria-labelledby="actions-heading">
-                <h3 id="actions-heading">Agent actions</h3>
-                <ol id="actions" class="compact-list"></ol>
-              </section>
+            <details id="execution-details" class="execution-details" open>
+              <summary>Execution details</summary>
+              <div class="execution-content">
+                <dl class="turn-metadata">
+                  <div>
+                    <dt>Outcome reason</dt>
+                    <dd id="termination-reason">—</dd>
+                  </div>
+                  <div>
+                    <dt>Model calls</dt>
+                    <dd id="model-calls">—</dd>
+                  </div>
+                  <div>
+                    <dt>Searches</dt>
+                    <dd id="searches">—</dd>
+                  </div>
+                  <div>
+                    <dt>Final model action</dt>
+                    <dd id="model-action">—</dd>
+                  </div>
+                </dl>
 
-              <section aria-labelledby="model-actions-heading">
-                <h3 id="model-actions-heading">Structured model actions</h3>
-                <ol id="model-actions" class="compact-list"></ol>
-              </section>
+                <section aria-labelledby="actions-heading">
+                  <h3 id="actions-heading">Agent actions</h3>
+                  <ol id="actions" class="compact-list"></ol>
+                </section>
 
-              <section aria-labelledby="controller-events-heading">
-                <h3 id="controller-events-heading">Controller events</h3>
-                <ul id="controller-events" class="compact-list"></ul>
-              </section>
+                <section aria-labelledby="execution-steps-heading">
+                  <h3 id="execution-steps-heading">Agent timeline</h3>
+                  <ol id="execution-steps" class="compact-list"></ol>
+                </section>
 
-              <section aria-labelledby="validation-findings-heading">
-                <h3 id="validation-findings-heading">Validation findings</h3>
-                <ul id="validation-findings" class="compact-list"></ul>
-              </section>
-            </div>
-          </details>
+                <section aria-labelledby="model-actions-heading">
+                  <h3 id="model-actions-heading">Structured model actions</h3>
+                  <ol id="model-actions" class="compact-list"></ol>
+                </section>
+
+                <section aria-labelledby="controller-events-heading">
+                  <h3 id="controller-events-heading">Controller events</h3>
+                  <ul id="controller-events" class="compact-list"></ul>
+                </section>
+
+                <section aria-labelledby="validation-findings-heading">
+                  <h3 id="validation-findings-heading">Validation findings</h3>
+                  <ul id="validation-findings" class="compact-list"></ul>
+                </section>
+              </div>
+            </details>
+          </div>
         </div>
       </aside>
     </main>

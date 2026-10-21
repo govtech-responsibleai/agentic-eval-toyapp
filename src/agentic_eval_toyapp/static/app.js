@@ -3,6 +3,7 @@
 const app = document.querySelector("#app");
 const apiBase = app.dataset.apiBase;
 const transcript = document.querySelector("#transcript");
+const detailsScroll = document.querySelector(".details-scroll");
 const form = document.querySelector("#chat-form");
 const messageInput = document.querySelector("#message-input");
 const sendButton = document.querySelector("#send-message");
@@ -23,14 +24,40 @@ const actions = document.querySelector("#actions");
 const modelActions = document.querySelector("#model-actions");
 const controllerEvents = document.querySelector("#controller-events");
 const validationFindings = document.querySelector("#validation-findings");
+const executionSteps = document.querySelector("#execution-steps");
+const reportReferences = document.querySelector("#report-references");
+const filesPanel = document.querySelector("#files-panel");
+const uploadControl = document.querySelector("#upload-control");
+const uploadButton = document.querySelector("#upload-report-button");
+const reportUpload = document.querySelector("#report-upload");
+const uploadedFiles = document.querySelector("#uploaded-files");
+const uploadStatus = document.querySelector("#upload-status");
+const markdownRenderer = typeof window.markdownit === "function"
+  ? window.markdownit({ html: false, linkify: true, breaks: false })
+  : null;
+
+const markdownTags = [
+  "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6",
+  "hr", "li", "ol", "p", "pre", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul",
+];
 
 let sessionId = null;
 let requestInProgress = false;
+let fileOperationInProgress = false;
+let selectedFileId = null;
+let sessionFiles = [];
 
 function preferredScrollBehavior() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches
     ? "auto"
     : "smooth";
+}
+
+function resetSessionScroll() {
+  transcript.scrollTop = 0;
+  detailsScroll.scrollTop = 0;
+  uploadedFiles.scrollTop = 0;
+  window.scrollTo({ top: 0, left: 0, behavior: "instant" });
 }
 
 function setStatus(message, isError = false) {
@@ -40,11 +67,23 @@ function setStatus(message, isError = false) {
 
 function setBusy(isBusy) {
   requestInProgress = isBusy;
-  messageInput.disabled = isBusy || sessionId === null;
-  sendButton.disabled = isBusy || sessionId === null;
-  newSessionButton.disabled = isBusy;
-  sendButton.textContent = isBusy ? "Working…" : "Send question";
-  app.setAttribute("aria-busy", String(isBusy));
+  updateControls();
+  sendButton.textContent = isBusy ? "Working…" : "Send message";
+}
+
+function updateControls() {
+  const unavailable = sessionId === null || requestInProgress;
+  messageInput.disabled = unavailable;
+  sendButton.disabled = unavailable || fileOperationInProgress || !messageInput.value.trim();
+  newSessionButton.disabled = requestInProgress || fileOperationInProgress;
+  const uploadUnavailable = unavailable || fileOperationInProgress || filesPanel.hidden;
+  uploadControl.hidden = filesPanel.hidden;
+  uploadButton.disabled = uploadUnavailable;
+  reportUpload.disabled = uploadUnavailable;
+  for (const button of uploadedFiles.querySelectorAll("button")) {
+    button.disabled = unavailable || fileOperationInProgress;
+  }
+  app.setAttribute("aria-busy", String(requestInProgress || fileOperationInProgress));
 }
 
 async function apiRequest(path, options = {}) {
@@ -67,6 +106,20 @@ async function apiRequest(path, options = {}) {
   return payload;
 }
 
+async function fileRequest(path, options) {
+  const response = await fetch(`${apiBase}${path}`, options);
+  if (response.ok) {
+    return response.status === 204 ? null : response.json();
+  }
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch (_error) {
+    // Keep the HTTP status when an upstream response is not JSON.
+  }
+  throw new Error(payload.message || `Request failed (${response.status}).`);
+}
+
 function createTextElement(tagName, text, className = "") {
   const element = document.createElement(tagName);
   element.textContent = text;
@@ -74,6 +127,113 @@ function createTextElement(tagName, text, className = "") {
     element.className = className;
   }
   return element;
+}
+
+function setUploadStatus(message, isError = false) {
+  uploadStatus.textContent = message;
+  uploadStatus.classList.toggle("upload-status-error", isError);
+}
+
+function renderFiles() {
+  uploadedFiles.replaceChildren();
+  if (sessionFiles.length === 0) {
+    uploadedFiles.append(createTextElement("li", "No reports uploaded yet.", "files-empty"));
+  }
+  for (const file of sessionFiles) {
+    const item = document.createElement("li");
+    item.className = `uploaded-file${selectedFileId === file.file_id ? " is-selected" : ""}`;
+    const description = document.createElement("div");
+    description.className = "uploaded-file-description";
+    description.append(createTextElement("strong", file.filename));
+    description.append(createTextElement("span", `${Math.ceil(file.byte_size / 1024)} KB · ${file.media_type}`));
+    const controls = document.createElement("div");
+    controls.className = "uploaded-file-controls";
+    const select = createTextElement(
+      "button",
+      selectedFileId === file.file_id ? "Deselect" : "Select",
+      "file-action",
+    );
+    select.type = "button";
+    select.setAttribute("aria-label", `${select.textContent} ${file.filename} for messages`);
+    select.setAttribute("aria-pressed", String(selectedFileId === file.file_id));
+    select.addEventListener("click", () => {
+      selectedFileId = selectedFileId === file.file_id ? null : file.file_id;
+      setUploadStatus("");
+      renderFiles();
+    });
+    const remove = createTextElement("button", "Delete", "file-action file-delete");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Permanently delete ${file.filename} from this session`);
+    remove.addEventListener("click", () => deleteFile(file));
+    controls.append(select, remove);
+    item.append(description, controls);
+    uploadedFiles.append(item);
+  }
+  updateControls();
+}
+
+async function loadFiles() {
+  const response = await apiRequest(`/sessions/${sessionId}/files`);
+  sessionFiles = response.files;
+  if (selectedFileId && !sessionFiles.some((file) => file.file_id === selectedFileId)) {
+    selectedFileId = null;
+  }
+  renderFiles();
+}
+
+async function uploadFile() {
+  const file = reportUpload.files?.[0];
+  if (!file || sessionId === null || fileOperationInProgress) {
+    return;
+  }
+  fileOperationInProgress = true;
+  updateControls();
+  setUploadStatus(`Uploading ${file.name}…`);
+  const body = new FormData();
+  body.append("file", file);
+  try {
+    const metadata = await fileRequest(`/sessions/${sessionId}/files`, {
+      method: "POST",
+      body,
+    });
+    sessionFiles.push(metadata);
+    setUploadStatus("");
+    renderFiles();
+  } catch (error) {
+    setUploadStatus(error.message, true);
+  } finally {
+    reportUpload.value = "";
+    fileOperationInProgress = false;
+    updateControls();
+  }
+}
+
+async function deleteFile(file) {
+  if (sessionId === null || fileOperationInProgress || requestInProgress) {
+    return;
+  }
+  if (!window.confirm(`Delete ${file.filename} from this session? Past messages will remain.`)) {
+    return;
+  }
+  fileOperationInProgress = true;
+  updateControls();
+  try {
+    await fileRequest(`/sessions/${sessionId}/files/${encodeURIComponent(file.file_id)}`, {
+      method: "DELETE",
+    });
+    sessionFiles = sessionFiles.filter((item) => item.file_id !== file.file_id);
+    if (selectedFileId === file.file_id) {
+      selectedFileId = null;
+    }
+    setUploadStatus("");
+    renderFiles();
+  } catch (error) {
+    await loadFiles().catch(() => {});
+    setUploadStatus(error.message, true);
+  } finally {
+    fileOperationInProgress = false;
+    updateControls();
+  }
 }
 
 function renderWelcome() {
@@ -85,11 +245,11 @@ function renderWelcome() {
   item.append(mark);
 
   const copy = document.createElement("div");
-  copy.append(createTextElement("h3", "Ask about Northstar policies"));
+  copy.append(createTextElement("h3", "Ask about policies or a report"));
   copy.append(
     createTextElement(
       "p",
-      "Try annual leave, flexible work, learning allowances, or another topic from the synthetic employee handbook.",
+      "Ask a policy question, or upload a report and select it when you want the assistant to use it.",
     ),
   );
   item.append(copy);
@@ -105,25 +265,35 @@ function scrollToElement(element) {
 }
 
 function renderResponseText(container, text) {
-  const lines = text.split("\n");
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      continue;
-    }
-    if (trimmed.startsWith("### ")) {
-      container.append(createTextElement("h4", trimmed.slice(4)));
-    } else if (trimmed.startsWith("## ")) {
-      container.append(createTextElement("h3", trimmed.slice(3)));
-    } else if (trimmed.startsWith("- ")) {
-      container.append(createTextElement("p", `• ${trimmed.slice(2)}`));
-    } else {
-      container.append(createTextElement("p", trimmed));
+  if (markdownRenderer === null || typeof window.DOMPurify?.sanitize !== "function") {
+    container.classList.add("message-body-plain");
+    container.append(createTextElement("p", text));
+    return;
+  }
+
+  const fragment = window.DOMPurify.sanitize(markdownRenderer.render(text), {
+    RETURN_DOM_FRAGMENT: true,
+    ALLOWED_TAGS: markdownTags,
+    ALLOWED_ATTR: ["href", "title"],
+  });
+  for (const link of fragment.querySelectorAll("a[href]")) {
+    const href = link.getAttribute("href");
+    try {
+      const url = new URL(href, window.location.href);
+      if (!["http:", "https:", "mailto:"].includes(url.protocol)) {
+        link.removeAttribute("href");
+        continue;
+      }
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noopener noreferrer");
+    } catch (_error) {
+      link.removeAttribute("href");
     }
   }
+  container.append(fragment);
 }
 
-function appendMessage(role, text, status = "") {
+function appendMessage(role, text, status = "", filename = "", shouldScroll = true) {
   removeWelcome();
   const item = document.createElement("li");
   item.className = `message message-${role}`;
@@ -144,10 +314,15 @@ function appendMessage(role, text, status = "") {
     renderResponseText(body, text);
   } else {
     body.append(createTextElement("p", text));
+    if (filename) {
+      body.append(createTextElement("span", `Attached: ${filename}`, "message-attachment"));
+    }
   }
   item.append(body);
   transcript.append(item);
-  scrollToElement(item);
+  if (shouldScroll) {
+    scrollToElement(item);
+  }
 }
 
 function appendWorkingIndicator() {
@@ -285,11 +460,31 @@ function renderTurnDetails(result) {
   const sourceIds = renderSources(result.retrieved_chunks, result.searches);
   renderCitations(result.citations, sourceIds);
   renderList(
+    reportReferences,
+    (result.report_references || []).map((reference) => {
+      const filename = sessionFiles.find((file) => file.file_id === reference.file_id)?.filename
+        ?? reference.file_id;
+      const locator = reference.locator.kind === "page"
+        ? `page ${reference.locator.page_number}`
+        : `section ${reference.locator.section}`;
+      return `${filename} · ${locator}: ${reference.excerpt}`;
+    }),
+    "No report references returned.",
+  );
+  renderList(
     actions,
     result.action_summaries.map(
       (summary) => `${summary.action.replaceAll("_", " ")}: ${summary.detail}`,
     ),
     "No public action summary returned.",
+  );
+  renderList(
+    executionSteps,
+    (result.execution_steps || []).map((step) => {
+      const duration = step.duration_ms === null ? "" : ` · ${Math.round(step.duration_ms)} ms`;
+      return `${step.agent} · ${step.action.replaceAll("_", " ")} · ${step.status}${duration}: ${step.summary}`;
+    }),
+    "No agent timeline returned.",
   );
   renderList(
     modelActions,
@@ -329,52 +524,102 @@ function resetDetails() {
   modelAction.textContent = "—";
   citations.replaceChildren();
   sources.replaceChildren();
+  reportReferences.replaceChildren();
   actions.replaceChildren();
+  executionSteps.replaceChildren();
   modelActions.replaceChildren();
   controllerEvents.replaceChildren();
   validationFindings.replaceChildren();
 }
 
-async function createSession() {
+function savedSessionId() {
+  try {
+    return window.sessionStorage.getItem("toyapp-session-id");
+  } catch (_error) {
+    return null;
+  }
+}
+
+function rememberSession(id) {
+  try {
+    window.sessionStorage.setItem("toyapp-session-id", id);
+  } catch (_error) {
+    // The active tab can still use its in-memory session.
+  }
+}
+
+async function createSession(restore = false) {
   setBusy(true);
   setStatus("Creating a new session…");
   sessionId = null;
+  selectedFileId = null;
+  sessionFiles = [];
+  filesPanel.hidden = true;
+  renderFiles();
+  setUploadStatus("");
   sessionIdElement.textContent = "Creating session…";
   transcript.replaceChildren();
   renderWelcome();
   resetDetails();
+  resetSessionScroll();
   try {
-    const session = await apiRequest("/sessions", { method: "POST" });
+    let session = null;
+    const previousId = restore ? savedSessionId() : null;
+    if (previousId) {
+      try {
+        session = await apiRequest(`/sessions/${encodeURIComponent(previousId)}`);
+      } catch (_error) {
+        // A restarted server no longer retains the previous in-memory session.
+      }
+    }
+    if (session === null) {
+      session = await apiRequest("/sessions", { method: "POST" });
+    }
     sessionId = session.session_id;
+    rememberSession(sessionId);
     sessionIdElement.textContent = sessionId;
-    setStatus("Session ready. Ask a question about the policy corpus.");
+    for (const message of session.messages) {
+      appendMessage(message.role, message.content, "", "", false);
+    }
+    try {
+      const capabilities = await apiRequest("/capabilities");
+      filesPanel.hidden = !capabilities.actions.includes("route_analysis");
+      if (!filesPanel.hidden) {
+        await loadFiles();
+      }
+    } catch (error) {
+      filesPanel.hidden = true;
+      setStatus(`Session ready, but file controls are unavailable: ${error.message}`, true);
+    }
+    if (!appStatus.classList.contains("app-status-error")) {
+      setStatus("");
+    }
   } catch (error) {
     setStatus(error.message, true);
     sessionIdElement.textContent = "Unavailable";
   } finally {
     setBusy(false);
-    if (sessionId !== null) {
-      messageInput.focus();
-    }
+    resetSessionScroll();
   }
 }
 
 async function submitMessage(event) {
   event.preventDefault();
   const message = messageInput.value.trim();
-  if (!message || sessionId === null || requestInProgress) {
+  if (!message || sessionId === null || requestInProgress || fileOperationInProgress) {
     return;
   }
 
-  appendMessage("user", message);
+  const attachedFile = sessionFiles.find((file) => file.file_id === selectedFileId);
+  appendMessage("user", message, "", attachedFile?.filename ?? "");
   messageInput.value = "";
   setBusy(true);
-  setStatus("Reviewing the question and preparing a response…");
+  setStatus("Reviewing your message and preparing a response…");
   const workingIndicator = appendWorkingIndicator();
   try {
     const response = await apiRequest(`/sessions/${sessionId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, file_ids: selectedFileId ? [selectedFileId] : [] }),
     });
     workingIndicator.remove();
     appendMessage("assistant", response.result.message, resultStatusLabel(response.result));
@@ -384,6 +629,10 @@ async function submitMessage(event) {
     workingIndicator.remove();
     appendMessage("assistant", error.message, "request_error");
     setStatus(error.message, true);
+    messageInput.value = message;
+    if (selectedFileId) {
+      await loadFiles().catch(() => {});
+    }
   } finally {
     setBusy(false);
     messageInput.focus();
@@ -391,7 +640,10 @@ async function submitMessage(event) {
 }
 
 form.addEventListener("submit", submitMessage);
-newSessionButton.addEventListener("click", createSession);
+newSessionButton.addEventListener("click", () => createSession(false));
+uploadButton.addEventListener("click", () => reportUpload.click());
+reportUpload.addEventListener("change", uploadFile);
+messageInput.addEventListener("input", updateControls);
 messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
@@ -399,4 +651,8 @@ messageInput.addEventListener("keydown", (event) => {
   }
 });
 
-createSession();
+if ("scrollRestoration" in window.history) {
+  window.history.scrollRestoration = "manual";
+}
+window.addEventListener("pageshow", resetSessionScroll);
+createSession(true);
