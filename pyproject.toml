@@ -29,7 +29,7 @@ packages = ["src/agentic_eval_toyapp"]
 
 [tool.uv]
 package = true
-required-version = ">=0.12.7,<0.13"
+required-version = ">=0.12.7"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
