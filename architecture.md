@@ -9,18 +9,18 @@ For installation, configuration, and usage commands, see [README.md](README.md).
 ## Scope and design principles
 
 The application is a small, synchronous agentic target for METIS. Its default
-runtime remains the verified RAG agent. An opt-in coordinator runtime adds
-typed direct-answer and clarification decisions, delegates policy tasks to the
-existing RAG workflow, and delegates selected uploaded reports to a bounded
-analysis specialist.
+runtime is the coordinator. It selects typed direct-answer and clarification
+decisions, delegates policy tasks to the verified RAG workflow, and delegates
+selected uploaded reports to a bounded analysis specialist. Standalone RAG
+mode remains explicitly selectable.
 
 The main design principles are:
 
 - one versioned chat API contract for browser users, METIS, and other clients;
 - explicit Pydantic contracts at configuration, provider, agent, and API
   boundaries;
-- model-selected `search`, `clarify`, and `answer` actions in the default
-  live mode;
+- model-selected `search`, `clarify`, and `answer` actions in standalone RAG
+  mode;
 - model-selected `answer`, `clarify`, `route_rag`, and `route_analysis`
   decisions in coordinator mode;
 - bounded controller behaviour without replacing model-quality failures;
@@ -50,8 +50,8 @@ flowchart LR
     API --> Reports[Session-scoped report store]
     Sessions --> Runtime{Selected agent mode}
     Reports -->|Authorized reports on message submission| Runtime
-    Runtime -->|Default| Agent[Bounded RAG agent]
-    Runtime -->|Opt-in| Coordinator[Coordinator agent]
+    Runtime -->|Standalone rag| Agent[Bounded RAG agent]
+    Runtime -->|Default| Coordinator[Coordinator agent]
     Agent --> Provider[RAG generation provider]
     Coordinator --> CoordinatorProvider[Coordinator generation provider]
     Provider -->|Live mode| Model[OpenAI-compatible model API]
@@ -84,11 +84,11 @@ The browser and programmatic clients use the same FastAPI routes. Programmatic
 clients may upload a report independently of message submission. A message is
 executed synchronously inside its session lock. The session store supplies
 bounded public history and authorized report records to the selected top-level
-agent. In default RAG mode, the agent may call retrieval before returning an
-answer or clarification and ignores report content. In coordinator mode, the
-model selects a direct response or one typed specialist route from the combined
-input. Action and route selection belong to the model; controller validation
-does not silently replace a semantically poor decision.
+agent. In standalone RAG mode, the agent may call retrieval before returning
+an answer or clarification and ignores report content. In default coordinator
+mode, the model selects a direct response or one typed specialist route from
+the combined input. Action and route selection belong to the model; controller
+validation does not silently replace a semantically poor decision.
 
 For `route_rag`, the coordinator supplies only a focused policy task and
 bounded public history through `RagHandoffRequest`. The RAG specialist cannot
@@ -100,6 +100,23 @@ The controlled trace harness is repository tooling. It creates the normal
 FastAPI application with a case-scoped completion client, calls the normal
 session/message routes, and stores private labels outside Langfuse.
 
+### Agent boundaries
+
+| Agent | Receives | Permitted actions | Cannot do |
+|---|---|---|---|
+| Coordinator | Current message, bounded public text history, and extracted contents of files explicitly selected for **this** message | `answer`, `clarify`, `route_rag`, or `route_analysis`; at most one specialist route per turn | Search FAISS or open unselected files; report synthesis is assigned to the analysis specialist, although an unsupported direct answer remains a model-quality failure |
+| Policy RAG specialist | One focused policy task and public history from the coordinator | `search` the immutable policy corpus, `clarify`, or `answer` with policy citations | Read the report store or treat uploaded content as policy evidence |
+| Report analysis specialist | One focused task and only the coordinator-selected report contents | `inspect_content`, `clarify`, or `answer` with report references | Resolve other file IDs, search FAISS, or use reports outside the handoff |
+
+The API, not an agent, resolves the message's `file_ids` against its owning
+session. Uploading or listing a file does not expose its contents to an agent.
+The browser retains one explicit selection across messages; each Send includes
+that ID again. Deselecting it sends no file content. Conversation history
+retains prior public text, not the report's full contents or attachment IDs.
+`inspect_content` is a public analysis execution step; it is not a second
+model-selected tool call. The analysis specialist's model selects `answer` or
+`clarify` after receiving the authorized report content.
+
 <a id="component-index"></a>
 
 ## Component index
@@ -109,12 +126,12 @@ Application paths in this table are relative to
 
 | Component | Primary responsibility | Main implementation | Diagram |
 |---|---|---|---|
-| Browser frontend | Create sessions, submit messages, and render public evidence and execution details | `templates/index.html`, `static/app.js`, `static/style.css` | [Frontend flow](#frontend-flow) |
+| Browser frontend | Manage session files and explicit selection, submit messages, and render public evidence and execution details | `templates/index.html`, `static/app.js`, `static/style.css` | [Frontend flow](#frontend-flow) |
 | FastAPI boundary | Expose browser, health, capability, session, and message routes | `app.py` | [API flow](#api-flow) |
 | Startup and configuration | Validate settings and initialise runtime dependencies before serving requests | `config.py`, `app.py` | [Startup flow](#startup-flow) |
 | Shared contracts | Validate corpus, actions, results, sessions, and API payloads | `models.py` | [Contract flow](#contract-flow) |
 | Session store | Isolate sessions and retain bounded complete turns | `sessions.py` | [Session flow](#session-flow) |
-| Report service | Validate, extract, hash, and isolate uploaded reports without invoking an agent | `reports.py`, `app.py` | [Report flow](#report-flow) |
+| Report service | Validate, extract, hash, list, delete, and isolate uploaded reports without invoking an agent | `reports.py`, `app.py` | [Report flow](#report-flow) |
 | Coordinator | Inspect combined input, select one typed decision, and enforce one-delegation boundaries | `coordinator.py`, `orchestration_models.py`, `prompts/coordinator.md` | [Coordinator flow](#coordinator-flow) |
 | Report analysis | Label complete authorized report content, request grounded findings once, and validate report references | `analysis.py`, `analysis_models.py`, `report_sources.py`, `prompts/analysis.md` | [Analysis flow](#analysis-flow) |
 | RAG agent and controller | Run the bounded structured-action loop | `agent.py`, `prompts/system.md` | [Agent flow](#agent-flow) |
@@ -128,15 +145,33 @@ Application paths in this table are relative to
 ## 1. Browser frontend
 
 The frontend is a local HTML, CSS, and JavaScript client served by FastAPI. It
-has no separate build system or frontend framework. It creates a session on
-page load, sends messages to the versioned API, and renders only fields from
-the public response schema.
+has no separate build system or frontend framework. It restores a session in
+the same browser tab when possible, creates one otherwise, and uses only the
+versioned API. A paperclip in the composer opens the upload picker; the compact
+file panel lists session uploads and allows explicit selection or deletion.
+Upload, Select/Deselect, Delete, and Send are separate user actions. Selection
+persists until changed; each Send supplies either the selected file ID or an
+empty `file_ids` list. Browser reload restores the file list but clears
+selection for an explicit new choice. Refresh and New session reset the page,
+transcript, evidence, and file-list scroll positions to the top. File-action
+success notices are omitted; progress and error feedback remain visible.
 
 The transcript shows the user-visible conversation. The evidence panel shows
-the last turn's citations, retrieved candidate chunks, similarity scores,
-structured model actions, controller events, validation findings, termination
-reason, and model/search counters. Text is inserted using safe DOM APIs rather
-than `innerHTML`.
+the last turn's policy citations, report references, retrieved chunks,
+structured model actions, agent timeline, controller events, validation
+findings, termination reason, and model/search counters. Text is inserted
+using safe DOM APIs rather than `innerHTML`. Assistant Markdown is parsed with
+raw HTML disabled, sanitized by locally bundled DOMPurify, and appended as a
+DOM fragment. User messages, filenames, and evidence labels remain literal
+text. These presentation steps do not alter API payloads, stored messages,
+agent decisions, or evaluation traces.
+
+Stage 15's functional server additions are limited to listing and deleting
+session-owned reports. Browser-only polish changes layout, rendered text,
+notices, and scroll/focus behavior. Explicit file selection is client state;
+the existing message route still receives only the submitted `file_ids` and
+resolves them before the agent runs. The separate analysis output and timeout
+settings on this branch are runtime limits, not UI behavior.
 
 <a id="frontend-flow"></a>
 
@@ -148,21 +183,31 @@ sequenceDiagram
     participant Page as Browser page
     participant API as FastAPI /api/v1
 
-    Page->>API: POST /sessions
-    API-->>Page: session_id
-    User->>Page: Enter question
-    Page->>API: POST /sessions/:session_id/messages
+    Page->>API: Restore GET /sessions/:id or POST /sessions
+    API-->>Page: session_id and public history
+    Page->>API: GET /sessions/:id/files
+    API-->>Page: Stored file metadata
+    User->>Page: Choose report with paperclip
+    Page->>API: POST /sessions/:id/files
+    API-->>Page: file_id; no agent turn
+    Page->>Page: Add file to list without selecting it
+    User->>Page: Select one file and enter message
+    Page->>API: POST /sessions/:id/messages with selected file_id or []
     API-->>Page: SessionMessageResponse
     Page->>Page: Render answer and status
-    Page->>Page: Render citations, candidates, and execution details
+    Page->>Page: Render agent steps and separate evidence types
+    User->>Page: Deselect or delete file
+    Page->>API: DELETE /sessions/:id/files/:file_id if deleting
     User->>Page: Select New session
     Page->>API: POST /sessions
     API-->>Page: new session_id
+    Page->>Page: Clear selection and reset page/panel scroll
 ```
 
-Enter submits the form and Shift+Enter inserts a newline. While a request is in
-progress, the message and new-session controls are disabled to prevent
-overlapping browser requests.
+Enter submits the form and Shift+Enter inserts a newline. While upload,
+deletion, or message delivery is in progress, conflicting controls are
+disabled. Selecting a file does not upload or invoke an agent. Deletion
+removes stored report data but cannot erase earlier answers or external traces.
 
 [Back to component index](#component-index)
 
@@ -182,6 +227,8 @@ both use this same application factory.
 | `POST /api/v1/sessions` | Create an empty process-local session. |
 | `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |
 | `POST /api/v1/sessions/{session_id}/files` | Validate and retain one report without creating a conversation turn. |
+| `GET /api/v1/sessions/{session_id}/files` | List safe metadata for this session's retained reports in upload order. |
+| `DELETE /api/v1/sessions/{session_id}/files/{file_id}` | Remove one owned report's metadata and extracted content. |
 | `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one synchronous agent turn. |
 
 The public API uses stable error bodies for missing sessions, invalid requests,
@@ -203,6 +250,10 @@ flowchart TD
     FileLookup --> FileProcess[Bound, validate, hash, and extract]
     FileProcess --> FileStore[Retain extracted text under session]
     FileStore --> Response
+    Route -->|List files| FileList[Return owning session's safe metadata]
+    Route -->|Delete file| FileDelete[Check ownership and remove stored report]
+    FileList --> Response
+    FileDelete --> Empty[204 No Content]
     Route -->|Submit message| Lookup[Validate session exists]
     Lookup -->|Missing| Error404[404 session_not_found]
     Lookup --> Attachments[Resolve authorized file IDs]
@@ -217,7 +268,7 @@ flowchart TD
 
 The upload route never resolves or invokes the agent. The message route checks
 that each supplied file ID belongs to the session before starting a turn. It
-then passes the authorized records through the session boundary. The default
+then passes the authorized records through the session boundary. The standalone
 RAG agent explicitly ignores those records; the coordinator receives their
 metadata and extracted content as typed turn input.
 
@@ -233,10 +284,11 @@ optional `.env` file. Settings are immutable after validation. Secret values
 use `SecretStr`, and configuration errors name missing variables without
 printing their values.
 
-The default top-level agent is the RAG runtime and the default generation
-provider is the live OpenAI-compatible provider. Coordinator mode and the
+The default top-level agent is the coordinator and the default generation
+provider is the live OpenAI-compatible provider. Standalone RAG mode and the
 deterministic provider must each be selected explicitly. Langfuse is
-independently configured. Report byte, PDF-page, extracted-character,
+independently configured but currently exports only standalone RAG turns.
+Report byte, PDF-page, extracted-character,
 per-message attachment, and per-session retention bounds are validated
 settings.
 
@@ -261,11 +313,11 @@ flowchart TD
     Settings --> Resolver[Create lazy AgentResolver]
     Resolver --> Lifespan[FastAPI lifespan starts]
     Lifespan --> Mode{Agent mode}
-    Mode -->|rag| Generation[Build RAG generation provider]
-    Mode -->|rag| Embedding[Load pinned SentenceTransformer]
+    Mode -->|standalone rag| Generation[Build RAG generation provider]
+    Mode -->|standalone rag| Embedding[Load pinned SentenceTransformer]
     Embedding --> Corpus[Load and validate corpus]
     Corpus --> Index[Embed corpus and build FAISS index]
-    Mode -->|rag| Prompt[Load RAG system prompt]
+    Mode -->|standalone rag| Prompt[Load RAG system prompt]
     Generation --> Tracing[Build Langfuse or no-op recorder]
     Index --> Tracing
     Prompt --> Tracing
@@ -273,9 +325,9 @@ flowchart TD
     Index --> Agent[Construct RagAgent]
     Prompt --> Agent
     Tracing --> Agent
-    Mode -->|coordinator| CoordinatorProvider[Build coordinator provider]
-    Mode -->|coordinator| CoordinatorPrompt[Load coordinator prompt]
-    Mode -->|coordinator| Specialist[Build RAG specialist without a trace root]
+    Mode -->|default coordinator| CoordinatorProvider[Build coordinator provider]
+    Mode -->|default coordinator| CoordinatorPrompt[Load coordinator prompt]
+    Mode -->|default coordinator| Specialist[Build RAG specialist without a trace root]
     Specialist --> SpecialistIndex[Load corpus, embedding model, and FAISS]
     CoordinatorProvider --> Coordinator[Construct CoordinatorAgent]
     CoordinatorPrompt --> Coordinator
@@ -400,8 +452,11 @@ closed. OCR is not performed.
 text, page boundaries, and public metadata under the owning application
 session. It does not retain the original bytes. Missing and cross-session IDs
 produce the same public error so callers cannot discover another session's
-files. Stored reports disappear on process restart and are not shared between
-workers.
+files. Listing returns only owned metadata in upload order. Deletion removes
+the stored metadata and extracted content and releases that session's capacity;
+it does not rewrite prior conversation messages or traces. A message already
+running from a resolved immutable report snapshot can finish after deletion.
+Stored reports disappear on process restart and are not shared between workers.
 
 ```mermaid
 flowchart TD
@@ -419,15 +474,19 @@ flowchart TD
     Store --> Metadata[Return file ID and metadata]
     Metadata -. no agent call .-> End[Upload complete]
 
+    List[GET session files] --> Store
+    Delete[DELETE owned file ID] --> Store
+    Delete --> Removed[Remove stored record; no agent call]
+
     Message[Later message plus file ID] --> Ownership[Resolve session ownership]
     Ownership --> Mode{Selected agent mode}
-    Mode -->|rag| RAG[RAG turn; report content ignored]
-    Mode -->|coordinator| Coordinator[Typed metadata and extracted content]
+    Mode -->|standalone rag| RAG[RAG turn; report content ignored]
+    Mode -->|default coordinator| Coordinator[Typed metadata and extracted content]
 ```
 
 Message requests accept optional file IDs. Omission preserves the original API
-behavior. Ownership is validated before agent execution. The default RAG agent
-does not treat uploaded content as policy evidence. The coordinator converts
+behavior. Ownership is validated before agent execution. The standalone RAG
+agent does not treat uploaded content as policy evidence. The coordinator converts
 authorized stored records into typed attachment input and may select an
 analysis handoff. The analysis specialist uses only the content in that
 handoff. Report references use page or section locators and remain separate
@@ -439,7 +498,7 @@ from FAISS chunk citations.
 
 ## 5B. Coordinator routing
 
-`CoordinatorAgent` is an opt-in implementation of the same session-facing
+`CoordinatorAgent` is the default implementation of the same session-facing
 agent interface as `RagAgent`. It receives the current message, bounded public
 history, session ID, and only the report records already authorized by the API.
 Each stored record is converted into an immutable `CoordinatorAttachment`
@@ -514,8 +573,12 @@ chunking, map phase, or synthesis phase. Upload-size, PDF-page, and
 extracted-character checks remain at the report service; there is no separate
 analysis-context cap or silent truncation. The configured provider can still
 reject an input beyond its own context or request limits. Analysis uses its own
-2,048-token output allowance by default; coordinator and policy-RAG calls keep
-the existing generation allowance.
+16,384-token output allowance by default; coordinator and policy-RAG calls keep
+the separate 1,024-token generation allowance. The shared provider timeout is
+90 seconds by default. Validated analysis answers allow up to 32,000 Markdown
+characters and 64 declared report references; clarification questions remain
+limited to 6,000 characters. These bounds do not guarantee that the configured
+provider accepts every report.
 
 The model writes Markdown and selects report references. The controller checks
 each declared file ID, locator, and exact excerpt against the authorized
@@ -999,7 +1062,7 @@ excluded from `make ci`.
 | Synthetic policy corpus | Version-controlled JSON | Immutable across a run | Retrieved chunks only when searched |
 | FAISS index and corpus embeddings | Process memory | Rebuilt at application startup | Provenance only; returned chunks appear in search observations |
 | Conversation history | Process-local session store | Until eviction or process exit | Current user input plus history count; model generation contains serialized public context |
-| Extracted report text and metadata | Process-local report store under owning session | Until process exit | No; coordinator trace export is not connected yet |
+| Extracted report text and metadata | Process-local report store under owning session | Until deletion or process exit | No; coordinator trace export is not connected yet |
 | Original uploaded report bytes | Request-scoped temporary upload | Discarded after extraction | No |
 | Model credentials | `.env` or process environment | Process configuration | No |
 | Langfuse credentials | `.env` or process environment | Process configuration | No |
@@ -1013,8 +1076,9 @@ excluded from `make ci`.
   recovery lifecycle.
 - Session history is process-local, bounded, and lost on restart.
 - Multiple server workers would not share session state.
-- Uploaded reports are process-local, have no delete endpoint, and disappear on
-  restart. Per-session capacity prevents unbounded abandoned uploads.
+- Uploaded reports are process-local and disappear on restart. Their delete
+  endpoint removes current stored content, not already-produced answers or
+  external traces. Per-session capacity prevents unbounded abandoned uploads.
 - PDF support is limited to extractable text. OCR, scanned-image analysis, and
   office-document formats are not supported.
 - Report content is not passed to the RAG agent. The coordinator can derive a
@@ -1031,6 +1095,6 @@ excluded from `make ci`.
   Observations API v2.
 - Controlled trace generation currently covers only the
   `harmful_content_refusal` metric.
-- The controlled harness is included in the source distribution but not the
+- The controlled harness is excluded from the runtime Docker image.
 - The container base images use versioned tags rather than immutable digests,
   so OS-layer builds are not yet bit-for-bit reproducible.

@@ -67,15 +67,15 @@ class AppSettings(BaseSettings):
     )
     agent_max_model_calls: int = Field(default=4, ge=1)
     agent_max_searches: int = Field(default=2, ge=1)
-    agent_mode: AgentMode = AgentMode.RAG
+    agent_mode: AgentMode = AgentMode.COORDINATOR
     coordinator_max_model_calls: int = Field(default=2, ge=1, le=4)
-    analysis_max_output_tokens: int = Field(default=2_048, ge=1, le=16_384)
+    analysis_max_output_tokens: int = Field(default=16_384, ge=1, le=16_384)
     generation_provider: GenerationProviderKind = GenerationProviderKind.OPENAI
     generation_model: str = "gpt-5.6-luna"
     generation_model_revision: str = "provider-managed"
     generation_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     generation_max_tokens: int = Field(default=1_024, ge=1, le=16_384)
-    generation_timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
+    generation_timeout_seconds: float = Field(default=90.0, gt=0.0, le=300.0)
     openai_api_key: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("OPENAI_API_KEY", "TOYAPP_OPENAI_API_KEY"),

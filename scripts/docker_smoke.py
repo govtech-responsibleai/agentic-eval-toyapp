@@ -93,6 +93,8 @@ def run_smoke_test(*, image: str, host_port: int, timeout_seconds: float) -> Non
                 "--env",
                 "TOYAPP_GENERATION_PROVIDER=deterministic",
                 "--env",
+                "TOYAPP_AGENT_MODE=rag",
+                "--env",
                 "TOYAPP_LANGFUSE_ENABLED=false",
                 image,
             ],

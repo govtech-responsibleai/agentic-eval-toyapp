@@ -258,3 +258,31 @@ def test_store_retries_id_collisions_and_enforces_session_capacity() -> None:
         store.add(session_id, _processed_report("third"))
     with pytest.raises(ValueError, match="at least 1"):
         InMemoryReportStore(max_reports_per_session=0)
+
+
+def test_store_lists_and_deletes_only_owned_reports() -> None:
+    """Deletion releases capacity without leaking another session's metadata."""
+    store = InMemoryReportStore(max_reports_per_session=2)
+    owner = uuid4()
+    other = uuid4()
+    first = store.add(owner, _processed_report("first"))
+    second = store.add(owner, _processed_report("second"))
+    foreign = store.add(other, _processed_report("foreign"))
+
+    assert store.list_for_session(owner) == (first, second)
+    assert store.list_for_session(other) == (foreign,)
+    assert store.list_for_session(uuid4()) == ()
+    with pytest.raises(ReportNotFoundError):
+        store.delete(other, first.file_id)
+    with pytest.raises(ReportNotFoundError):
+        store.delete(owner, uuid4())
+
+    store.delete(owner, first.file_id)
+    assert store.list_for_session(owner) == (second,)
+    assert store.list_for_session(other) == (foreign,)
+    with pytest.raises(ReportNotFoundError):
+        store.resolve(owner, (first.file_id,))
+    with pytest.raises(ReportNotFoundError):
+        store.delete(owner, first.file_id)
+    third = store.add(owner, _processed_report("third"))
+    assert store.list_for_session(owner) == (second, third)

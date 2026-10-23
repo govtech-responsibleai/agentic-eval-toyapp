@@ -167,6 +167,75 @@ def test_direct_answer_above_old_chunk_summary_limit_is_accepted() -> None:
     assert result.model_calls == 1
 
 
+def test_long_answer_and_thirteen_references_fit_analysis_contract() -> None:
+    """A useful report answer must not fail the old 6,000/12 bounds."""
+    report_id = uuid4()
+    answer = "A" * 7_351
+    references = [
+        {
+            "file_id": str(report_id),
+            "locator_kind": "section",
+            "page_number": None,
+            "section": "Document",
+            "excerpt": f"Finding {index}.",
+        }
+        for index in range(13)
+    ]
+    client = _RecordingClient(
+        {
+            "kind": "answer",
+            "markdown": answer,
+            "question": None,
+            "references": references,
+        }
+    )
+    provider = OpenAIAnalysisGenerationProvider(
+        model="platform-model",
+        revision="provider-managed",
+        temperature=0,
+        max_tokens=16_384,
+        client=client,
+    )
+
+    action = provider.generate_action(
+        AnalysisModelRequest(
+            system_prompt="Analyse faithfully.",
+            task="Summarise the main findings",
+            blocks=(
+                SourceBlock(
+                    file_id=report_id,
+                    locator=SectionReportLocator(section="Document"),
+                    text=" ".join(f"Finding {index}." for index in range(13)),
+                ),
+            ),
+            model_call_number=1,
+        )
+    )
+
+    assert isinstance(action, AnalysisAnswerAction)
+    assert action.markdown == answer
+    assert len(action.references) == 13
+
+
+def test_analysis_answer_and_reference_bounds_remain_finite() -> None:
+    """A generous demo allowance must still reject unbounded provider output."""
+    reference = ReportReference(
+        file_id=uuid4(),
+        locator=SectionReportLocator(section="Document"),
+        excerpt="Source finding.",
+    )
+
+    assert AnalysisAnswerAction(markdown="A" * 32_000).markdown == "A" * 32_000
+    accepted = AnalysisAnswerAction(markdown="Answer", references=(reference,) * 64)
+    assert len(accepted.references) == 64
+    with pytest.raises(ValidationError, match="markdown"):
+        AnalysisAnswerAction(markdown="A" * 32_001)
+    with pytest.raises(ValidationError, match="references"):
+        AnalysisAnswerAction(markdown="Answer", references=(reference,) * 65)
+    with pytest.raises(ValidationError, match="question"):
+        AnalysisClarifyAction(question="Q" * 6_001)
+
+
 def test_invalid_reference_is_not_presented_as_valid_evidence() -> None:
     """Wrong file IDs and fabricated excerpts produce findings, not citations."""
     report = _attachment("Revenue rose 18%.")

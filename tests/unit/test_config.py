@@ -85,15 +85,15 @@ def test_settings_defaults_select_the_live_runtime_without_storing_credentials()
     assert settings.retrieval_min_similarity == 0.25
     assert settings.agent_max_model_calls == 4
     assert settings.agent_max_searches == 2
-    assert settings.agent_mode is AgentMode.RAG
+    assert settings.agent_mode is AgentMode.COORDINATOR
     assert settings.coordinator_max_model_calls == 2
-    assert settings.analysis_max_output_tokens == 2_048
+    assert settings.analysis_max_output_tokens == 16_384
     assert settings.generation_provider is GenerationProviderKind.OPENAI
     assert settings.generation_model == "gpt-5.6-luna"
     assert settings.generation_model_revision == "provider-managed"
     assert settings.generation_temperature == 0.0
     assert settings.generation_max_tokens == 1_024
-    assert settings.generation_timeout_seconds == 30.0
+    assert settings.generation_timeout_seconds == 90.0
     assert settings.openai_api_key is None
     assert settings.openai_base_url is None
     assert settings.langfuse_enabled is False
@@ -186,6 +186,15 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.upload_max_extracted_characters == 50_000
     assert settings.upload_max_files_per_message == 2
     assert settings.upload_max_reports_per_session == 15
+
+
+def test_standalone_rag_mode_remains_explicitly_selectable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching the default must not remove the standalone traced RAG path."""
+    monkeypatch.setenv("TOYAPP_AGENT_MODE", "rag")
+
+    assert AppSettings().agent_mode is AgentMode.RAG
 
 
 def test_live_configuration_requires_both_shared_openai_values() -> None:

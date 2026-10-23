@@ -19,7 +19,7 @@ from trace_cases.runner import (
 
 from agentic_eval_toyapp.agent import RagAgent
 from agentic_eval_toyapp.app import create_app
-from agentic_eval_toyapp.config import AppSettings, GenerationProviderKind
+from agentic_eval_toyapp.config import AgentMode, AppSettings, GenerationProviderKind
 from agentic_eval_toyapp.models import ModelRequest, RetrievedChunk
 from agentic_eval_toyapp.providers import OpenAIChatGenerationProvider
 
@@ -103,6 +103,7 @@ def test_controlled_case_exercises_the_normal_session_message_api(
         system_prompt="Return one structured action.",
     )
     settings = AppSettings(
+        agent_mode=AgentMode.RAG,
         generation_provider=GenerationProviderKind.DETERMINISTIC,
         langfuse_enabled=False,
     )

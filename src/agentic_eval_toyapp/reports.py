@@ -230,7 +230,7 @@ class InMemoryReportStore:
         self._id_factory = id_factory
         self._records: dict[UUID, StoredReport] = {}
         self._owners: dict[UUID, UUID] = {}
-        self._session_file_ids: dict[UUID, set[UUID]] = defaultdict(set)
+        self._session_file_ids: dict[UUID, list[UUID]] = defaultdict(list)
         self._lock = Lock()
 
     @property
@@ -269,8 +269,25 @@ class InMemoryReportStore:
                 pages=report.pages,
             )
             self._owners[file_id] = session_id
-            session_file_ids.add(file_id)
+            session_file_ids.append(file_id)
             return metadata
+
+    def list_for_session(self, session_id: UUID) -> tuple[ReportUploadResponse, ...]:
+        """List retained report metadata in upload order, without report text."""
+        with self._lock:
+            return tuple(
+                self._records[file_id].metadata
+                for file_id in self._session_file_ids.get(session_id, ())
+            )
+
+    def delete(self, session_id: UUID, file_id: UUID) -> None:
+        """Remove one owned report's metadata and extracted content."""
+        with self._lock:
+            if self._owners.get(file_id) != session_id:
+                raise ReportNotFoundError from None
+            del self._records[file_id]
+            del self._owners[file_id]
+            self._session_file_ids[session_id].remove(file_id)
 
     def resolve(
         self,

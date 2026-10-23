@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository contains a small, controlled RAG application used as a target for METIS evaluations. It prioritises reproducibility, explicit functional ground truth, trace completeness, and a narrow capability surface.
+This repository contains a small coordinator-led application with policy RAG and report-analysis specialists, used as a target for METIS evaluations. It prioritises reproducibility, explicit functional ground truth, trace completeness, and a narrow capability surface.
 
 ## Technology
 

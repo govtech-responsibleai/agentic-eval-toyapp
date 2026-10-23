@@ -325,6 +325,12 @@ class ReportUploadResponse(ApiModel):
         return self
 
 
+class ReportListResponse(ApiModel):
+    """Safe metadata for reports retained under one application session."""
+
+    files: tuple[ReportUploadResponse, ...] = ()
+
+
 class PageReportLocator(ApiModel):
     """One one-indexed PDF page supporting an analysis claim."""
 
