@@ -790,6 +790,36 @@ queries.
 
 ## 9. Observability and Langfuse
 
+### Operational diagnostics
+
+`diagnostics.py` classifies operational failures separately from Langfuse
+tracing. The API binds an application session UUID and a new internal turn UUID
+for each submitted message; upload requests bind only the session UUID. This
+context reaches the selected agent, its specialist, and its provider call.
+Each component logs at the boundary that knows the cause: providers classify
+transport/status and structured-output failures; agents log local limits,
+retrieval, and grounding findings; the API logs startup and file-validation
+failures; the trace recorder logs export failures. Higher layers avoid logging
+the same provider failure twice. Events go to the Uvicorn error logger, so
+they appear in the local terminal or Docker service logs, not in the public
+chat result. Logs contain fixed error categories and bounded operational IDs,
+not exception messages, prompts, report text, provider output, or credentials.
+Alongside the structured text, the live completion adapter retains only
+allowlisted response metadata:
+`finish_reason`, prompt/input tokens, completion/output tokens, reasoning
+tokens, and total tokens. Empty-content and structured-schema failures carry
+those values to the single provider-error log; absent gateway fields remain
+unknown (`-`). The configured `max_tokens` cap is separate from actual
+provider-reported usage. `finish_reason=length` is evidence that generation
+stopped at a limit, whereas an empty response without it is not diagnosed as
+truncation. The 90-second timeout applies to each model call, not a complete
+multi-agent API turn. There is no application input-token budget: upload byte,
+page, and extracted-character limits are resource bounds, not model-context
+guarantees. Provider HTTP errors are classified without logging upstream error
+bodies, so a rejected input may not expose its exact context-limit cause.
+These diagnostics do not make coordinator-mode Langfuse tracing operational;
+that remains Stage 16b.
+
 RAG tracing is behind the `TraceRecorder` interface. `NoOpTraceRecorder`
 preserves the agent contract without exporting data. When enabled in RAG mode,
 `LangfuseTraceRecorder` creates one logical root for every user turn and

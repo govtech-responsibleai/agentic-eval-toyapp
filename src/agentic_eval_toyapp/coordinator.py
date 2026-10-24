@@ -4,6 +4,7 @@ import json
 from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol, cast, runtime_checkable
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 
+from agentic_eval_toyapp.diagnostics import log_failure, log_provider_failure
 from agentic_eval_toyapp.models import (
     AgentTurnResult,
     AgentTurnStatus,
@@ -49,6 +51,7 @@ from agentic_eval_toyapp.providers import (
     OpenAICompatibleChatClient,
     StructuredCompletionClient,
     make_object_schemas_strict,
+    unpack_completion,
 )
 from agentic_eval_toyapp.reports import StoredReport
 
@@ -263,17 +266,36 @@ class OpenAICoordinatorGenerationProvider:
             {"role": "system", "content": request.system_prompt},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         )
+        started_at = perf_counter()
         try:
-            content = self._client.create(
+            completion = self._client.create(
                 model=self._model_id,
                 messages=messages,
                 response_schema=response_schema,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
             )
-        except GenerationProviderError:
+            content, diagnostics = unpack_completion(completion)
+        except GenerationProviderError as error:
+            log_provider_failure(
+                agent="coordinator",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+                code=error.code,
+            )
             raise
         except Exception as error:
+            log_provider_failure(
+                agent="coordinator",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+            )
             raise GenerationProviderError("live coordinator request failed") from error
         try:
             structured_action = _StructuredCoordinatorAction.model_validate_json(
@@ -281,13 +303,34 @@ class OpenAICoordinatorGenerationProvider:
             )
             action = structured_action.to_domain_action()
         except ValidationError as error:
+            log_provider_failure(
+                agent="coordinator",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+                code="invalid_schema",
+                completion=diagnostics,
+            )
             raise InvalidGenerationActionError(
                 "live model returned an invalid coordinator action"
             ) from error
         if structured_action.kind not in request.available_actions:
-            raise InvalidGenerationActionError(
+            error = InvalidGenerationActionError(
                 "live model returned an unavailable coordinator action"
             )
+            log_provider_failure(
+                agent="coordinator",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+                code="unavailable_action",
+                completion=diagnostics,
+            )
+            raise error
         return action
 
 
@@ -717,7 +760,14 @@ class CoordinatorAgent:
     ) -> AgentTurnResult:
         try:
             specialist_result = operation()
-        except Exception:
+        except Exception as error:
+            log_failure(
+                event="delegation",
+                agent="coordinator",
+                operation="run_specialist",
+                code="delegation_error",
+                error=error,
+            )
             steps[-1] = steps[-1].model_copy(
                 update={
                     "status": ExecutionStatus.FAILED,
@@ -825,6 +875,17 @@ class CoordinatorAgent:
         steps: Sequence[ExecutionStep],
         controller_events: Sequence[ControllerEvent],
     ) -> AgentTurnResult:
+        if reason not in (
+            TerminationReason.PROVIDER_ERROR,
+            TerminationReason.DELEGATION_ERROR,
+        ):
+            log_failure(
+                event="agent_stop",
+                agent="coordinator",
+                operation="dispatch",
+                code=reason.value,
+                attempt=model_calls,
+            )
         return AgentTurnResult(
             status=AgentTurnStatus.FAILED,
             message=message,

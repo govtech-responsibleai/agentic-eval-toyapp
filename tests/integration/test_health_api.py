@@ -1,5 +1,7 @@
 """Integration tests for service-introspection endpoints."""
 
+import logging
+import traceback
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -9,7 +11,7 @@ import pytest
 from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
-from agentic_eval_toyapp.app import create_app
+from agentic_eval_toyapp.app import AgentInitialisationError, create_app
 from agentic_eval_toyapp.config import (
     AgentMode,
     AppSettings,
@@ -141,6 +143,41 @@ def test_default_startup_builds_the_coordinator(
 
     build_coordinator.assert_called_once_with(settings)
     build_rag.assert_not_called()
+
+
+def test_startup_failure_logs_category_without_credential_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dependency failure should be visible even when readiness never starts."""
+
+    def failing_factory() -> AgentRunner:
+        raise ValueError("private OPENAI_API_KEY=do-not-log")
+
+    application = create_app(
+        AppSettings(langfuse_enabled=False),
+        agent_factory=failing_factory,
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(
+            AgentInitialisationError,
+            match="agent dependencies could not be initialised",
+        ) as failure,
+        TestClient(application),
+    ):
+        pass
+
+    failures = [
+        record.message
+        for record in caplog.records
+        if "toyapp_failure" in record.message
+    ]
+    assert len(failures) == 1
+    assert "event=startup" in failures[0]
+    assert "code=configuration_error" in failures[0]
+    assert "do-not-log" not in "".join(traceback.format_exception(failure.value))
+    assert "do-not-log" not in caplog.text
 
 
 def test_startup_logs_safe_runtime_modes() -> None:

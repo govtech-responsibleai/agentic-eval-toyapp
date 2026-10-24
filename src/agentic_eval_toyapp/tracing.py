@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from langfuse import Langfuse, propagate_attributes
 
+from agentic_eval_toyapp.diagnostics import log_failure
 from agentic_eval_toyapp.models import (
     AgentAction,
     AgentTurnResult,
@@ -355,7 +356,27 @@ class LangfuseTraceRecorder:
             self.flush()
 
     def flush(self) -> None:
-        self._client.flush()
+        try:
+            self._client.flush()
+        except Exception as error:
+            log_failure(
+                event="trace_export",
+                agent="runtime",
+                operation="flush",
+                code="langfuse_flush_error",
+                error=error,
+            )
+            raise RuntimeError("Langfuse trace flush failed") from None
 
     def shutdown(self) -> None:
-        self._client.shutdown()
+        try:
+            self._client.shutdown()
+        except Exception as error:
+            log_failure(
+                event="trace_export",
+                agent="runtime",
+                operation="shutdown",
+                code="langfuse_shutdown_error",
+                error=error,
+            )
+            raise RuntimeError("Langfuse trace shutdown failed") from None

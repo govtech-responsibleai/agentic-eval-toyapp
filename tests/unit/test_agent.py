@@ -1,5 +1,6 @@
 """Tests for the bounded single-agent RAG loop."""
 
+import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from datetime import date
@@ -456,7 +457,9 @@ def test_agent_recovers_from_repeated_normalised_search() -> None:
     ]
 
 
-def test_agent_stops_on_repeated_search_without_a_correction_call() -> None:
+def test_agent_stops_on_repeated_search_without_a_correction_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A repeated query remains a typed failure when no model call remains."""
     chunk = _chunk()
     retriever = _StubRetriever({"travel policy": (chunk,)})
@@ -469,15 +472,19 @@ def test_agent_stops_on_repeated_search_without_a_correction_call() -> None:
         max_model_calls=2,
     )
 
-    result = agent.run("Travel question")
+    with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
+        result = agent.run("Travel question")
 
     assert result.termination_reason is TerminationReason.REPEATED_SEARCH
     assert result.model_calls == 2
     assert result.searches == 1
     assert len(retriever.calls) == 1
+    assert "code=repeated_search" in caplog.text
 
 
-def test_agent_records_citation_that_was_not_retrieved() -> None:
+def test_agent_records_citation_that_was_not_retrieved(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Invalid citations remain observable without replacing the answer."""
     chunk = _chunk()
     agent, _ = _agent(
@@ -491,7 +498,8 @@ def test_agent_records_citation_that_was_not_retrieved() -> None:
         _StubRetriever({"travel": (chunk,)}),
     )
 
-    result = agent.run("What is the limit?")
+    with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+        result = agent.run("What is the limit?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.termination_reason is TerminationReason.ANSWERED
@@ -500,6 +508,10 @@ def test_agent_records_citation_that_was_not_retrieved() -> None:
         ValidationFindingCode.CITATION_NOT_RETRIEVED
     )
     assert result.validation_findings[0].citation_ids == ("TRAVEL-001#2",)
+    assert len(caplog.records) == 1
+    assert "code=citation_inconsistency" in caplog.text
+    assert "citation_not_retrieved" in caplog.text
+    assert "The limit is $80" not in caplog.text
 
 
 def test_agent_preserves_duplicate_citations_as_a_finding() -> None:
@@ -582,7 +594,9 @@ def test_agent_preserves_answer_with_multiple_independent_findings() -> None:
     ]
 
 
-def test_agent_enforces_search_and_model_call_limits() -> None:
+def test_agent_enforces_search_and_model_call_limits(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Independent bounds prevent unbounded tool or provider loops."""
     chunk = _chunk()
     search_limited_agent, search_limited_provider = _agent(
@@ -596,8 +610,9 @@ def test_agent_enforces_search_and_model_call_limits() -> None:
         max_model_calls=1,
     )
 
-    search_limited = search_limited_agent.run("Question")
-    call_limited = call_limited_agent.run("Question")
+    with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
+        search_limited = search_limited_agent.run("Question")
+        call_limited = call_limited_agent.run("Question")
 
     assert search_limited.termination_reason is TerminationReason.SEARCH_LIMIT
     assert search_limited.model_calls == 2
@@ -609,9 +624,14 @@ def test_agent_enforces_search_and_model_call_limits() -> None:
     assert call_limited.termination_reason is TerminationReason.MODEL_CALL_LIMIT
     assert call_limited.model_calls == 1
     assert call_limited.searches == 1
+    assert len(caplog.records) == 2
+    assert "code=search_limit" in caplog.records[0].message
+    assert "code=model_call_limit" in caplog.records[1].message
 
 
-def test_agent_converts_provider_and_retriever_errors_to_safe_results() -> None:
+def test_agent_converts_provider_and_retriever_errors_to_safe_results(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Internal exception details must not leak from the agent boundary."""
     chunk = _chunk()
     provider_agent, _ = _agent(
@@ -624,13 +644,17 @@ def test_agent_converts_provider_and_retriever_errors_to_safe_results() -> None:
         _StubRetriever({}, error=RuntimeError("sensitive backend detail")),
     )
 
-    provider_result = provider_agent.run("Question")
-    retrieval_result = retrieval_agent.run("Question")
+    with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
+        provider_result = provider_agent.run("Question")
+        retrieval_result = retrieval_agent.run("Question")
 
     assert provider_result.termination_reason is TerminationReason.PROVIDER_ERROR
     assert "exhausted" not in provider_result.message
     assert retrieval_result.termination_reason is TerminationReason.RETRIEVAL_ERROR
     assert "sensitive" not in retrieval_result.message
+    assert len(caplog.records) == 1
+    assert "code=retrieval_error" in caplog.text
+    assert "sensitive backend detail" not in caplog.text
 
 
 @pytest.mark.parametrize("message", ["", "   "])

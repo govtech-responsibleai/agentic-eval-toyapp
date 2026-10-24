@@ -1,6 +1,7 @@
 """Report analysis boundary, provider actions, and grounded references."""
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -21,6 +22,7 @@ from agentic_eval_toyapp.analysis_models import (
     AnalysisClarifyAction,
     AnalysisModelRequest,
 )
+from agentic_eval_toyapp.diagnostics import CompletionDiagnostics
 from agentic_eval_toyapp.models import (
     AgentTurnStatus,
     PageReportLocator,
@@ -35,7 +37,11 @@ from agentic_eval_toyapp.orchestration_models import (
     CoordinatorAttachment,
     CoordinatorAttachmentPage,
 )
-from agentic_eval_toyapp.providers import GenerationProviderError
+from agentic_eval_toyapp.providers import (
+    GenerationProviderError,
+    InvalidGenerationActionError,
+    StructuredCompletion,
+)
 from agentic_eval_toyapp.report_sources import SourceBlock
 
 
@@ -78,8 +84,16 @@ class _ScriptedProvider:
 
 
 class _RecordingClient:
-    def __init__(self, response: dict[str, object]) -> None:
+    def __init__(
+        self,
+        response: dict[str, object],
+        *,
+        error: Exception | None = None,
+        diagnostics: CompletionDiagnostics | None = None,
+    ) -> None:
         self.response = response
+        self.error = error
+        self.diagnostics = diagnostics
         self.calls: list[dict[str, object]] = []
 
     def create(
@@ -90,7 +104,7 @@ class _RecordingClient:
         response_schema: dict[str, Any],
         temperature: float,
         max_tokens: int,
-    ) -> str:
+    ) -> str | StructuredCompletion:
         self.calls.append(
             {
                 "model": model,
@@ -100,7 +114,12 @@ class _RecordingClient:
                 "max_tokens": max_tokens,
             }
         )
-        return json.dumps(self.response)
+        if self.error is not None:
+            raise self.error
+        content = json.dumps(self.response)
+        if self.diagnostics is not None:
+            return StructuredCompletion(content, self.diagnostics)
+        return content
 
 
 def test_short_report_returns_one_grounded_answer_without_policy_search() -> None:
@@ -236,7 +255,9 @@ def test_analysis_answer_and_reference_bounds_remain_finite() -> None:
         AnalysisClarifyAction(question="Q" * 6_001)
 
 
-def test_invalid_reference_is_not_presented_as_valid_evidence() -> None:
+def test_invalid_reference_is_not_presented_as_valid_evidence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Wrong file IDs and fabricated excerpts produce findings, not citations."""
     report = _attachment("Revenue rose 18%.")
     wrong = ReportReference(
@@ -257,9 +278,10 @@ def test_invalid_reference_is_not_presented_as_valid_evidence() -> None:
         )
     )
 
-    result = _agent(provider).run(
-        AnalysisHandoffRequest(task="Analyse", attachments=(report,))
-    )
+    with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+        result = _agent(provider).run(
+            AnalysisHandoffRequest(task="Analyse", attachments=(report,))
+        )
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.message == "Profit rose 99%."
@@ -268,6 +290,58 @@ def test_invalid_reference_is_not_presented_as_valid_evidence() -> None:
         ValidationFindingCode.REPORT_REFERENCE_INVALID,
         ValidationFindingCode.REPORT_EXCERPT_NOT_FOUND,
     }
+    assert len(caplog.records) == 1
+    assert "code=report_reference_inconsistency" in caplog.text
+    assert "report_reference_invalid" in caplog.text
+    assert "report_excerpt_not_found" in caplog.text
+    assert "Revenue rose 18%" not in caplog.text
+
+
+def test_live_analysis_logs_invalid_schema_without_report_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A malformed model action is reported without exposing source text."""
+    provider = OpenAIAnalysisGenerationProvider(
+        model="platform-model",
+        revision="provider-managed",
+        temperature=0,
+        max_tokens=512,
+        client=_RecordingClient(
+            {"kind": "invalid", "secret": "private report"},
+            diagnostics=CompletionDiagnostics(
+                finish_reason="length",
+                input_tokens=4_200,
+                output_tokens=512,
+                reasoning_tokens=400,
+                total_tokens=4_712,
+            ),
+        ),
+    )
+    request = AnalysisModelRequest(
+        system_prompt="Analyse",
+        task="Summarise",
+        blocks=(
+            SourceBlock(
+                file_id=uuid4(),
+                locator=SectionReportLocator(section="Document"),
+                text="private report source text",
+            ),
+        ),
+        model_call_number=1,
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(InvalidGenerationActionError),
+    ):
+        provider.generate_action(request)
+
+    assert len(caplog.records) == 1
+    assert "agent=analysis" in caplog.text
+    assert "code=invalid_schema" in caplog.text
+    assert "finish_reason=length" in caplog.text
+    assert "input_tokens=4200 output_tokens=512 reasoning_tokens=400" in caplog.text
+    assert "private report" not in caplog.text
 
 
 def test_analysis_clarification_and_provider_failure() -> None:
