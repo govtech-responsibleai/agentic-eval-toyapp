@@ -1,6 +1,7 @@
 """End-to-end tests for the synchronous versioned chat API."""
 
 import hashlib
+import logging
 from collections.abc import Callable, Sequence
 from datetime import date
 from typing import cast
@@ -378,7 +379,9 @@ def test_deleting_used_report_preserves_prior_public_turn() -> None:
     assert agent.report_ids == [(file_id,)]
 
 
-def test_report_references_are_isolated_by_session() -> None:
+def test_report_references_are_isolated_by_session(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Missing and cross-session IDs must fail before agent execution or history."""
     retriever = _PolicyRetriever()
     client = _build_client(agent=_build_agent(retriever))
@@ -389,24 +392,29 @@ def test_report_references_are_isolated_by_session() -> None:
         files={"file": ("report.txt", b"Private finding", "text/plain")},
     ).json()
 
-    for session_id, file_id in (
-        (other_id, uploaded["file_id"]),
-        (owner_id, str(uuid4())),
-    ):
-        response: Response = client.post(
-            f"/api/v1/sessions/{session_id}/messages",
-            json={"message": "Use the report", "file_ids": [file_id]},
-        )
+    with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+        for session_id, file_id in (
+            (other_id, uploaded["file_id"]),
+            (owner_id, str(uuid4())),
+        ):
+            response: Response = client.post(
+                f"/api/v1/sessions/{session_id}/messages",
+                json={"message": "Use the report", "file_ids": [file_id]},
+            )
 
-        assert response.status_code == 404
-        assert response.json()["code"] == "report_not_found"
+            assert response.status_code == 404
+            assert response.json()["code"] == "report_not_found"
 
     assert retriever.queries == []
     assert client.get(f"/api/v1/sessions/{owner_id}").json()["messages"] == []
     assert client.get(f"/api/v1/sessions/{other_id}").json()["messages"] == []
+    assert caplog.text.count("code=report_not_found") == 2
+    assert "Private finding" not in caplog.text
 
 
-def test_report_endpoint_returns_stable_public_validation_errors() -> None:
+def test_report_endpoint_returns_stable_public_validation_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Unsupported, malformed, and oversized reports should expose safe errors."""
     settings = AppSettings(upload_max_bytes=8)
     application = create_app(
@@ -435,29 +443,44 @@ def test_report_endpoint_returns_stable_public_validation_errors() -> None:
         ),
     )
 
-    for file_value, status_code, code in cases:
-        response = client.post(
-            f"/api/v1/sessions/{session_id}/files",
-            files={"file": file_value},
-        )
-        assert response.status_code == status_code
-        assert response.json()["code"] == code
-        assert set(response.json()) == {"code", "message"}
+    with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+        for file_value, status_code, code in cases:
+            response = client.post(
+                f"/api/v1/sessions/{session_id}/files",
+                files={"file": file_value},
+            )
+            assert response.status_code == status_code
+            assert response.json()["code"] == code
+            assert set(response.json()) == {"code", "message"}
+
+    failures = [
+        record.message for record in caplog.records if "event=upload" in record.message
+    ]
+    assert len(failures) == len(cases)
+    assert all(f"session_id={session_id}" in message for message in failures)
+    assert all(
+        f"code={code}" in message
+        for message, (_, _, code) in zip(failures, cases, strict=True)
+    )
+    assert "123456789" not in caplog.text
 
 
-def test_report_limits_and_invalid_session_fail_before_agent_execution() -> None:
+def test_report_limits_and_invalid_session_fail_before_agent_execution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Attachment-count and session validation should precede agent execution."""
     retriever = _PolicyRetriever()
     client = _build_client(agent=_build_agent(retriever))
     session_id = client.post("/api/v1/sessions").json()["session_id"]
 
-    too_many = client.post(
-        f"/api/v1/sessions/{session_id}/messages",
-        json={
-            "message": "Use these reports",
-            "file_ids": [str(uuid4()), str(uuid4())],
-        },
-    )
+    with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+        too_many = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={
+                "message": "Use these reports",
+                "file_ids": [str(uuid4()), str(uuid4())],
+            },
+        )
     duplicate = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
@@ -478,6 +501,7 @@ def test_report_limits_and_invalid_session_fail_before_agent_execution() -> None
     assert unknown_session.json()["code"] == "session_not_found"
     assert retriever.queries == []
     assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []
+    assert "code=too_many_report_files" in caplog.text
 
 
 def test_opt_in_coordinator_mode_delegates_policy_turns_to_rag() -> None:
@@ -1093,4 +1117,4 @@ def test_default_application_fails_without_live_provider_configuration() -> None
 
     cause = exc_info.value.__cause__
     assert isinstance(cause, ValueError)
-    assert "OPENAI_API_KEY and OPENAI_BASE_URL" in str(cause)
+    assert str(cause) == "invalid agent configuration"

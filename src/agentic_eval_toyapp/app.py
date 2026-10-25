@@ -37,6 +37,11 @@ from agentic_eval_toyapp.coordinator import (
     build_openai_coordinator_provider,
     load_coordinator_prompt,
 )
+from agentic_eval_toyapp.diagnostics import (
+    classify_external_error,
+    diagnostic_context,
+    log_failure,
+)
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
 from agentic_eval_toyapp.models import (
     AgentActionKind,
@@ -122,9 +127,29 @@ class _AgentResolver:
             try:
                 candidate = self._factory()
             except Exception as error:
+                category, status_code = classify_external_error(error)
+                log_failure(
+                    event="startup",
+                    agent="runtime",
+                    operation="initialise_agent",
+                    code=(
+                        "configuration_error"
+                        if isinstance(error, ValueError)
+                        else category
+                        if category != "unexpected_error"
+                        else "initialisation_error"
+                    ),
+                    status_code=status_code,
+                    error=error,
+                )
+                safe_cause: Exception = (
+                    ValueError("invalid agent configuration")
+                    if isinstance(error, ValueError)
+                    else RuntimeError("agent initialisation failed")
+                )
                 raise AgentInitialisationError(
                     "agent dependencies could not be initialised"
-                ) from error
+                ) from safe_cause
             self._agent = candidate
             return candidate
 
@@ -638,18 +663,52 @@ def create_app(
         file: Annotated[UploadFile, File(description="One bounded report file")],
     ) -> ReportUploadResponse:
         """Validate and retain one report without invoking an agent turn."""
-        resolved_store.get(session_id)
-        try:
-            content = await file.read(resolved_report_processor.max_bytes + 1)
-            processed = await run_in_threadpool(
-                resolved_report_processor.process,
-                filename=file.filename or "",
-                media_type=file.content_type or "",
-                content=content,
-            )
-        finally:
-            await file.close()
-        return resolved_report_store.add(session_id, processed)
+        with diagnostic_context(session_id):
+            resolved_store.get(session_id)
+            try:
+                try:
+                    content = await file.read(resolved_report_processor.max_bytes + 1)
+                    processed = await run_in_threadpool(
+                        resolved_report_processor.process,
+                        filename=file.filename or "",
+                        media_type=file.content_type or "",
+                        content=content,
+                    )
+                finally:
+                    await file.close()
+                return resolved_report_store.add(session_id, processed)
+            except (
+                UnsupportedReportTypeError,
+                ReportTooLargeError,
+                ReportProcessingError,
+                ReportCapacityError,
+            ) as error:
+                if isinstance(error, UnsupportedReportTypeError):
+                    code = "unsupported_file_type"
+                elif isinstance(error, ReportTooLargeError):
+                    code = "report_too_large"
+                elif isinstance(error, ReportCapacityError):
+                    code = "report_capacity_reached"
+                else:
+                    code = "report_processing_failed"
+                log_failure(
+                    event="upload",
+                    agent="api",
+                    operation="process_report",
+                    code=code,
+                    level=logging.WARNING,
+                    error=error,
+                )
+                raise
+            except Exception as error:
+                log_failure(
+                    event="upload",
+                    agent="api",
+                    operation="process_report",
+                    code="unexpected_upload_error",
+                    error=error,
+                )
+                raise RuntimeError("report upload could not be processed") from None
 
     @application.get(
         f"{API_PREFIX}/sessions/{{session_id}}/files",
@@ -691,18 +750,37 @@ def create_app(
         request: SessionMessageRequest,
     ) -> SessionMessageResponse:
         """Execute and retain one synchronous bounded agent turn."""
-        resolved_store.get(session_id)
-        if len(request.file_ids) > resolved_settings.upload_max_files_per_message:
-            raise ReportAttachmentLimitError
-        reports = resolved_report_store.resolve(session_id, request.file_ids)
-        resolved_agent = resolver.get()
-        result = resolved_store.run_turn(
-            session_id,
-            request.message,
-            agent=resolved_agent,
-            reports=reports,
-        )
-        return SessionMessageResponse(session_id=session_id, result=result)
+        with diagnostic_context(session_id, turn=True):
+            resolved_store.get(session_id)
+            if len(request.file_ids) > resolved_settings.upload_max_files_per_message:
+                log_failure(
+                    event="message",
+                    agent="api",
+                    operation="resolve_attachments",
+                    code="too_many_report_files",
+                    level=logging.WARNING,
+                )
+                raise ReportAttachmentLimitError
+            try:
+                reports = resolved_report_store.resolve(session_id, request.file_ids)
+            except ReportNotFoundError as error:
+                log_failure(
+                    event="message",
+                    agent="api",
+                    operation="resolve_attachments",
+                    code="report_not_found",
+                    level=logging.WARNING,
+                    error=error,
+                )
+                raise
+            resolved_agent = resolver.get()
+            result = resolved_store.run_turn(
+                session_id,
+                request.message,
+                agent=resolved_agent,
+                reports=reports,
+            )
+            return SessionMessageResponse(session_id=session_id, result=result)
 
     return application
 

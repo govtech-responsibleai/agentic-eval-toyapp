@@ -7,14 +7,21 @@ from contextlib import contextmanager
 import pytest
 from trace_cases.controlled_client import ControlledStructuredCompletionClient
 
+from agentic_eval_toyapp.diagnostics import CompletionDiagnostics
+from agentic_eval_toyapp.providers import StructuredCompletion
+
 
 class _StaticCompletionClient:
-    def __init__(self, response: str | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        response: str | StructuredCompletion | None = None,
+        error: Exception | None = None,
+    ):
         self._response = response
         self._error = error
         self.calls = 0
 
-    def create(self, **values: object) -> str:
+    def create(self, **values: object) -> str | StructuredCompletion:
         del values
         self.calls += 1
         if self._error is not None:
@@ -123,6 +130,35 @@ def test_answer_is_substituted_before_the_effective_generation_is_traced() -> No
         "Original live answer",
     ):
         assert forbidden not in serialized_trace
+
+
+def test_controlled_client_accepts_metadata_bearing_live_response() -> None:
+    """The private capture stays textual after live transport gains metadata."""
+    original = json.dumps(
+        {
+            "kind": "answer",
+            "query": None,
+            "top_k": None,
+            "question": None,
+            "markdown": "Original answer",
+            "citations": [],
+        }
+    )
+    client = ControlledStructuredCompletionClient(
+        delegate=_StaticCompletionClient(
+            StructuredCompletion(
+                original,
+                CompletionDiagnostics(
+                    finish_reason="stop", input_tokens=10, output_tokens=5
+                ),
+            )
+        ),
+        trace_client=_RecordingTraceClient(),
+        replacement_markdown="Effective answer",
+    )
+
+    assert json.loads(_create(client))["markdown"] == "Effective answer"
+    assert client.captures[0].original_response == original
 
 
 @pytest.mark.parametrize(

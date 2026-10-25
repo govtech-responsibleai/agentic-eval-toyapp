@@ -1,5 +1,7 @@
 """Tests for the Langfuse observation contract without network access."""
 
+import logging
+import traceback
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -108,6 +110,68 @@ def test_noop_recorder_preserves_the_agent_contract() -> None:
     assert recorder.enabled is False
     recorder.flush()
     recorder.shutdown()
+
+
+def test_langfuse_flush_failure_logs_only_safe_category(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Export failures must be distinguishable without leaking SDK text."""
+
+    class _FailingClient(_RecordingLangfuseClient):
+        def flush(self) -> None:
+            raise RuntimeError("private Langfuse connection detail")
+
+    recorder = LangfuseTraceRecorder(
+        public_key="public",
+        secret_key="secret",
+        base_url="https://langfuse.example",
+        environment="test",
+        release="0.1.0",
+        base_metadata={},
+        client=cast(Langfuse, _FailingClient()),
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(RuntimeError, match="Langfuse trace flush failed") as failure,
+    ):
+        recorder.flush()
+
+    assert len(caplog.records) == 1
+    assert "code=langfuse_flush_error" in caplog.text
+    assert "private Langfuse" not in caplog.text
+    assert "private Langfuse" not in "".join(traceback.format_exception(failure.value))
+
+
+def test_langfuse_shutdown_failure_logs_only_safe_category(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Shutdown failures retain a safe category without exposing SDK text."""
+
+    class _FailingClient(_RecordingLangfuseClient):
+        def shutdown(self) -> None:
+            raise RuntimeError("private Langfuse shutdown detail")
+
+    recorder = LangfuseTraceRecorder(
+        public_key="public",
+        secret_key="secret",
+        base_url="https://langfuse.example",
+        environment="test",
+        release="0.1.0",
+        base_metadata={},
+        client=cast(Langfuse, _FailingClient()),
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(RuntimeError, match="Langfuse trace shutdown failed") as failure,
+    ):
+        recorder.shutdown()
+
+    assert len(caplog.records) == 1
+    assert "code=langfuse_shutdown_error" in caplog.text
+    assert "private Langfuse" not in caplog.text
+    assert "private Langfuse" not in "".join(traceback.format_exception(failure.value))
 
 
 def test_langfuse_recorder_emits_metis_compatible_turn_tree(

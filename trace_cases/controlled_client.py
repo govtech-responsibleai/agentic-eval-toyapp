@@ -4,7 +4,10 @@ import json
 from contextlib import AbstractContextManager
 from typing import Any, Protocol, cast
 
-from agentic_eval_toyapp.providers import StructuredCompletionClient
+from agentic_eval_toyapp.providers import (
+    StructuredCompletionClient,
+    unpack_completion,
+)
 from trace_cases.models import CompletionCapture
 
 
@@ -91,13 +94,14 @@ class ControlledStructuredCompletionClient:
             },
         ) as observation:
             try:
-                original = self._delegate.create(
+                original_completion = self._delegate.create(
                     model=model,
                     messages=messages,
                     response_schema=response_schema,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                original, _diagnostics = unpack_completion(original_completion)
             except Exception:
                 observation.update(
                     level="ERROR",

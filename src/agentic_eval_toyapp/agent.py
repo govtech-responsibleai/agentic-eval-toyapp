@@ -1,10 +1,12 @@
 """Bounded single-agent loop for grounded retrieval-augmented answers."""
 
+import logging
 import re
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
+from agentic_eval_toyapp.diagnostics import log_failure
 from agentic_eval_toyapp.models import (
     AgentAction,
     AgentActionKind,
@@ -292,7 +294,15 @@ class RagAgent:
                         action.query,
                         top_k=action.top_k,
                     )
-                except Exception:
+                except Exception as error:
+                    log_failure(
+                        event="retrieval",
+                        agent="rag",
+                        operation="search_knowledge_base",
+                        code="retrieval_error",
+                        attempt=searches,
+                        error=error,
+                    )
                     trace.record_search(
                         query=action.query,
                         top_k=action.top_k,
@@ -410,6 +420,16 @@ class RagAgent:
                 candidate_ids=tuple(retrieved_by_id),
                 findings=tuple(findings),
             )
+            if findings:
+                log_failure(
+                    event="validation",
+                    agent="rag",
+                    operation="validate_answer",
+                    code="citation_inconsistency",
+                    level=logging.WARNING,
+                    attempt=model_calls,
+                    finding_codes=tuple(finding.code.value for finding in findings),
+                )
             return AgentTurnResult(
                 status=AgentTurnStatus.ANSWERED,
                 message=action.markdown,
@@ -448,6 +468,17 @@ class RagAgent:
         model_actions: tuple[AgentAction, ...],
     ) -> AgentTurnResult:
         """Build one safe failure result without internal exception details."""
+        if reason not in (
+            TerminationReason.PROVIDER_ERROR,
+            TerminationReason.RETRIEVAL_ERROR,
+        ):
+            log_failure(
+                event="agent_stop",
+                agent="rag",
+                operation="execute_turn",
+                code=reason.value,
+                attempt=model_calls,
+            )
         return AgentTurnResult(
             status=AgentTurnStatus.FAILED,
             message=message,

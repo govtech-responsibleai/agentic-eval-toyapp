@@ -3,12 +3,15 @@
 import json
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from importlib import import_module
+from time import perf_counter
 from typing import Any, Protocol, cast, runtime_checkable
 
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
+from agentic_eval_toyapp.diagnostics import CompletionDiagnostics, log_provider_failure
 from agentic_eval_toyapp.models import (
     AgentAction,
     AgentActionKind,
@@ -23,9 +26,37 @@ from agentic_eval_toyapp.models import (
 class GenerationProviderError(RuntimeError):
     """Raised when a generation provider cannot produce a valid action."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "provider_error",
+        completion: CompletionDiagnostics | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.completion = completion
+
 
 class InvalidGenerationActionError(GenerationProviderError):
     """Raised when a provider response can be retried with schema feedback."""
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredCompletion:
+    """Model text plus optional safe metadata from the provider response."""
+
+    content: str
+    diagnostics: CompletionDiagnostics
+
+
+def unpack_completion(
+    value: str | StructuredCompletion,
+) -> tuple[str, CompletionDiagnostics | None]:
+    """Support deterministic string fakes and metadata-bearing live responses."""
+    if isinstance(value, StructuredCompletion):
+        return value.content, value.diagnostics
+    return value, None
 
 
 def _langfuse_openai_client_class() -> Any:
@@ -64,8 +95,8 @@ class StructuredCompletionClient(Protocol):
         response_schema: dict[str, Any],
         temperature: float,
         max_tokens: int,
-    ) -> str:
-        """Return the assistant message content from one provider request."""
+    ) -> str | StructuredCompletion:
+        """Return text, optionally with provider-reported completion metadata."""
         ...
 
 
@@ -99,8 +130,8 @@ class OpenAICompatibleChatClient:
         response_schema: dict[str, Any],
         temperature: float,
         max_tokens: int,
-    ) -> str:
-        """Request one strict JSON-schema response and return its text."""
+    ) -> StructuredCompletion:
+        """Request one strict JSON-schema response and retain safe metadata."""
         tracing_arguments: dict[str, object] = {}
         if self._instrument_with_langfuse:
             tracing_arguments = {
@@ -122,12 +153,21 @@ class OpenAICompatibleChatClient:
             max_tokens=max_tokens,
             **tracing_arguments,
         )
+        diagnostics = CompletionDiagnostics.from_response(response)
         if not response.choices:
-            raise GenerationProviderError("live model returned no choices")
+            raise GenerationProviderError(
+                "live model returned no choices",
+                code="empty_choices",
+                completion=diagnostics,
+            )
         content = response.choices[0].message.content
         if not isinstance(content, str) or not content.strip():
-            raise GenerationProviderError("live model returned no structured content")
-        return content
+            raise GenerationProviderError(
+                "live model returned no structured content",
+                code="empty_content",
+                completion=diagnostics,
+            )
+        return StructuredCompletion(content=content, diagnostics=diagnostics)
 
 
 class _StructuredAgentAction(BaseModel):
@@ -287,28 +327,68 @@ class OpenAIChatGenerationProvider:
                 "content": json.dumps(context, ensure_ascii=False),
             },
         )
+        started_at = perf_counter()
         try:
-            content = self._client.create(
+            completion = self._client.create(
                 model=self._model_id,
                 messages=messages,
                 response_schema=response_schema,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
             )
-        except GenerationProviderError:
+            content, diagnostics = unpack_completion(completion)
+        except GenerationProviderError as error:
+            log_provider_failure(
+                agent="rag",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+                code=error.code,
+            )
             raise
         except Exception as error:
+            log_provider_failure(
+                agent="rag",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+            )
             raise GenerationProviderError("live model request failed") from error
         try:
             structured_action = _StructuredAgentAction.model_validate_json(content)
         except ValidationError as error:
+            log_provider_failure(
+                agent="rag",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+                code="invalid_schema",
+                completion=diagnostics,
+            )
             raise InvalidGenerationActionError(
                 "live model returned an invalid structured action"
             ) from error
         if structured_action.kind not in request.available_actions:
-            raise InvalidGenerationActionError(
+            error = InvalidGenerationActionError(
                 "live model returned an unavailable structured action"
             )
+            log_provider_failure(
+                agent="rag",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+                code="unavailable_action",
+                completion=diagnostics,
+            )
+            raise error
         return structured_action.to_domain_action()
 
 

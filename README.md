@@ -187,6 +187,29 @@ The startup log states the selected top-level agent, generation provider, and
 whether Langfuse is configured. `/ready` and `/api/v1/capabilities` report
 whether trace export is operational for that agent mode.
 
+### Operational error logs
+
+Failed provider calls, invalid model actions, upload validation, specialist
+delegation, retrieval, and trace-export failures produce classified events in
+the `make run` terminal or `make docker-logs` output. Search for
+`toyapp_failure`. A message attempt has a `session_id` and a separate internal
+`turn_id` so multiple failures in one session can be distinguished. Uploads
+have a session ID but no turn ID because upload does not invoke the agent.
+Events include the agent, operation, safe error code, and relevant model,
+attempt, output budget, duration, or HTTP status. Expected upload rejections
+and grounding findings are warnings; failures are errors. These diagnostics
+are not shown in the browser or written to a separate file. Raw exception
+messages, prompts, report contents, and credentials are intentionally omitted.
+For a provider response that could not be used, the same event also records
+`finish_reason`, `input_tokens`, `output_tokens`, `reasoning_tokens`, and
+`total_tokens` when supplied by the gateway; missing values appear as `-`.
+`max_tokens` is the configured output cap, not the number used. A
+`finish_reason=length` reports that generation stopped at a limit; token
+counts are provider-reported usage, not a local estimate. Transport failures
+may have no response or usage fields. The configured 90-second timeout applies
+to each live model call, not the entire coordinator-led turn; successful calls
+do not emit usage in these operational error logs.
+
 The first image build needs network access for locked Python packages, the base
 images, and the pinned embedding model. Platform AI and Langfuse remain external
 services; their credentials are passed from `.env` only when the container
@@ -442,6 +465,7 @@ agentic-eval-toyapp/
 │       ├── app.py                            # FastAPI factory, dependency wiring, and routes
 │       ├── config.py                         # Validated environment-backed settings
 │       ├── coordinator.py                    # Bounded coordinator decisions and specialist dispatch
+│       ├── diagnostics.py                    # Classified operational logs and per-turn correlation
 │       ├── embeddings.py                     # Embedding interfaces, validation, and providers
 │       ├── models.py                         # API, retrieval, agent, and session contracts
 │       ├── orchestration_models.py           # Coordinator actions, attachments, and handoff contracts
@@ -476,6 +500,7 @@ agentic-eval-toyapp/
     │   ├── test_api.py                       # Session/message API contract and failure tests
     │   ├── test_api_live.py                  # Opt-in pinned-model API smoke test
     │   ├── test_container_contract.py        # Static image, context, and Compose safety contracts
+    │   ├── test_diagnostics_api.py            # API-to-provider error correlation and redaction
     │   ├── test_frontend.py                  # Browser page, asset, and rendering-safety tests
     │   ├── test_health_api.py                # Health, readiness, capability, and OpenAPI tests
     │   ├── test_langfuse_live.py             # Opt-in Langfuse export and v4 retrieval test
@@ -492,6 +517,7 @@ agentic-eval-toyapp/
         ├── test_analysis.py                  # Report decisions, grounding, limits, and provider tests
         ├── test_config.py                    # Defaults, environment aliases, and secret validation tests
         ├── test_coordinator.py               # Coordinator routing, limits, providers, and handoff tests
+        ├── test_diagnostics.py               # Safe error classification, context reset, and redaction
         ├── test_build_scripts.py             # Container smoke validation and build-input edge cases
         ├── test_embeddings.py                # Embedding validation and normalization tests
         ├── test_models.py                    # Pydantic contract and consistency tests

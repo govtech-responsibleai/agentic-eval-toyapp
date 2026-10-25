@@ -1,8 +1,10 @@
 """Coordinator-only report specialist with one model-backed analysis call."""
 
 import json
+import logging
 from collections.abc import Sequence
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol, cast, runtime_checkable
 from uuid import UUID
 
@@ -15,6 +17,7 @@ from agentic_eval_toyapp.analysis_models import (
     AnalysisClarifyAction,
     AnalysisModelRequest,
 )
+from agentic_eval_toyapp.diagnostics import log_failure, log_provider_failure
 from agentic_eval_toyapp.models import (
     AgentTurnResult,
     AgentTurnStatus,
@@ -37,6 +40,7 @@ from agentic_eval_toyapp.providers import (
     InvalidGenerationActionError,
     StructuredCompletionClient,
     make_object_schemas_strict,
+    unpack_completion,
 )
 from agentic_eval_toyapp.report_sources import SourceBlock, source_blocks
 
@@ -193,8 +197,9 @@ class OpenAIAnalysisGenerationProvider:
             },
             "model_call_number": request.model_call_number,
         }
+        started_at = perf_counter()
         try:
-            content = self._client.create(
+            completion = self._client.create(
                 model=self._model_id,
                 messages=(
                     {"role": "system", "content": request.system_prompt},
@@ -207,13 +212,41 @@ class OpenAIAnalysisGenerationProvider:
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
             )
-        except GenerationProviderError:
+            content, diagnostics = unpack_completion(completion)
+        except GenerationProviderError as error:
+            log_provider_failure(
+                agent="analysis",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+                code=error.code,
+            )
             raise
         except Exception as error:
+            log_provider_failure(
+                agent="analysis",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+            )
             raise GenerationProviderError("live analysis request failed") from error
         try:
             return _FlatAnalysisAction.model_validate_json(content).to_domain_action()
         except (ValidationError, ValueError) as error:
+            log_provider_failure(
+                agent="analysis",
+                model=self._model_id,
+                attempt=request.model_call_number,
+                max_tokens=self._max_tokens,
+                started_at=started_at,
+                error=error,
+                code="invalid_schema",
+                completion=diagnostics,
+            )
             raise InvalidGenerationActionError(
                 "live model returned an invalid analysis action"
             ) from error
@@ -344,6 +377,16 @@ class ReportAnalysisAgent:
             )
 
         final, findings = self._validate_references(action, source)
+        if findings:
+            log_failure(
+                event="validation",
+                agent="analysis",
+                operation="validate_references",
+                code="report_reference_inconsistency",
+                level=logging.WARNING,
+                attempt=1,
+                finding_codes=tuple(finding.code.value for finding in findings),
+            )
 
         steps.append(
             self._step(

@@ -1,6 +1,7 @@
 """Tests for deterministic generation providers."""
 
 import json
+import logging
 from datetime import date
 from types import SimpleNamespace
 from typing import Any, cast
@@ -8,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 import agentic_eval_toyapp.providers as providers_module
+from agentic_eval_toyapp.diagnostics import CompletionDiagnostics
 from agentic_eval_toyapp.models import (
     AgentActionKind,
     AnswerAction,
@@ -27,6 +29,8 @@ from agentic_eval_toyapp.providers import (
     OpenAIChatGenerationProvider,
     OpenAICompatibleChatClient,
     ScriptedGenerationProvider,
+    StructuredCompletion,
+    StructuredCompletionClient,
 )
 
 
@@ -71,7 +75,8 @@ def test_openai_client_enables_langfuse_generation_capture_only_when_requested(
         max_tokens=100,
     )
 
-    assert content == '{"ok":true}'
+    assert content.content == '{"ok":true}'
+    assert content.diagnostics.finish_reason is None
     assert creation_arguments == [
         {
             "api_key": "test-key",
@@ -129,11 +134,63 @@ def test_openai_client_does_not_load_langfuse_wrapper_when_disabled(
             response_schema={"type": "object"},
             temperature=0.0,
             max_tokens=100,
-        )
+        ).content
         == '{"ok":true}'
     )
     assert "name" not in completion_arguments[0]
     assert "metadata" not in completion_arguments[0]
+
+
+def test_empty_live_completion_logs_finish_reason_and_reported_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An empty completion retains provider evidence without response text."""
+
+    class _FakeCompletions:
+        def create(self, **values: object) -> object:
+            del values
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        message=SimpleNamespace(content=None),
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=721,
+                    completion_tokens=32,
+                    total_tokens=753,
+                    completion_tokens_details=SimpleNamespace(reasoning_tokens=32),
+                ),
+            )
+
+    class _FakeOpenAI:
+        def __init__(self, **values: object) -> None:
+            del values
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setattr(providers_module, "OpenAI", _FakeOpenAI)
+    provider = _live_provider(
+        OpenAICompatibleChatClient(
+            api_key="private-test-key",
+            base_url="https://platform.example/v1",
+            timeout_seconds=30,
+        )
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(GenerationProviderError) as failure,
+    ):
+        provider.generate_action(_request())
+
+    assert failure.value.code == "empty_content"
+    assert len(caplog.records) == 1
+    assert "finish_reason=length" in caplog.text
+    assert "input_tokens=721 output_tokens=32 reasoning_tokens=32" in caplog.text
+    assert "total_tokens=753" in caplog.text
+    assert "private-test-key" not in caplog.text
 
 
 def _request(call_number: int = 1) -> ModelRequest:
@@ -285,9 +342,11 @@ class _RecordingCompletionClient:
         ),
         *,
         error: Exception | None = None,
+        diagnostics: CompletionDiagnostics | None = None,
     ) -> None:
         self.response = response
         self.error = error
+        self.diagnostics = diagnostics
         self.calls: list[dict[str, object]] = []
 
     def create(
@@ -298,7 +357,7 @@ class _RecordingCompletionClient:
         response_schema: dict[str, Any],
         temperature: float,
         max_tokens: int,
-    ) -> str:
+    ) -> str | StructuredCompletion:
         self.calls.append(
             {
                 "model": model,
@@ -310,11 +369,13 @@ class _RecordingCompletionClient:
         )
         if self.error is not None:
             raise self.error
+        if self.diagnostics is not None:
+            return StructuredCompletion(self.response, self.diagnostics)
         return self.response
 
 
 def _live_provider(
-    client: _RecordingCompletionClient,
+    client: StructuredCompletionClient,
 ) -> OpenAIChatGenerationProvider:
     return OpenAIChatGenerationProvider(
         api_key="test-key-not-used",
@@ -484,23 +545,87 @@ def test_live_provider_rejects_action_outside_current_allowed_set() -> None:
         ),
     ],
 )
-def test_live_provider_rejects_malformed_structured_output(response: str) -> None:
+def test_live_provider_rejects_malformed_structured_output(
+    response: str, caplog: pytest.LogCaptureFixture
+) -> None:
     """Malformed live output must not enter the bounded agent loop."""
     provider = _live_provider(_RecordingCompletionClient(response))
 
-    with pytest.raises(InvalidGenerationActionError, match="invalid structured action"):
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(InvalidGenerationActionError, match="invalid structured action"),
+    ):
         provider.generate_action(_request())
 
+    assert len(caplog.records) == 1
+    assert "agent=rag" in caplog.text
+    assert "code=invalid_schema" in caplog.text
+    assert response not in caplog.text
 
-def test_live_provider_converts_transport_errors_without_leaking_details() -> None:
+
+def test_invalid_structured_output_retains_provider_usage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Post-response schema failures carry usage through the RAG adapter."""
+    provider = _live_provider(
+        _RecordingCompletionClient(
+            "not-json",
+            diagnostics=CompletionDiagnostics(
+                finish_reason="stop", input_tokens=200, output_tokens=9
+            ),
+        )
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(InvalidGenerationActionError),
+    ):
+        provider.generate_action(_request())
+
+    assert "code=invalid_schema" in caplog.text
+    assert "finish_reason=stop input_tokens=200 output_tokens=9" in caplog.text
+
+
+def test_live_provider_converts_transport_errors_without_leaking_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Provider errors should retain their cause but expose no credential detail."""
     provider = _live_provider(
         _RecordingCompletionClient(error=RuntimeError("secret upstream detail"))
     )
 
-    with pytest.raises(
-        GenerationProviderError, match="live model request failed"
-    ) as exc:
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(
+            GenerationProviderError, match="live model request failed"
+        ) as exc,
+    ):
         provider.generate_action(_request())
 
     assert "secret upstream detail" not in str(exc.value)
+    assert len(caplog.records) == 1
+    assert "code=unexpected_error" in caplog.text
+    assert "agent=rag" in caplog.text
+    assert "secret upstream detail" not in caplog.text
+
+
+def test_live_provider_logs_empty_completion_category(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An empty gateway response should not look like a transport failure."""
+    provider = _live_provider(
+        _RecordingCompletionClient(
+            error=GenerationProviderError(
+                "live model returned no structured content", code="empty_content"
+            )
+        )
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="uvicorn.error"),
+        pytest.raises(GenerationProviderError),
+    ):
+        provider.generate_action(_request())
+
+    assert len(caplog.records) == 1
+    assert "code=empty_content" in caplog.text
