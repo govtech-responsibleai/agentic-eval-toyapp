@@ -3,6 +3,12 @@
 A lightweight multi-agent application for demonstrating and regression-testing
 METIS agent evaluation metrics.
 
+> [!WARNING]
+> **This is an experimental evaluation target, not a production-ready
+> application.** Use synthetic or non-sensitive data only. The project has no
+> availability, durability, or support SLA and must not be used to make or
+> automate operational decisions.
+
 The app answers questions about a synthetic employee-policy corpus. It exposes
 the same workflow through a browser and a versioned FastAPI service, and can
 export standalone RAG turns to Langfuse for evaluation retrieval and scoring.
@@ -29,6 +35,20 @@ The application currently provides:
 
 For component boundaries, data flows, and technical design, see
 [architecture.md](architecture.md).
+
+## Project status and support
+
+The repository is maintained as a research and evaluation demonstration with
+a **best-effort community support tier**. It intentionally uses process-local
+sessions and report storage, exposes synchronous agent turns, and prioritises
+controlled evaluation behaviour over production scalability or durability.
+
+- For reproducible bugs and feature requests, open a
+  [GitHub issue](https://github.com/govtech-responsibleai/agentic-eval-toyapp/issues).
+- For contribution setup and review expectations, see
+  [CONTRIBUTING.md](CONTRIBUTING.md).
+- Do not report suspected vulnerabilities in a public issue. Follow
+  [SECURITY.md](SECURITY.md) instead.
 
 ## Requirements
 
@@ -425,6 +445,7 @@ agentic-eval-toyapp/
 ├── .dockerignore                             # Secrets, tests, caches, and local artefacts excluded from image builds
 ├── .env.example                              # Non-secret local configuration template
 ├── .github/
+│   ├── dependabot.yml                        # Automated dependency update configuration
 │   └── workflows/
 │       └── ci.yml                            # GitHub Actions offline CI workflow
 ├── .gitignore                                # Secrets, caches, builds, models, and run exclusions
@@ -434,6 +455,7 @@ agentic-eval-toyapp/
 ├── Dockerfile                                # Multi-stage non-root runtime image with cached embeddings
 ├── Makefile                                  # Stable install, run, verification, and trace commands
 ├── README.md                                 # Project introduction and user guide
+├── SECURITY.md                               # Private vulnerability disclosure process
 ├── architecture.md                           # Technical component architecture and data flows
 ├── compose.yaml                              # Local single-service container configuration
 ├── pyproject.toml                            # Package metadata, dependencies, and tool configuration
@@ -552,3 +574,10 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 
 See [Current limitations](architecture.md#current-limitations) for technical
 details.
+
+## Contributing
+
+Internal and external contributions are welcome. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Bug reports
+and proposed changes should use the repository's GitHub issues; security
+reports must use the private process in [SECURITY.md](SECURITY.md).
