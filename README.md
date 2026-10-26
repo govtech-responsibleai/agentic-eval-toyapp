@@ -230,12 +230,16 @@ modify it. Supply public CA certificates only; do not include private keys.
 
 ## Use the browser
 
-The page creates a session automatically and restores it after a reload in
-the same browser tab while the server retains it. Enter submits a message and
-Shift+Enter inserts a newline. **New session** starts an independent
-conversation. Refreshing or starting a new session returns the page and panel
-scroll positions to the top. Assistant replies render sanitized Markdown;
-your messages remain literal text.
+The page creates a session automatically and puts its UUID in the browser URL.
+Reloading or opening that URL restores the retained public conversation while
+the same server process still holds it. **New session** starts an independent
+conversation and updates the URL. If a shared session has expired, the page
+states that it is unavailable and creates a replacement. Sessions are
+process-local and are not persistent bookmarks across restarts or workers.
+Enter submits a message and Shift+Enter inserts a newline. Refreshing or
+starting a new session returns the page and panel scroll positions to the top.
+Assistant replies render sanitized Markdown; your messages remain literal
+text.
 
 In the default coordinator mode, use the paperclip beside **Send message** to
 upload a `.txt`, `.md`, or text-based `.pdf` report. The **Session file(s)** panel lists
@@ -349,6 +353,7 @@ the user from submitting additional turns.
 | Method and path | Purpose |
 |---|---|
 | `GET /` | Serve the browser chat. |
+| `GET /{session_id}` | Serve the browser chat shell for a UUID session URL. |
 | `GET /health` | Report process liveness and application version. |
 | `GET /ready` | Report initialised chat dependencies. |
 | `GET /api/v1/capabilities` | Advertise the available target features and actions. |

@@ -6,6 +6,7 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import pytest
 from httpx2 import Client, Response
@@ -86,6 +87,29 @@ def test_root_page_loads_with_accessible_controls() -> None:
     assert '<div class="details-scroll">' in response.text
 
 
+def test_uuid_session_path_loads_the_same_browser_shell() -> None:
+    """A shareable session URL should bootstrap the existing browser client."""
+    client = _build_client()
+    root_response: Response = client.get("/")
+    session_response: Response = client.get(f"/{uuid4()}")
+
+    assert session_response.status_code == 200
+    assert session_response.text == root_response.text
+    assert (
+        session_response.headers["content-security-policy"]
+        == root_response.headers["content-security-policy"]
+    )
+    assert session_response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_non_uuid_browser_path_does_not_load_the_shell() -> None:
+    """The session shell route must not mask unknown application paths."""
+    response: Response = _build_client().get("/not-a-session-id")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+
+
 def test_compact_file_panel_and_composer_upload_controls() -> None:
     """Upload stays separate from sending, with discoverable file instructions."""
     html: str = _build_client().get("/").text
@@ -139,6 +163,23 @@ def test_javascript_uses_the_versioned_api_and_safe_dom_rendering() -> None:
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
     assert 'apiRequest("/sessions"' in response.text
+    assert "class ApiRequestError extends Error" in response.text
+    assert "this.status = status" in response.text
+    assert "function sessionIdFromPath()" in response.text
+    assert "window.location.pathname.match(" in response.text
+    assert "function updateSessionUrl(id, replace = false)" in response.text
+    assert 'const method = replace ? "replaceState" : "pushState"' in response.text
+    assert "window.history[method]({ sessionId: id }" in response.text
+    assert "apiRequest(`/sessions/${encodeURIComponent(resumeId)}`)" in response.text
+    assert "error.status !== 404" in response.text
+    assert "is no longer available. Started a new session instead." in response.text
+    assert (
+        'createSession(sessionIdFromPath(), window.location.pathname === "/")'
+        in response.text
+    )
+    assert 'window.addEventListener("popstate", () => window.location.reload())' in (
+        response.text
+    )
     assert "/sessions/${sessionId}/messages" in response.text
     assert "textContent" in response.text
     assert "replaceChildren" in response.text
