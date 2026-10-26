@@ -11,7 +11,8 @@ METIS agent evaluation metrics.
 
 The app answers questions about a synthetic employee-policy corpus. It exposes
 the same workflow through a browser and a versioned FastAPI service, and can
-export standalone RAG turns to Langfuse for evaluation retrieval and scoring.
+export coordinator and standalone RAG turns to Langfuse for evaluation retrieval
+and scoring.
 Repository tooling can also generate controlled control/defect trace pairs with
 known expected metric outcomes.
 
@@ -48,8 +49,8 @@ The application currently provides:
 - session-scoped upload and validation for UTF-8 text, Markdown, and text-based
   PDF reports;
 - browser and programmatic API access;
-- optional Langfuse tracing for standalone RAG mode, correlated by application
-  session ID; coordinator tracing is planned for Stage 16;
+- optional Langfuse tracing for coordinator and standalone RAG turns,
+  correlated by application session ID;
 - controlled traces for the `harmful_content_refusal` metric;
 - a non-root Docker image containing the pinned embedding model.
 
@@ -120,22 +121,36 @@ strict structured JSON output. Credentials and `.env` are excluded from Git.
 
 ### Langfuse tracing
 
-The environment template configures Langfuse, but the default coordinator
-does not export traces yet. To export standalone RAG turns, select
-`TOYAPP_AGENT_MODE=rag` and replace the Langfuse placeholders:
+The environment template configures Langfuse for the default coordinator.
+Replace the Langfuse placeholders to export turns; standalone RAG mode is
+also available by setting `TOYAPP_AGENT_MODE=rag`:
 
 ```dotenv
 TOYAPP_LANGFUSE_ENABLED=true
-TOYAPP_AGENT_MODE=rag
 LANGFUSE_PUBLIC_KEY=your-langfuse-public-key
 LANGFUSE_SECRET_KEY=your-langfuse-secret-key
 LANGFUSE_BASE_URL=https://your-langfuse-host
 ```
 
-The application session UUID is also used as the Langfuse session ID. Keep
-`TOYAPP_LANGFUSE_FLUSH_ON_TURN=true` for evaluation runs so observations are
-sent before the HTTP turn completes. Set `TOYAPP_LANGFUSE_ENABLED=false` for a
-run that should not export traces.
+The application session UUID is also used as the Langfuse session ID. Use the
+service base URL, including a reverse-proxy prefix such as `/langfuse`; do not
+append the OTLP API path. Keep `TOYAPP_LANGFUSE_FLUSH_ON_TURN=true` for evaluation
+runs so the SDK attempts export before the HTTP turn completes. A returned
+flush is not proof of successful ingestion. Set `TOYAPP_LANGFUSE_ENABLED=false`
+for a run that should not export traces. After changing `.env`, fully restart
+`make run` or recreate the Docker container; an already running process keeps
+its initial Langfuse client and URL.
+Uploaded report text is not exported by default; source IDs and locators are.
+For synthetic report-grounding evaluations only, set
+`TOYAPP_LANGFUSE_INCLUDE_REPORT_TEXT=true` to export complete extracted text.
+
+Run `make test-langfuse-live` after changing the Langfuse endpoint. It uses
+scripted actions, not paid model calls, and verifies whole v4 observation
+trees by session ID. If logs show `Failed to export spans batch code: 500`,
+the OTLP ingress rejected the trace; a successful read-API request or
+`flush_attempted` log does not make that trace complete. Check the Langfuse
+ingress/server logs for the configured `.../api/public/otel/v1/traces` route
+before using the session as METIS input.
 
 See [.env.example](.env.example) for model, retrieval, agent, session, report
 upload, and service settings.
@@ -181,9 +196,8 @@ report content to the analysis specialist. The specialist receives the full
 extracted report in one model call, using a separate configurable 16,384-token
 output allowance by default. The result's `report_references` identify exact
 report pages or sections.
-Coordinator-mode Langfuse export is not advertised as operational yet, even
-when credentials are configured. The coordinator exposes a browser file panel
-for uploaded reports.
+When Langfuse is enabled, coordinator turns export a nested trace. The
+coordinator exposes a browser file panel for uploaded reports.
 
 Open these local endpoints:
 
@@ -450,7 +464,7 @@ for the metric-specific case contract.
 | `make test-unit` | Run unit tests only. | No |
 | `make test-live` | Exercise natural-language retrieval through standalone RAG and the default coordinator API with the pinned embedding model. | May download the embedding model |
 | `make test-model-live` | Verify live provider connectivity and structured-action support. | Live model request |
-| `make test-langfuse-live` | Export an API turn and retrieve its observations by session ID. | Live Langfuse request |
+| `make test-langfuse-live` | Export scripted RAG and multi-turn coordinator traces, then verify complete v4 observations by session ID. | Live Langfuse requests |
 | `make docker-build` | Build the non-root runtime image and cache the pinned embedding model in it. | Base images, packages, and embedding model during build |
 | `make docker-up` | Build and start the Compose service using runtime values from `.env`. | Depends on selected provider and tracing settings |
 | `make docker-down` | Stop and remove the Compose service. | No |
@@ -520,6 +534,7 @@ agentic-eval-toyapp/
 │       ├── diagnostics.py                    # Classified operational logs and per-turn correlation
 │       ├── embeddings.py                     # Embedding interfaces, validation, and providers
 │       ├── models.py                         # API, retrieval, agent, and session contracts
+│       ├── multi_agent_tracing.py            # Coordinator-owned nested specialist trace context
 │       ├── orchestration_models.py           # Coordinator actions, attachments, and handoff contracts
 │       ├── providers.py                      # Live, deterministic, and scripted generation adapters
 │       ├── prompts/
@@ -532,7 +547,6 @@ agentic-eval-toyapp/
 │       ├── resources/
 │       │   └── documents.json                # Synthetic Northstar policy corpus
 │       ├── sessions.py                       # Thread-safe bounded in-memory conversation state
-│       ├── tracing.py                        # No-op and Langfuse turn recorders
 │       ├── static/
 │       │   ├── app.js                        # Browser API client and sanitized Markdown rendering
 │       │   ├── style.css                     # Responsive panel layout and browser styling
@@ -542,6 +556,7 @@ agentic-eval-toyapp/
 │       │       ├── LICENSE.markdown-it       # markdown-it MIT license text
 │       │       ├── markdown-it.umd.min.js    # Local Markdown parser for assistant replies
 │       │       └── purify.min.js             # Local HTML sanitizer for rendered replies
+│       ├── tracing.py                        # No-op and Langfuse standalone turn recorders
 │       └── templates/
 │           └── index.html                    # Accessible server-rendered chat page
 └── tests/
@@ -580,7 +595,8 @@ agentic-eval-toyapp/
         ├── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
         ├── test_reports.py                   # Report extraction, limits, hashing, and isolation tests
         ├── test_sessions.py                  # Session isolation, history, and truncation tests
-        └── test_tracing.py                   # Offline trace shape and session-correlation tests
+        ├── test_multi_agent_tracing.py       # Coordinator trace hierarchy, privacy, and usage tests
+        └── test_tracing.py                   # Offline standalone trace shape and session-correlation tests
 ```
 
 The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
@@ -594,7 +610,8 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 - Text-based PDFs are supported, but scanned PDFs and OCR are not.
 - Standalone RAG mode does not consume report contents.
 - The default coordinator can answer, clarify, delegate policy tasks to RAG, and
-  analyse selected reports. Coordinator trace export is deferred to Stage 16.
+  analyse selected reports. When enabled, its turn and selected route are
+  exported as one nested Langfuse trace.
 - Agent turns are synchronous; there is no cancellation or background job API.
 - The runtime image contains the application only; controlled trace generation
   remains source-repository tooling.

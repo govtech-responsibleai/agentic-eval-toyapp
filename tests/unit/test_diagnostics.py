@@ -14,6 +14,7 @@ from agentic_eval_toyapp.diagnostics import (
     classify_external_error,
     diagnostic_context,
     log_failure,
+    log_trace_observation,
 )
 
 
@@ -154,3 +155,26 @@ def test_log_model_identifier_is_bounded_and_single_line(
     assert "\n" not in message
     assert "model=model_forged-line" in message
     assert len(message.split("model=", 1)[1].split(" ", 1)[0]) <= 80
+
+
+def test_trace_correlation_log_contains_ids_but_no_report_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session_id = uuid4()
+    with (
+        caplog.at_level(logging.INFO, logger="uvicorn.error"),
+        diagnostic_context(session_id, turn=True),
+    ):
+        log_trace_observation(
+            event="started",
+            name="inspect-input",
+            trace_id="a" * 32,
+            observation_id="b" * 16,
+        )
+
+    message = caplog.records[0].message
+    assert str(session_id) in message
+    assert "trace_id=" + "a" * 32 in message
+    assert "observation_id=" + "b" * 16 in message
+    assert "name=inspect-input" in message
+    assert "report_text" not in message

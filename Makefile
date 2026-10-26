@@ -112,7 +112,8 @@ test-model-live:
 	uv run pytest -m model_live
 
 test-langfuse-live:
-	uv run pytest -m langfuse_live
+	uv run pytest -m langfuse_live tests/integration/test_langfuse_live.py::test_api_turn_is_retrievable_by_app_session_id
+	uv run pytest -m langfuse_live tests/integration/test_langfuse_live.py::test_coordinator_turn_is_one_retrievable_root_with_nested_rag
 
 ci:
 	$(MAKE) lock-check

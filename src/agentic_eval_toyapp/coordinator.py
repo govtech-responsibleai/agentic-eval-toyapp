@@ -32,6 +32,11 @@ from agentic_eval_toyapp.models import (
     NonEmptyString,
     TerminationReason,
 )
+from agentic_eval_toyapp.multi_agent_tracing import (
+    CoordinatorTrace,
+    CoordinatorTraceRecorder,
+    NoOpCoordinatorTraceRecorder,
+)
 from agentic_eval_toyapp.orchestration_models import (
     AnalysisHandoffRequest,
     CoordinatorAction,
@@ -471,6 +476,7 @@ class CoordinatorAgent:
         max_model_calls: int = 2,
         rag_specialist: RagSpecialist | None = None,
         analysis_specialist: AnalysisSpecialist | None = None,
+        trace_recorder: CoordinatorTraceRecorder | None = None,
     ) -> None:
         if not system_prompt.strip():
             raise ValueError("system_prompt must not be blank")
@@ -481,12 +487,19 @@ class CoordinatorAgent:
         self._max_model_calls = max_model_calls
         self._rag_specialist = rag_specialist
         self._analysis_specialist = analysis_specialist
+        self._trace_recorder = trace_recorder or NoOpCoordinatorTraceRecorder()
+
+    @property
+    def tracing_enabled(self) -> bool:
+        """Return whether coordinator turns are exported to Langfuse."""
+        return self._trace_recorder.enabled
 
     def shutdown(self) -> None:
         """Release resources owned by connected specialists."""
         for specialist in (self._rag_specialist, self._analysis_specialist):
             if isinstance(specialist, ShutdownableSpecialist):
                 specialist.shutdown()
+        self._trace_recorder.shutdown()
 
     def run(
         self,
@@ -500,7 +513,33 @@ class CoordinatorAgent:
         stripped_message = user_message.strip()
         if not stripped_message:
             raise ValueError("user_message must not be blank")
+        with self._trace_recorder.start_turn(
+            session_id=session_id,
+            user_message=stripped_message,
+            history_message_count=len(history),
+        ) as trace:
+            result = self._execute_turn(
+                stripped_message,
+                history=history,
+                session_id=session_id,
+                reports=reports,
+                trace=trace,
+            )
+            trace.complete(result)
+            return result
+
+    def _execute_turn(
+        self,
+        user_message: str,
+        *,
+        history: Sequence[ConversationMessage],
+        session_id: str | None,
+        reports: Sequence[StoredReport],
+        trace: CoordinatorTrace,
+    ) -> AgentTurnResult:
+        """Execute the selected action while retaining one trace root."""
         attachments = tuple(self.attachment_from_report(report) for report in reports)
+        trace.inspect_input(attachments)
         steps = [
             ExecutionStep(
                 sequence=1,
@@ -517,37 +556,43 @@ class CoordinatorAgent:
         for model_call_number in range(1, self._max_model_calls + 1):
             request = CoordinatorRequest(
                 system_prompt=self._system_prompt,
-                user_message=stripped_message,
+                user_message=user_message,
                 history=tuple(history),
                 attachments=attachments,
                 action_feedback=action_feedback,
                 model_call_number=model_call_number,
             )
-            try:
-                action = self._provider.generate_action(request)
-            except InvalidGenerationActionError:
-                if repair_pending or model_call_number >= self._max_model_calls:
+            with trace.model_action(
+                request, model=self._provider.model_id
+            ) as model_trace:
+                try:
+                    action = self._provider.generate_action(request)
+                except InvalidGenerationActionError as error:
+                    model_trace.fail(error.code)
+                    if repair_pending or model_call_number >= self._max_model_calls:
+                        return self._failure(
+                            message="The coordinator could not produce a valid action.",
+                            reason=TerminationReason.PROVIDER_ERROR,
+                            model_calls=model_call_number,
+                            steps=steps,
+                            controller_events=controller_events,
+                        )
+                    repair_pending = True
+                    action_feedback = (
+                        "The previous response did not match the coordinator action "
+                        "schema. Return exactly one available action."
+                    )
+                    continue
+                except GenerationProviderError as error:
+                    model_trace.fail(error.code)
                     return self._failure(
-                        message="The coordinator could not produce a valid action.",
+                        message="The coordinator provider could not produce an action.",
                         reason=TerminationReason.PROVIDER_ERROR,
                         model_calls=model_call_number,
                         steps=steps,
                         controller_events=controller_events,
                     )
-                repair_pending = True
-                action_feedback = (
-                    "The previous response did not match the coordinator action "
-                    "schema. Return exactly one available action."
-                )
-                continue
-            except GenerationProviderError:
-                return self._failure(
-                    message="The coordinator provider could not produce an action.",
-                    reason=TerminationReason.PROVIDER_ERROR,
-                    model_calls=model_call_number,
-                    steps=steps,
-                    controller_events=controller_events,
-                )
+                model_trace.succeed(action)
 
             if repair_pending:
                 controller_events.append(
@@ -567,6 +612,7 @@ class CoordinatorAgent:
                 model_calls=model_call_number,
                 steps=steps,
                 controller_events=controller_events,
+                trace=trace,
             )
 
         raise AssertionError("bounded coordinator loop exited without a result")
@@ -581,6 +627,7 @@ class CoordinatorAgent:
         model_calls: int,
         steps: list[ExecutionStep],
         controller_events: list[ControllerEvent],
+        trace: CoordinatorTrace,
     ) -> AgentTurnResult:
         if isinstance(action, CoordinatorAnswerAction):
             steps.append(
@@ -628,6 +675,7 @@ class CoordinatorAgent:
                 model_calls=model_calls,
                 steps=steps,
                 controller_events=controller_events,
+                trace=trace,
             )
         return self._route_analysis(
             action,
@@ -637,6 +685,7 @@ class CoordinatorAgent:
             model_calls=model_calls,
             steps=steps,
             controller_events=controller_events,
+            trace=trace,
         )
 
     def _route_rag(
@@ -648,6 +697,7 @@ class CoordinatorAgent:
         model_calls: int,
         steps: list[ExecutionStep],
         controller_events: list[ControllerEvent],
+        trace: CoordinatorTrace,
     ) -> AgentTurnResult:
         specialist = self._rag_specialist
         if specialist is None:
@@ -674,12 +724,17 @@ class CoordinatorAgent:
                 summary="Delegated one focused policy task to the RAG specialist.",
             )
         )
-        return self._delegate(
-            lambda: specialist.run(request, session_id=session_id),
-            model_calls=model_calls,
-            steps=steps,
-            controller_events=controller_events,
-        )
+        with trace.delegate_rag(action.task) as specialist_trace:
+            result = self._delegate(
+                lambda: specialist.run(request, session_id=session_id),
+                model_calls=model_calls,
+                steps=steps,
+                controller_events=controller_events,
+            )
+            specialist_trace.complete(result)
+        if result.execution_steps[-1].action is ExecutionAction.RETURN_RESPONSE:
+            trace.return_response(result)
+        return result
 
     def _route_analysis(
         self,
@@ -691,6 +746,7 @@ class CoordinatorAgent:
         model_calls: int,
         steps: list[ExecutionStep],
         controller_events: list[ControllerEvent],
+        trace: CoordinatorTrace,
     ) -> AgentTurnResult:
         attachment_by_id = {
             attachment.file_id: attachment for attachment in attachments
@@ -743,12 +799,17 @@ class CoordinatorAgent:
                 summary="Delegated one focused report task to the analysis specialist.",
             )
         )
-        return self._delegate(
-            lambda: specialist.run(request, session_id=session_id),
-            model_calls=model_calls,
-            steps=steps,
-            controller_events=controller_events,
-        )
+        with trace.delegate_analysis(action.task, selected) as specialist_trace:
+            result = self._delegate(
+                lambda: specialist.run(request, session_id=session_id),
+                model_calls=model_calls,
+                steps=steps,
+                controller_events=controller_events,
+            )
+            specialist_trace.complete(result)
+        if result.execution_steps[-1].action is ExecutionAction.RETURN_RESPONSE:
+            trace.return_response(result)
+        return result
 
     def _delegate(
         self,

@@ -176,7 +176,7 @@ class _LangfuseModelActionObservation:
         )
 
 
-class _LangfuseTurnTrace:
+class LangfuseTurnTrace:
     def __init__(self, *, client: Langfuse, root_observation: Any) -> None:
         self._client = client
         self._root_observation = root_observation
@@ -340,7 +340,7 @@ class LangfuseTraceRecorder:
                 metadata={"history_message_count": history_message_count},
             ) as root,
         ):
-            turn = _LangfuseTurnTrace(
+            turn = LangfuseTurnTrace(
                 client=self._client,
                 root_observation=root,
             )
