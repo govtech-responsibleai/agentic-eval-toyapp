@@ -145,12 +145,13 @@ Application paths in this table are relative to
 ## 1. Browser frontend
 
 The frontend is a local HTML, CSS, and JavaScript client served by FastAPI. It
-has no separate build system or frontend framework. A UUID in the URL path is
-the session selector: the client loads its public history when retained,
-creates a new session at `/`, and replaces an expired shared session with clear
-status feedback. Every active session is reflected in the URL. A paperclip in
-the composer opens the upload picker; the compact file panel lists session
-uploads and allows explicit selection or deletion.
+has no separate build system or frontend framework. A UUID in the named
+`/session/{session_id}` browser path is the session selector: the client loads
+its public history when retained, creates a new session at `/`, and replaces an
+expired shared session with clear status feedback. Every active session is
+reflected in the URL. A paperclip in the composer opens the upload picker; the
+compact file panel lists session uploads and allows explicit selection or
+deletion.
 Upload, Select/Deselect, Delete, and Send are separate user actions. Selection
 persists until changed; each Send supplies either the selected file ID or an
 empty `file_ids` list. Browser reload restores the file list but clears
@@ -230,7 +231,7 @@ both use this same application factory.
 | Method and path | Responsibility |
 |---|---|
 | `GET /` | Serve the browser client. |
-| `GET /{session_id}` | Serve the same browser shell for a UUID session URL. |
+| `GET /session/{session_id}` | Serve the same browser shell for a UUID session URL. |
 | `GET /health` | Report process liveness and service version. |
 | `GET /ready` | Report validated configuration, session store, tracing state, and initialised agent. |
 | `GET /api/v1/capabilities` | Advertise the synchronous chat, semantic retrieval, tracing state, and available actions. |

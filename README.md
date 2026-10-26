@@ -230,7 +230,8 @@ modify it. Supply public CA certificates only; do not include private keys.
 
 ## Use the browser
 
-The page creates a session automatically and puts its UUID in the browser URL.
+The page creates a session automatically and puts its UUID in the browser URL
+as `/session/{session_id}`.
 Reloading or opening that URL restores the retained public conversation while
 the same server process still holds it. **New session** starts an independent
 conversation and updates the URL. If a shared session has expired, the page
@@ -353,7 +354,7 @@ the user from submitting additional turns.
 | Method and path | Purpose |
 |---|---|
 | `GET /` | Serve the browser chat. |
-| `GET /{session_id}` | Serve the browser chat shell for a UUID session URL. |
+| `GET /session/{session_id}` | Serve the browser chat shell for a UUID session URL. |
 | `GET /health` | Report process liveness and application version. |
 | `GET /ready` | Report initialised chat dependencies. |
 | `GET /api/v1/capabilities` | Advertise the available target features and actions. |

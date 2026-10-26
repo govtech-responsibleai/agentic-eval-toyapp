@@ -545,13 +545,13 @@ function resetDetails() {
 
 function sessionIdFromPath() {
   const match = window.location.pathname.match(
-    /^\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i,
+    /^\/session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i,
   );
   return match === null ? null : match[1].toLowerCase();
 }
 
 function updateSessionUrl(id, replace = false) {
-  const path = `/${encodeURIComponent(id)}`;
+  const path = `/session/${encodeURIComponent(id)}`;
   if (window.location.pathname === path) {
     return;
   }

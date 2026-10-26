@@ -535,7 +535,7 @@ def create_app(
         return render_browser_client(request)
 
     @application.get(
-        "/{session_id:uuid}",
+        "/session/{session_id:uuid}",
         response_class=HTMLResponse,
         include_in_schema=False,
     )

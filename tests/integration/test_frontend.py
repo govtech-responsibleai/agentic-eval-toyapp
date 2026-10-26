@@ -91,7 +91,7 @@ def test_uuid_session_path_loads_the_same_browser_shell() -> None:
     """A shareable session URL should bootstrap the existing browser client."""
     client = _build_client()
     root_response: Response = client.get("/")
-    session_response: Response = client.get(f"/{uuid4()}")
+    session_response: Response = client.get(f"/session/{uuid4()}")
 
     assert session_response.status_code == 200
     assert session_response.text == root_response.text
@@ -102,9 +102,17 @@ def test_uuid_session_path_loads_the_same_browser_shell() -> None:
     assert session_response.headers["x-content-type-options"] == "nosniff"
 
 
-def test_non_uuid_browser_path_does_not_load_the_shell() -> None:
-    """The session shell route must not mask unknown application paths."""
-    response: Response = _build_client().get("/not-a-session-id")
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/not-a-session-id",
+        "/session/not-a-session-id",
+        "/00000000-0000-4000-8000-000000000000",
+    ],
+)
+def test_unknown_browser_path_does_not_load_the_shell(path: str) -> None:
+    """The named session route must not mask unknown application paths."""
+    response: Response = _build_client().get(path)
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
@@ -180,6 +188,7 @@ def test_javascript_uses_the_versioned_api_and_safe_dom_rendering() -> None:
     assert "this.status = status" in response.text
     assert "function sessionIdFromPath()" in response.text
     assert "window.location.pathname.match(" in response.text
+    assert "const path = `/session/${encodeURIComponent(id)}`" in response.text
     assert "function updateSessionUrl(id, replace = false)" in response.text
     assert 'const method = replace ? "replaceState" : "pushState"' in response.text
     assert "window.history[method]({ sessionId: id }" in response.text
