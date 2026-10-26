@@ -153,7 +153,20 @@ def test_root_page_escapes_configuration_and_sets_browser_guards() -> None:
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-store"
     assert "https://" not in response.text
+
+
+def test_browser_assets_use_one_content_derived_cache_version() -> None:
+    """The HTML shell must not reuse stale application JavaScript or CSS."""
+    html: str = _build_client().get("/").text
+
+    stylesheet_version = html.split("/static/style.css?v=", 1)[1].split('"', 1)[0]
+    javascript_version = html.split("/static/app.js?v=", 1)[1].split('"', 1)[0]
+
+    assert stylesheet_version == javascript_version
+    assert len(javascript_version) == 12
+    assert all(character in "0123456789abcdef" for character in javascript_version)
 
 
 def test_javascript_uses_the_versioned_api_and_safe_dom_rendering() -> None:
