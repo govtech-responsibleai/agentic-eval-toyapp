@@ -15,6 +15,26 @@ export standalone RAG turns to Langfuse for evaluation retrieval and scoring.
 Repository tooling can also generate controlled control/defect trace pairs with
 known expected metric outcomes.
 
+## Table of Contents
+
+- [Capabilities](#capabilities)
+- [Project status and support](#project-status-and-support)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Configure](#configure)
+- [Run the application](#run-the-application)
+- [Use the browser](#use-the-browser)
+- [Use the API](#use-the-api)
+- [Generate controlled traces](#generate-controlled-traces)
+- [Verify the application](#verify-the-application)
+- [Repository structure](#repository-structure)
+- [Current runtime constraints](#current-runtime-constraints)
+- [Development](#development)
+- [Security](#security)
+- [License](#license)
+
+## Capabilities
+
 The application currently provides:
 
 - a default coordinator that can answer, clarify, or select one typed
@@ -445,6 +465,7 @@ agentic-eval-toyapp/
 ├── .dockerignore                             # Secrets, tests, caches, and local artefacts excluded from image builds
 ├── .env.example                              # Non-secret local configuration template
 ├── .github/
+│   ├── CODEOWNERS                            # Default maintainer review ownership
 │   ├── dependabot.yml                        # Automated dependency update configuration
 │   └── workflows/
 │       └── ci.yml                            # GitHub Actions offline CI workflow
@@ -453,11 +474,14 @@ agentic-eval-toyapp/
 ├── AGENTS.md                                 # Repository conventions for coding agents
 ├── CONTRIBUTING.md                           # Contributor setup and development workflow
 ├── Dockerfile                                # Multi-stage non-root runtime image with cached embeddings
+├── LICENSE                                   # MIT licence terms
 ├── Makefile                                  # Stable install, run, verification, and trace commands
 ├── README.md                                 # Project introduction and user guide
 ├── SECURITY.md                               # Private vulnerability disclosure process
 ├── architecture.md                           # Technical component architecture and data flows
 ├── compose.yaml                              # Local single-service container configuration
+├── docs/
+│   └── github-workflow.md                    # Internal and external collaboration playbook
 ├── pyproject.toml                            # Package metadata, dependencies, and tool configuration
 ├── uv.lock                                   # Exact direct and transitive dependency lock
 ├── scripts/
@@ -575,9 +599,24 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 See [Current limitations](architecture.md#current-limitations) for technical
 details.
 
-## Contributing
+## Development
 
-Internal and external contributions are welcome. Read
-[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Bug reports
-and proposed changes should use the repository's GitHub issues; security
-reports must use the private process in [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide and
+[docs/github-workflow.md](docs/github-workflow.md) for the collaboration
+playbook.
+
+```bash
+make check          # lint + format-check + typecheck (non-mutating)
+make fix            # auto-fix lint issues and format code
+make ci             # full deterministic offline CI suite
+make clean          # remove generated and cached files
+```
+
+## Security
+
+Do not report security vulnerabilities in public issues. See
+[SECURITY.md](SECURITY.md) for how to report a vulnerability.
+
+## License
+
+Agentic Eval Toy App is released under the [MIT License](LICENSE).
