@@ -21,6 +21,7 @@ from agentic_eval_toyapp.models import (
     NonEmptyString,
     SearchAction,
 )
+from agentic_eval_toyapp.multi_agent_tracing import record_completion_usage
 
 
 class GenerationProviderError(RuntimeError):
@@ -154,6 +155,7 @@ class OpenAICompatibleChatClient:
             **tracing_arguments,
         )
         diagnostics = CompletionDiagnostics.from_response(response)
+        record_completion_usage(diagnostics)
         if not response.choices:
             raise GenerationProviderError(
                 "live model returned no choices",

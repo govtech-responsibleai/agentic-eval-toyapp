@@ -192,6 +192,23 @@ def log_failure(
     )
 
 
+def log_trace_observation(
+    *, event: str, name: str, trace_id: str | None, observation_id: str | None
+) -> None:
+    """Log only correlation IDs; observation creation is not delivery proof."""
+    context = _CONTEXT.get() or DiagnosticContext()
+    LOGGER.info(
+        "toyapp_trace event=%s session_id=%s turn_id=%s trace_id=%s "
+        "observation_id=%s name=%s",
+        _safe_identifier(event),
+        context.session_id,
+        context.turn_id,
+        _safe_identifier(trace_id),
+        _safe_identifier(observation_id),
+        _safe_identifier(name),
+    )
+
+
 def log_provider_failure(
     *,
     agent: str,

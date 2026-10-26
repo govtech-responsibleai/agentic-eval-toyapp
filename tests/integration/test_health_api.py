@@ -203,8 +203,8 @@ def test_startup_logs_safe_runtime_modes() -> None:
     )
 
 
-def test_coordinator_capabilities_advertise_rag_but_defer_tracing() -> None:
-    """Stage 13 enables RAG while analysis tracing remains deferred."""
+def test_coordinator_capabilities_advertise_multi_agent_tracing() -> None:
+    """Coordinator and its selected specialist share operational tracing."""
     settings = AppSettings(
         agent_mode=AgentMode.COORDINATOR,
         generation_provider=GenerationProviderKind.DETERMINISTIC,
@@ -218,16 +218,14 @@ def test_coordinator_capabilities_advertise_rag_but_defer_tracing() -> None:
     readiness = client.get("/ready").json()
     capabilities = client.get("/api/v1/capabilities").json()
 
-    assert readiness["checks"][3]["detail"] == (
-        "coordinator trace export is deferred to Stage 16"
-    )
+    assert readiness["checks"][3]["detail"] == "enabled and configured"
     assert readiness["checks"][4] == {
         "name": "coordinator_agent",
         "status": "pass",
         "detail": "coordinator agent dependencies initialised",
     }
     assert capabilities["features"]["semantic_retrieval"] is True
-    assert capabilities["features"]["langfuse_tracing"] is False
+    assert capabilities["features"]["langfuse_tracing"] is True
     assert capabilities["actions"] == [
         "answer",
         "clarify",

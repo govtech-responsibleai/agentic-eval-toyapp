@@ -34,6 +34,7 @@ from agentic_eval_toyapp.models import (
     ValidationFinding,
     ValidationFindingCode,
 )
+from agentic_eval_toyapp.multi_agent_tracing import analysis_trace
 from agentic_eval_toyapp.orchestration_models import AnalysisHandoffRequest
 from agentic_eval_toyapp.providers import (
     GenerationProviderError,
@@ -311,7 +312,7 @@ class ReportAnalysisAgent:
         session_id: str | None = None,
     ) -> AgentTurnResult:
         """Analyse all selected report sources in one model call."""
-        del session_id  # Stage 16 will own one nested coordinator trace.
+        del session_id  # The coordinator owns the active trace context.
         source = source_blocks(request.attachments)
         if not source:
             question = "Please provide a report with usable text."
@@ -341,23 +342,29 @@ class ReportAnalysisAgent:
                 ),
             )
         ]
-        try:
-            action = self._provider.generate_action(
-                AnalysisModelRequest(
-                    system_prompt=self._system_prompt,
-                    task=request.task,
-                    history=request.history,
-                    blocks=source,
-                    model_call_number=1,
+        trace = analysis_trace()
+        trace.inspect_content(source)
+        model_request = AnalysisModelRequest(
+            system_prompt=self._system_prompt,
+            task=request.task,
+            history=request.history,
+            blocks=source,
+            model_call_number=1,
+        )
+        with trace.model_action(
+            model_request, model=self._provider.model_id
+        ) as model_trace:
+            try:
+                action = self._provider.generate_action(model_request)
+            except GenerationProviderError as error:
+                model_trace.fail(error.code)
+                return self._failure(
+                    "The analysis provider could not produce an action.",
+                    TerminationReason.PROVIDER_ERROR,
+                    1,
+                    tuple(steps),
                 )
-            )
-        except GenerationProviderError:
-            return self._failure(
-                "The analysis provider could not produce an action.",
-                TerminationReason.PROVIDER_ERROR,
-                1,
-                tuple(steps),
-            )
+            model_trace.succeed(action)
         if isinstance(action, AnalysisClarifyAction):
             steps.append(
                 self._step(
@@ -377,6 +384,9 @@ class ReportAnalysisAgent:
             )
 
         final, findings = self._validate_references(action, source)
+        trace.record_validation(
+            reference_count=len(action.references), findings=findings
+        )
         if findings:
             log_failure(
                 event="validation",

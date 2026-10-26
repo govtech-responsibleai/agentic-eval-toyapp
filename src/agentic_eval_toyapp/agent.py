@@ -28,6 +28,7 @@ from agentic_eval_toyapp.models import (
     ValidationFinding,
     ValidationFindingCode,
 )
+from agentic_eval_toyapp.multi_agent_tracing import delegated_rag_trace
 from agentic_eval_toyapp.orchestration_models import RagHandoffRequest
 from agentic_eval_toyapp.providers import (
     GenerationProvider,
@@ -92,6 +93,11 @@ class RagAgent:
         """Return whether this agent exports turn observations."""
         return self._trace_recorder.enabled
 
+    @property
+    def model_id(self) -> str:
+        """Identify the provider used by the RAG loop in nested traces."""
+        return self._provider.model_id
+
     def shutdown(self) -> None:
         """Flush and close the process-level tracing dependency."""
         self._trace_recorder.shutdown()
@@ -133,6 +139,14 @@ class RagAgent:
         stripped_message = user_message.strip()
         if not stripped_message:
             raise ValueError("user_message must not be blank")
+
+        active_trace = delegated_rag_trace()
+        if active_trace is not None:
+            return self._execute_turn(
+                stripped_message,
+                history=history,
+                trace=active_trace,
+            )
 
         no_op_recorder = NoOpTraceRecorder()
         with no_op_recorder.start_turn(

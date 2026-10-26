@@ -59,6 +59,11 @@ from agentic_eval_toyapp.models import (
     SessionMessageResponse,
     SessionResponse,
 )
+from agentic_eval_toyapp.multi_agent_tracing import (
+    CoordinatorTraceRecorder,
+    LangfuseCoordinatorTraceRecorder,
+    NoOpCoordinatorTraceRecorder,
+)
 from agentic_eval_toyapp.orchestration_models import CoordinatorActionKind
 from agentic_eval_toyapp.providers import (
     ExtractiveGenerationProvider,
@@ -76,7 +81,7 @@ from agentic_eval_toyapp.reports import (
     ReportTooLargeError,
     UnsupportedReportTypeError,
 )
-from agentic_eval_toyapp.retrieval import FaissRetriever, load_corpus
+from agentic_eval_toyapp.retrieval import FaissRetriever, corpus_sha256, load_corpus
 from agentic_eval_toyapp.sessions import (
     AgentRunner,
     InMemorySessionStore,
@@ -284,9 +289,8 @@ def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
             max_tokens=settings.generation_max_tokens,
             timeout_seconds=settings.generation_timeout_seconds,
         )
-    rag_specialist = RagSpecialistAdapter(
-        _build_rag_agent(settings, trace_export_enabled=False)
-    )
+    rag_agent = _build_rag_agent(settings, trace_export_enabled=False)
+    rag_specialist = RagSpecialistAdapter(rag_agent)
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
         analysis_provider = DeterministicAnalysisGenerationProvider()
     else:
@@ -307,12 +311,43 @@ def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
         provider=analysis_provider,
         system_prompt=load_analysis_prompt(),
     )
+    trace_recorder: CoordinatorTraceRecorder = NoOpCoordinatorTraceRecorder()
+    if settings.langfuse_enabled:
+        public_key, secret_key, langfuse_url = settings.require_langfuse_configuration()
+        corpus = load_corpus()
+        trace_recorder = LangfuseCoordinatorTraceRecorder(
+            public_key=public_key,
+            secret_key=secret_key,
+            base_url=langfuse_url,
+            environment=settings.langfuse_environment,
+            release=__version__,
+            rag_model_id=rag_agent.model_id,
+            include_report_text=settings.langfuse_include_report_text,
+            flush_on_turn=settings.langfuse_flush_on_turn,
+            base_metadata={
+                "application": "agentic-eval-toyapp",
+                "app_version": __version__,
+                "generation_model": provider.model_id,
+                "generation_model_revision": provider.revision,
+                "embedding_model": settings.embedding_model_id,
+                "embedding_model_revision": settings.embedding_model_revision,
+                "corpus_version": corpus.version,
+                "corpus_sha256": corpus_sha256(corpus),
+                "coordinator_prompt_sha256": hashlib.sha256(
+                    load_coordinator_prompt().encode()
+                ).hexdigest(),
+                "analysis_prompt_sha256": hashlib.sha256(
+                    load_analysis_prompt().encode()
+                ).hexdigest(),
+            },
+        )
     return CoordinatorAgent(
         provider=provider,
         system_prompt=load_coordinator_prompt(),
         max_model_calls=settings.coordinator_max_model_calls,
         rag_specialist=rag_specialist,
         analysis_specialist=analysis_specialist,
+        trace_recorder=trace_recorder,
     )
 
 
@@ -559,11 +594,7 @@ def create_app(
                 detail=(
                     "disabled"
                     if not resolved_settings.langfuse_enabled
-                    else (
-                        "enabled and configured"
-                        if resolved_settings.agent_mode is AgentMode.RAG
-                        else "coordinator trace export is deferred to Stage 16"
-                    )
+                    else "enabled and configured"
                 ),
             ),
         ]
@@ -604,10 +635,7 @@ def create_app(
     )
     def capabilities() -> CapabilityResponse:
         """Advertise the synchronous session and semantic-retrieval path."""
-        tracing_operational = (
-            resolved_settings.langfuse_enabled
-            and resolved_settings.agent_mode is AgentMode.RAG
-        )
+        tracing_operational = resolved_settings.langfuse_enabled
         advertised_actions = (
             tuple(action.value for action in CoordinatorActionKind)
             if resolved_settings.agent_mode is AgentMode.COORDINATOR

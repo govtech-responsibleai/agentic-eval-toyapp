@@ -103,6 +103,7 @@ class AppSettings(BaseSettings):
     )
     langfuse_environment: str = "development"
     langfuse_flush_on_turn: bool = True
+    langfuse_include_report_text: bool = False
     session_max_turns: int = Field(default=10, ge=1, le=100)
     upload_max_bytes: int = Field(default=5 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
     upload_max_pdf_pages: int = Field(default=50, ge=1, le=1_000)

@@ -25,8 +25,8 @@ The main design principles are:
   decisions in coordinator mode;
 - bounded controller behaviour without replacing model-quality failures;
 - immutable, reproducible retrieval inputs and provenance;
-- one Langfuse root observation per RAG user turn when tracing is enabled,
-  correlated by application session ID;
+- one Langfuse root observation per submitted user turn when tracing is
+  enabled, correlated by application session ID;
 - deterministic, network-free offline tests and explicitly selected live tests;
 - bounded session-scoped report extraction without implicit agent execution;
 - controlled metric cases isolated from the normal application package;
@@ -72,6 +72,7 @@ flowchart LR
     Retriever --> Corpus[Synthetic policy corpus]
     Retriever --> Embedder[SentenceTransformer]
     Agent -->|Standalone RAG mode| Recorder[Trace recorder]
+    Coordinator -->|Default coordinator mode| Recorder
     Recorder --> Langfuse[Langfuse]
 
     Harness -. private ground truth .-> Runs[Gitignored run manifests]
@@ -137,7 +138,7 @@ Application paths in this table are relative to
 | RAG agent and controller | Run the bounded structured-action loop | `agent.py`, `prompts/system.md` | [Agent flow](#agent-flow) |
 | Generation providers | Convert model or fixture output into one validated action | `providers.py` | [Provider flow](#provider-flow) |
 | Semantic retrieval | Build and query the immutable FAISS index | `embeddings.py`, `retrieval.py`, `resources/documents.json` | [Retrieval flow](#retrieval-flow) |
-| Observability | Export application turns and child operations to Langfuse | `tracing.py` | [Observability flow](#observability-flow) |
+| Observability | Export application turns and child operations to Langfuse | `tracing.py`, `multi_agent_tracing.py` | [Observability flow](#observability-flow) |
 | Controlled trace generation | Generate realistic control/defect traces with private ground truth | `trace_cases/` | [Controlled-case flow](#controlled-case-flow) |
 | Container deployment | Package the service and pinned embedding model for network-independent startup | `Dockerfile`, `compose.yaml`, `.dockerignore` | [Container flow](#container-flow) |
 | Verification and tooling | Separate deterministic CI from opt-in live integration checks | `tests/`, `Makefile`, `pyproject.toml` | [Verification flow](#verification-flow) |
@@ -287,7 +288,7 @@ printing their values.
 The default top-level agent is the coordinator and the default generation
 provider is the live OpenAI-compatible provider. Standalone RAG mode and the
 deterministic provider must each be selected explicitly. Langfuse is
-independently configured but currently exports only standalone RAG turns.
+independently configured and exports coordinator or standalone RAG turns.
 Report byte, PDF-page, extracted-character,
 per-message attachment, and per-session retention bounds are validated
 settings.
@@ -547,9 +548,8 @@ text, hidden prompts, or private reasoning.
 
 The live adapter reuses the OpenAI-compatible structured-completion transport.
 The deterministic coordinator is an explicit offline fixture. Coordinator mode
-advertises semantic retrieval because its RAG specialist is operational, but
-does not advertise Langfuse tracing until the multi-agent hierarchy is
-connected.
+advertises semantic retrieval because its RAG specialist is operational and
+Langfuse tracing when configured.
 
 [Back to component index](#component-index)
 
@@ -622,9 +622,8 @@ keeps model behaviour observable for evaluation.
 history, preserves the RAG result fields, and derives public RAG execution
 steps from actions that actually completed. Retrieval, provider, repeated
 search, citation, and clarification outcomes remain unchanged. Coordinator
-mode bypasses the RAG agent's standalone trace-root wrapper so Stage 13 cannot
-emit a second or orphaned root; Stage 16 supplies the shared multi-agent trace
-context.
+mode bypasses the RAG agent's standalone trace-root wrapper. The coordinator
+owns the root and RAG work appears below a `delegate-rag` observation.
 
 <a id="agent-flow"></a>
 
@@ -708,11 +707,11 @@ flowchart TD
     Convert --> Agent[Return Search, Clarify, or Answer]
 ```
 
-When normal RAG Langfuse tracing is enabled, the OpenAI-compatible client uses
-the Langfuse OpenAI wrapper so the external model call appears as a generation
-inside the application-owned `select-action` span. Coordinator-mode export is
-deferred with the multi-agent trace hierarchy and is not advertised as an
-operational capability.
+When standalone RAG Langfuse tracing is enabled, the OpenAI-compatible client
+uses the Langfuse OpenAI wrapper so the external model call appears as a
+generation inside the application-owned `select-action` span. Coordinator
+mode instead creates one application-owned generation per model call beneath
+its `agent-turn` root.
 
 [Back to component index](#component-index)
 
@@ -817,19 +816,33 @@ multi-agent API turn. There is no application input-token budget: upload byte,
 page, and extracted-character limits are resource bounds, not model-context
 guarantees. Provider HTTP errors are classified without logging upstream error
 bodies, so a rejected input may not expose its exact context-limit cause.
-These diagnostics do not make coordinator-mode Langfuse tracing operational;
-that remains Stage 16b.
-
-RAG tracing is behind the `TraceRecorder` interface. `NoOpTraceRecorder`
-preserves the agent contract without exporting data. When enabled in RAG mode,
-`LangfuseTraceRecorder` creates one logical root for every user turn and
-flushes after the turn by default. Coordinator mode does not export a partial
-or misleading trace; its parent/child hierarchy is added with multi-agent
-tracing.
+`NoOpTraceRecorder` and `NoOpCoordinatorTraceRecorder` preserve the agent
+contracts without exporting data. Standalone RAG uses `LangfuseTraceRecorder`.
+Coordinator mode uses `LangfuseCoordinatorTraceRecorder` in
+`multi_agent_tracing.py`: one output-bearing `agent-turn` root per submitted
+message, with only the selected specialist nested beneath it. The delegated
+RAG loop reuses its execution code but not its standalone root. Uploading or
+selecting a report without message submission creates no turn root. The SDK
+attempts to flush after each submitted turn by default, but asynchronous
+Langfuse ingestion means the trace may take a few minutes to appear in the
+Langfuse page.
 
 The application session UUID is propagated as the Langfuse `session_id`.
 Therefore multiple user turns produce separate `agent-turn` roots that can be
 retrieved and grouped as one conversation.
+
+The coordinator logs the Langfuse trace and observation IDs when it starts
+`agent-turn` and `inspect-input`, and emits `flush_attempted` when the per-turn
+SDK flush returns. These logs contain correlation IDs only. The Langfuse SDK
+does not expose the OTLP batch result through `flush()`: the exporter may log
+an HTTP error even when that call returns. Neither `flush_attempted` nor a
+successful read-API request proves that every observation was ingested. The
+opt-in live integration test polls Observations API v2 and
+requires the complete scripted observation tree for each submitted turn,
+including parent links and an `inspect-input` span. A trace with a missing
+root or child observation is incomplete and should not be treated as a valid
+METIS evaluation input. The test does not add a read-after-write check to
+normal user requests.
 
 <a id="observability-flow"></a>
 
@@ -837,37 +850,64 @@ retrieved and grouped as one conversation.
 
 ```mermaid
 flowchart TD
-    Turn[RagAgent.run] --> Root[agent-turn: AGENT]
-    Root --> Select[select-action: SPAN]
-    Select --> Generation[model-action: GENERATION for live provider]
-    Root --> Search[search_knowledge_base: TOOL when executed]
-    Root --> Clarify[request_user_input: TOOL when returned]
-    Root --> Validate[validate_answer: EVALUATOR for answers]
-    Root --> Complete[Root output and result metadata]
-    Complete --> Flush[Flush to Langfuse]
+    Submit[Submit message] --> Mode{Agent mode}
+    Mode -->|Coordinator| Root[agent-turn: AGENT]
+    Root --> Inspect[inspect-input: SPAN]
+    Root --> Decision[coordinator-action: GENERATION]
+    Decision -.->|Direct answer or clarify| Complete[Root result]
+    Root -->|Policy route| Rag[delegate-rag: AGENT]
+    Rag --> RagModel[model-action: GENERATION per call]
+    Rag --> Search[search_knowledge_base: TOOL if called]
+    Rag --> Validate[validate_answer: EVALUATOR]
+    Root -->|Report route| Analysis[delegate-analysis: AGENT]
+    Analysis --> InspectReport[inspect-content: SPAN]
+    Analysis --> AnalysisModel[analyse-report: GENERATION]
+    Analysis --> ValidateReport[validate-report-references: EVALUATOR]
+    Root --> Return[return-response: SPAN]
+    Rag -.-> Return
+    Analysis -.-> Return
+    Return --> Complete
+    Mode -->|Standalone RAG| Legacy[Existing standalone RAG turn tree]
+    Legacy --> Flush[Flush to Langfuse]
+    Complete --> Flush
     Flush --> Session[Group roots by application session UUID]
 ```
 
-Observation contents are:
+Solid edges beneath `agent-turn` represent observation parentage. Dashed
+edges represent control flow; a coordinator decision and its specialist are
+siblings in the trace tree, not parent and child.
+
+Coordinator observation contents are:
 
 | Observation | Input | Output and metadata |
 |---|---|---|
-| `agent-turn` | Public user message and history count | Public final response, status, termination reason, model/search counts, citations, candidate IDs, controller events, and validation findings |
-| `select-action` | Available actions, call/search budget, retrieval state, candidate IDs, and history count | Validated action or safe error category |
-| `model-action` | System prompt and serialized public model context | Structured provider response, model parameters, latency, and provider usage when available |
-| `search_knowledge_base` | Query and `top_k` | Retrieved chunks and scores, result count, or safe retrieval error |
-| `request_user_input` | Clarification question | Requested status |
-| `validate_answer` | Declared citations and candidate IDs | Deterministic citation findings and count |
+| `agent-turn` | Current public user message and history count | Public final response, status, termination reason, action steps, model/search counts, validation findings |
+| `inspect-input` | Number of authorized attachments | File IDs, names, types, byte and extracted-character counts; no report text |
+| `coordinator-action` | Public message/history, available actions, attachment metadata; extracted text only if enabled | Effective structured routing/direct action or safe failure category, model ID and provider-reported token usage when available |
+| `delegate-rag` / `delegate-analysis` | Focused task; analysis also includes selected attachment metadata | Specialist result, status, and relevant counts |
+| `model-action` / `analyse-report` | RAG public context and retrieved chunks / report task, locators, and optional extracted source text | Effective structured action or safe failure category, model ID and provider-reported token usage when available |
+| `search_knowledge_base` | Query and `top_k` | Retrieved policy chunks and scores, or safe retrieval error |
+| `validate_answer` / `validate-report-references` | Declared citations or reference count | Deterministic consistency findings |
+| `return-response` | Specialist status | Unchanged public specialist response |
 
-Root provenance records the application version, generation model and
-revision, embedding model and revision, FAISS index type, corpus version and
-checksum, and system-prompt checksum. It does not include credentials, private
-chain-of-thought, expected labels, or controlled-case names.
+Root provenance records the application version, generation/embedding model
+and revision, corpus version and checksum, and prompt checksums. The complete
+extracted report text is excluded from trace inputs by default; the
+`report_text_exported` flag
+states whether `TOYAPP_LANGFUSE_INCLUDE_REPORT_TEXT=true` enabled it for
+synthetic grounding evaluations. Public answers may still quote report text.
+Original upload bytes, credentials, hidden
+system prompts, private reasoning, expected labels, and controlled-case names
+are not exported. The standalone RAG trace keeps its existing `select-action`
+span and Langfuse OpenAI generation wrapper; coordinator mode records each
+model invocation as one application-owned generation.
 
-The Langfuse live test proves export and retrieval through Langfuse v4
-Observations API v2 using the application session ID. Direct retrieval by the
-current METIS extractor remains deferred because that extractor still uses the
-legacy Langfuse trace-list endpoint.
+The opt-in Langfuse live tests exercise standalone and coordinator export and
+retrieval through Langfuse v4 Observations API v2 using the application session
+ID. The Makefile runs these cases in separate Python processes to avoid shared
+OpenTelemetry provider state between test clients. Direct retrieval by the
+current METIS extractor remains deferred because
+that extractor still uses the legacy Langfuse trace-list endpoint.
 
 [Back to component index](#component-index)
 
@@ -1092,7 +1132,7 @@ excluded from `make ci`.
 | Synthetic policy corpus | Version-controlled JSON | Immutable across a run | Retrieved chunks only when searched |
 | FAISS index and corpus embeddings | Process memory | Rebuilt at application startup | Provenance only; returned chunks appear in search observations |
 | Conversation history | Process-local session store | Until eviction or process exit | Current user input plus history count; model generation contains serialized public context |
-| Extracted report text and metadata | Process-local report store under owning session | Until deletion or process exit | No; coordinator trace export is not connected yet |
+| Extracted report text and metadata | Process-local report store under owning session | Until deletion or process exit | Metadata/locators by default; complete extracted text only with explicit opt-in |
 | Original uploaded report bytes | Request-scoped temporary upload | Discarded after extraction | No |
 | Model credentials | `.env` or process environment | Process configuration | No |
 | Langfuse credentials | `.env` or process environment | Process configuration | No |
@@ -1115,8 +1155,6 @@ excluded from `make ci`.
   focused policy task from authorized extracted content, but the RAG specialist
   searches only the immutable policy corpus. Report analysis uses selected
   uploaded text and has no OCR or cross-report retrieval.
-- Coordinator mode does not export Langfuse traces until the multi-agent trace
-  hierarchy is implemented.
 - The first source-based local startup can download the embedding model when it
   is not already cached; the container downloads it only during image build.
 - Langfuse is an external dependency and backend indexing can be eventually
