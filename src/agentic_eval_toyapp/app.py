@@ -93,6 +93,10 @@ PACKAGE_DIRECTORY = Path(__file__).parent
 STATIC_DIRECTORY = PACKAGE_DIRECTORY / "static"
 TEMPLATE_DIRECTORY = PACKAGE_DIRECTORY / "templates"
 TEMPLATES = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
+BROWSER_ASSET_VERSION = hashlib.sha256(
+    (STATIC_DIRECTORY / "app.js").read_bytes()
+    + (STATIC_DIRECTORY / "style.css").read_bytes()
+).hexdigest()[:12]
 LOGGER = logging.getLogger("uvicorn.error")
 
 
@@ -505,14 +509,17 @@ def create_app(
         _handle_report_attachment_limit,
     )
 
-    @application.get("/", response_class=HTMLResponse, include_in_schema=False)
-    def index(request: Request) -> Response:
-        """Render the browser client after startup dependencies are ready."""
+    def render_browser_client(request: Request) -> Response:
+        """Render the shared browser shell with its response security headers."""
         return TEMPLATES.TemplateResponse(
             request=request,
             name="index.html",
-            context={"app_name": resolved_settings.app_name},
+            context={
+                "app_name": resolved_settings.app_name,
+                "browser_asset_version": BROWSER_ASSET_VERSION,
+            },
             headers={
+                "Cache-Control": "no-store",
                 "Content-Security-Policy": (
                     "default-src 'self'; script-src 'self'; style-src 'self'; "
                     "connect-src 'self'; img-src 'self'; base-uri 'none'; "
@@ -521,6 +528,21 @@ def create_app(
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    @application.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def index(request: Request) -> Response:
+        """Render the browser client after startup dependencies are ready."""
+        return render_browser_client(request)
+
+    @application.get(
+        "/session/{session_id:uuid}",
+        response_class=HTMLResponse,
+        include_in_schema=False,
+    )
+    def session_index(request: Request, session_id: UUID) -> Response:
+        """Render the browser client for a UUID selected by the URL path."""
+        del session_id
+        return render_browser_client(request)
 
     @application.get("/health", response_model=HealthResponse, tags=["service"])
     def health() -> HealthResponse:

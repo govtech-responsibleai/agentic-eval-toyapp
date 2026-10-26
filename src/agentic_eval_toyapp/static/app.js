@@ -47,6 +47,14 @@ let fileOperationInProgress = false;
 let selectedFileId = null;
 let sessionFiles = [];
 
+class ApiRequestError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
 function preferredScrollBehavior() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches
     ? "auto"
@@ -101,7 +109,10 @@ async function apiRequest(path, options = {}) {
     throw new Error(`The server returned an unreadable response (${response.status}).`);
   }
   if (!response.ok) {
-    throw new Error(payload.message || `Request failed (${response.status}).`);
+    throw new ApiRequestError(
+      payload.message || `Request failed (${response.status}).`,
+      response.status,
+    );
   }
   return payload;
 }
@@ -532,25 +543,25 @@ function resetDetails() {
   validationFindings.replaceChildren();
 }
 
-function savedSessionId() {
-  try {
-    return window.sessionStorage.getItem("toyapp-session-id");
-  } catch (_error) {
-    return null;
-  }
+function sessionIdFromPath() {
+  const match = window.location.pathname.match(
+    /^\/session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i,
+  );
+  return match === null ? null : match[1].toLowerCase();
 }
 
-function rememberSession(id) {
-  try {
-    window.sessionStorage.setItem("toyapp-session-id", id);
-  } catch (_error) {
-    // The active tab can still use its in-memory session.
+function updateSessionUrl(id, replace = false) {
+  const path = `/session/${encodeURIComponent(id)}`;
+  if (window.location.pathname === path) {
+    return;
   }
+  const method = replace ? "replaceState" : "pushState";
+  window.history[method]({ sessionId: id }, "", path);
 }
 
-async function createSession(restore = false) {
+async function createSession(resumeId = null, replaceUrl = false) {
   setBusy(true);
-  setStatus("Creating a new session…");
+  setStatus(resumeId === null ? "Creating a new session…" : "Loading session…");
   sessionId = null;
   selectedFileId = null;
   sessionFiles = [];
@@ -564,19 +575,22 @@ async function createSession(restore = false) {
   resetSessionScroll();
   try {
     let session = null;
-    const previousId = restore ? savedSessionId() : null;
-    if (previousId) {
+    let fallbackMessage = "";
+    if (resumeId !== null) {
       try {
-        session = await apiRequest(`/sessions/${encodeURIComponent(previousId)}`);
-      } catch (_error) {
-        // A restarted server no longer retains the previous in-memory session.
+        session = await apiRequest(`/sessions/${encodeURIComponent(resumeId)}`);
+      } catch (error) {
+        if (!(error instanceof ApiRequestError) || error.status !== 404) {
+          throw error;
+        }
+        fallbackMessage = `Session ${resumeId} is no longer available. Started a new session instead.`;
       }
     }
     if (session === null) {
       session = await apiRequest("/sessions", { method: "POST" });
     }
     sessionId = session.session_id;
-    rememberSession(sessionId);
+    updateSessionUrl(sessionId, replaceUrl || fallbackMessage !== "");
     sessionIdElement.textContent = sessionId;
     for (const message of session.messages) {
       appendMessage(message.role, message.content, "", "", false);
@@ -592,7 +606,7 @@ async function createSession(restore = false) {
       setStatus(`Session ready, but file controls are unavailable: ${error.message}`, true);
     }
     if (!appStatus.classList.contains("app-status-error")) {
-      setStatus("");
+      setStatus(fallbackMessage, fallbackMessage !== "");
     }
   } catch (error) {
     setStatus(error.message, true);
@@ -640,7 +654,7 @@ async function submitMessage(event) {
 }
 
 form.addEventListener("submit", submitMessage);
-newSessionButton.addEventListener("click", () => createSession(false));
+newSessionButton.addEventListener("click", () => createSession());
 uploadButton.addEventListener("click", () => reportUpload.click());
 reportUpload.addEventListener("change", uploadFile);
 messageInput.addEventListener("input", updateControls);
@@ -655,4 +669,5 @@ if ("scrollRestoration" in window.history) {
   window.history.scrollRestoration = "manual";
 }
 window.addEventListener("pageshow", resetSessionScroll);
-createSession(true);
+window.addEventListener("popstate", () => window.location.reload());
+createSession(sessionIdFromPath(), window.location.pathname === "/");

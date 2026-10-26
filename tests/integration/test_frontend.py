@@ -6,6 +6,7 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import pytest
 from httpx2 import Client, Response
@@ -86,6 +87,37 @@ def test_root_page_loads_with_accessible_controls() -> None:
     assert '<div class="details-scroll">' in response.text
 
 
+def test_uuid_session_path_loads_the_same_browser_shell() -> None:
+    """A shareable session URL should bootstrap the existing browser client."""
+    client = _build_client()
+    root_response: Response = client.get("/")
+    session_response: Response = client.get(f"/session/{uuid4()}")
+
+    assert session_response.status_code == 200
+    assert session_response.text == root_response.text
+    assert (
+        session_response.headers["content-security-policy"]
+        == root_response.headers["content-security-policy"]
+    )
+    assert session_response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/not-a-session-id",
+        "/session/not-a-session-id",
+        "/00000000-0000-4000-8000-000000000000",
+    ],
+)
+def test_unknown_browser_path_does_not_load_the_shell(path: str) -> None:
+    """The named session route must not mask unknown application paths."""
+    response: Response = _build_client().get(path)
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+
+
 def test_compact_file_panel_and_composer_upload_controls() -> None:
     """Upload stays separate from sending, with discoverable file instructions."""
     html: str = _build_client().get("/").text
@@ -129,7 +161,20 @@ def test_root_page_escapes_configuration_and_sets_browser_guards() -> None:
     assert "default-src 'self'" in response.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-store"
     assert "https://" not in response.text
+
+
+def test_browser_assets_use_one_content_derived_cache_version() -> None:
+    """The HTML shell must not reuse stale application JavaScript or CSS."""
+    html: str = _build_client().get("/").text
+
+    stylesheet_version = html.split("/static/style.css?v=", 1)[1].split('"', 1)[0]
+    javascript_version = html.split("/static/app.js?v=", 1)[1].split('"', 1)[0]
+
+    assert stylesheet_version == javascript_version
+    assert len(javascript_version) == 12
+    assert all(character in "0123456789abcdef" for character in javascript_version)
 
 
 def test_javascript_uses_the_versioned_api_and_safe_dom_rendering() -> None:
@@ -139,6 +184,24 @@ def test_javascript_uses_the_versioned_api_and_safe_dom_rendering() -> None:
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
     assert 'apiRequest("/sessions"' in response.text
+    assert "class ApiRequestError extends Error" in response.text
+    assert "this.status = status" in response.text
+    assert "function sessionIdFromPath()" in response.text
+    assert "window.location.pathname.match(" in response.text
+    assert "const path = `/session/${encodeURIComponent(id)}`" in response.text
+    assert "function updateSessionUrl(id, replace = false)" in response.text
+    assert 'const method = replace ? "replaceState" : "pushState"' in response.text
+    assert "window.history[method]({ sessionId: id }" in response.text
+    assert "apiRequest(`/sessions/${encodeURIComponent(resumeId)}`)" in response.text
+    assert "error.status !== 404" in response.text
+    assert "is no longer available. Started a new session instead." in response.text
+    assert (
+        'createSession(sessionIdFromPath(), window.location.pathname === "/")'
+        in response.text
+    )
+    assert 'window.addEventListener("popstate", () => window.location.reload())' in (
+        response.text
+    )
     assert "/sessions/${sessionId}/messages" in response.text
     assert "textContent" in response.text
     assert "replaceChildren" in response.text
