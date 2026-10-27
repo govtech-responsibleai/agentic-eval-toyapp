@@ -27,6 +27,10 @@ from agentic_eval_toyapp.models import (
 from agentic_eval_toyapp.tracing import LangfuseTraceRecorder, NoOpTraceRecorder
 
 
+def _empty_headers() -> dict[str, str]:
+    return {}
+
+
 def _empty_updates() -> list[dict[str, object]]:
     return []
 
@@ -309,3 +313,93 @@ def test_clarification_uses_the_metis_recognised_tool_name(
     assert clarification.observation_type == "tool"
     assert clarification.input == {"question": "Which type of leave?"}
     assert fake_client.flushes == 0
+
+
+@dataclass
+class _FakeHTTPResult:
+    status_code: int | None = None
+    reason: str | None = None
+    error: Exception | None = None
+    body: bytes = b""
+    response_headers: dict[str, str] = field(default_factory=_empty_headers)
+
+    def content(self) -> bytes:
+        return self.body
+
+    def headers(self) -> dict[str, str]:
+        return self.response_headers
+
+
+class _FakeTransport:
+    def __init__(self, result: _FakeHTTPResult) -> None:
+        self._result = result
+
+    def request(self, method: str, url: str, **_kwargs: object) -> _FakeHTTPResult:
+        del method, url
+        return self._result
+
+
+def _logging_transport(
+    result: _FakeHTTPResult,
+) -> tracing_module._ResponseLoggingTransport:  # pyright: ignore[reportPrivateUsage]
+    return tracing_module._ResponseLoggingTransport(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, _FakeTransport(result))
+    )
+
+
+def test_export_debug_logs_status_headers_and_body_of_rejected_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    result = _FakeHTTPResult(
+        status_code=500,
+        reason="Internal Server Error",
+        body=b'{"message":"clickhouse unavailable"}',
+        response_headers={"x-request-id": "abc123", "Set-Cookie": "secret=1"},
+    )
+
+    with caplog.at_level(logging.ERROR, logger="agentic_eval_toyapp.langfuse_export"):
+        returned = _logging_transport(result).request(
+            "POST", "https://langfuse.example/api/public/otel/v1/traces", data=b"xyz"
+        )
+
+    assert returned is result
+    assert "status=500" in caplog.text
+    assert "request_bytes=3" in caplog.text
+    assert "x-request-id" in caplog.text
+    assert "clickhouse unavailable" in caplog.text
+    assert "secret=1" not in caplog.text
+
+
+def test_export_debug_truncates_oversized_response_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    result = _FakeHTTPResult(status_code=502, reason="Bad Gateway", body=b"x" * 10_000)
+
+    with caplog.at_level(logging.ERROR, logger="agentic_eval_toyapp.langfuse_export"):
+        _logging_transport(result).request("POST", "https://langfuse.example/")
+
+    assert "x" * 2_000 in caplog.text
+    assert "x" * 2_001 not in caplog.text
+
+
+def test_export_debug_logs_transport_errors_without_a_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    result = _FakeHTTPResult(error=TimeoutError("read timed out"))
+
+    with caplog.at_level(logging.ERROR, logger="agentic_eval_toyapp.langfuse_export"):
+        _logging_transport(result).request("POST", "https://langfuse.example/")
+
+    assert "langfuse_export_failed" in caplog.text
+    assert "exception_type=TimeoutError" in caplog.text
+
+
+def test_export_debug_is_silent_for_successful_responses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    result = _FakeHTTPResult(status_code=200, reason="OK")
+
+    with caplog.at_level(logging.DEBUG, logger="agentic_eval_toyapp.langfuse_export"):
+        _logging_transport(result).request("POST", "https://langfuse.example/")
+
+    assert caplog.text == ""

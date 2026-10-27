@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import base64
+import importlib.metadata
+import logging
 from collections.abc import Generator, Mapping
 from contextlib import AbstractContextManager, contextmanager
+from time import perf_counter
 from typing import Any, Protocol
 
 from langfuse import Langfuse, propagate_attributes
+from opentelemetry.exporter.http.transport._base import (
+    BaseHTTPResult,
+    BaseHTTPTransport,
+)
+from opentelemetry.exporter.http.transport._urllib3 import Urllib3HTTPTransport
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace.export import SpanExporter
 
 from agentic_eval_toyapp.diagnostics import log_failure
 from agentic_eval_toyapp.models import (
@@ -16,6 +27,120 @@ from agentic_eval_toyapp.models import (
     RetrievedChunk,
     ValidationFinding,
 )
+
+# Loggers that explain a failed export: the Langfuse SDK, the OpenTelemetry
+# exporter that reports "Failed to export spans batch", and urllib3, which logs
+# each request line and response status/length.
+_EXPORT_DEBUG_LOGGERS = (
+    "agentic_eval_toyapp.langfuse_export",
+    "langfuse",
+    "opentelemetry.exporter",
+    "opentelemetry.sdk.trace.export",
+    "urllib3.connectionpool",
+)
+_EXPORT_DEBUG_HANDLER_NAME = "toyapp-langfuse-export-debug"
+
+
+def enable_langfuse_export_debug_logging() -> None:
+    """Route trace-export diagnostics to stderr at DEBUG, once per process."""
+    handler = logging.StreamHandler()
+    handler.set_name(_EXPORT_DEBUG_HANDLER_NAME)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
+    )
+    for name in _EXPORT_DEBUG_LOGGERS:
+        logger = logging.getLogger(name)
+        if any(h.get_name() == _EXPORT_DEBUG_HANDLER_NAME for h in logger.handlers):
+            continue
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+
+
+_RESPONSE_LOGGER = logging.getLogger("agentic_eval_toyapp.langfuse_export")
+_MAX_LOGGED_BODY_CHARS = 2_000
+_REDACTED_RESPONSE_HEADERS = frozenset({"set-cookie"})
+
+
+class _ResponseLoggingTransport(BaseHTTPTransport):
+    """Delegate to the stock transport, logging every rejected response.
+
+    The OTLP exporter reduces a rejected export to "code: 500, reason: ...".
+    This keeps the response headers and body, which usually carry the
+    reverse-proxy or Langfuse error detail a server admin needs.
+    """
+
+    def __init__(self, inner: BaseHTTPTransport) -> None:
+        self._inner = inner
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+        data: bytes | None = None,
+    ) -> BaseHTTPResult:
+        started = perf_counter()
+        result = self._inner.request(
+            method, url, headers=headers, timeout=timeout, data=data
+        )
+        elapsed_ms = round((perf_counter() - started) * 1_000)
+        if result.error is not None:
+            _RESPONSE_LOGGER.error(
+                "langfuse_export_failed method=%s url=%s request_bytes=%s "
+                "elapsed_ms=%s exception_type=%s exception=%s",
+                method,
+                url,
+                len(data) if data is not None else 0,
+                elapsed_ms,
+                type(result.error).__name__,
+                result.error,
+            )
+        elif result.status_code is not None and result.status_code >= 400:
+            _RESPONSE_LOGGER.error(
+                "langfuse_export_rejected status=%s reason=%s method=%s url=%s "
+                "request_bytes=%s elapsed_ms=%s response_headers=%r "
+                "response_body=%r",
+                result.status_code,
+                result.reason,
+                method,
+                url,
+                len(data) if data is not None else 0,
+                elapsed_ms,
+                {
+                    name: value
+                    for name, value in result.headers().items()
+                    if name.lower() not in _REDACTED_RESPONSE_HEADERS
+                },
+                result.content()[:_MAX_LOGGED_BODY_CHARS].decode(
+                    "utf-8", errors="replace"
+                ),
+            )
+        return result
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def is_connection_error(self, exception: Exception | None) -> bool:
+        return self._inner.is_connection_error(exception)
+
+
+def _build_debug_span_exporter(
+    *, public_key: str, secret_key: str, base_url: str
+) -> SpanExporter:
+    """Mirror the SDK's default OTLP exporter, adding failed-response logging."""
+    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode("ascii")
+    return OTLPSpanExporter(
+        endpoint=f"{base_url}/api/public/otel/v1/traces",
+        headers={
+            "Authorization": f"Basic {token}",
+            "x-langfuse-sdk-name": "python",
+            "x-langfuse-sdk-version": importlib.metadata.version("langfuse"),
+            "x-langfuse-public-key": public_key,
+        },
+        _transport=_ResponseLoggingTransport(Urllib3HTTPTransport()),
+    )
 
 
 class ModelActionObservation(Protocol):
@@ -294,14 +419,23 @@ class LangfuseTraceRecorder:
         release: str,
         base_metadata: Mapping[str, str],
         flush_on_turn: bool = True,
+        debug: bool = False,
         client: Langfuse | None = None,
     ) -> None:
+        if debug:
+            enable_langfuse_export_debug_logging()
         self._client = client or Langfuse(
             public_key=public_key,
             secret_key=secret_key,
             base_url=base_url,
             environment=environment,
             release=release,
+            debug=debug,
+            span_exporter=_build_debug_span_exporter(
+                public_key=public_key, secret_key=secret_key, base_url=base_url
+            )
+            if debug
+            else None,
         )
         self._release = release
         self._base_metadata = dict(base_metadata)

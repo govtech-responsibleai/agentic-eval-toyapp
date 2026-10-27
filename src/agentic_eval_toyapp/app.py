@@ -213,6 +213,7 @@ def _build_trace_recorder(
         environment=settings.langfuse_environment,
         release=__version__,
         flush_on_turn=settings.langfuse_flush_on_turn,
+        debug=settings.langfuse_debug,
         base_metadata={
             "application": "agentic-eval-toyapp",
             "app_version": __version__,
@@ -328,6 +329,7 @@ def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
             rag_model_id=rag_agent.model_id,
             include_report_text=settings.langfuse_include_report_text,
             flush_on_turn=settings.langfuse_flush_on_turn,
+            debug=settings.langfuse_debug,
             base_metadata={
                 "application": "agentic-eval-toyapp",
                 "app_version": __version__,

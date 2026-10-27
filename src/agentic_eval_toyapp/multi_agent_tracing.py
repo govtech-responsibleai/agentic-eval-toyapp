@@ -495,6 +495,7 @@ class LangfuseCoordinatorTraceRecorder:
         base_metadata: Mapping[str, str],
         rag_model_id: str,
         flush_on_turn: bool = True,
+        debug: bool = False,
     ) -> None:
         self._recorder = LangfuseTraceRecorder(
             public_key=public_key,
@@ -504,6 +505,7 @@ class LangfuseCoordinatorTraceRecorder:
             release=release,
             base_metadata=base_metadata,
             flush_on_turn=flush_on_turn,
+            debug=debug,
             client=client,
         )
         self._include_report_text = include_report_text
