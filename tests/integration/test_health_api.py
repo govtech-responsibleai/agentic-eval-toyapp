@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from httpx2 import Client, Response
@@ -17,10 +18,24 @@ from agentic_eval_toyapp.config import (
     AppSettings,
     GenerationProviderKind,
     LogLevel,
+    SessionStoreBackend,
 )
-from agentic_eval_toyapp.models import AgentTurnResult, ConversationMessage
-from agentic_eval_toyapp.reports import StoredReport
-from agentic_eval_toyapp.sessions import AgentRunner
+from agentic_eval_toyapp.models import (
+    AgentTurnResult,
+    ConversationMessage,
+    ReportUploadResponse,
+    SessionResponse,
+)
+from agentic_eval_toyapp.reports import (
+    InMemoryReportStore,
+    ReportStoreUnavailableError,
+    StoredReport,
+)
+from agentic_eval_toyapp.sessions import (
+    AgentRunner,
+    InMemorySessionStore,
+    SessionStoreUnavailableError,
+)
 
 
 class _IntrospectionAgent:
@@ -34,6 +49,23 @@ class _IntrospectionAgent:
     ) -> AgentTurnResult:
         del session_id, reports
         raise AssertionError("introspection endpoints must not execute the agent")
+
+
+class _UnavailableSessionStore(InMemorySessionStore):
+    def check(self) -> None:
+        raise SessionStoreUnavailableError("private Redis connection details")
+
+    def create(self) -> SessionResponse:
+        raise SessionStoreUnavailableError("private Redis connection details")
+
+
+class _UnavailableReportStore(InMemoryReportStore):
+    def check(self) -> None:
+        raise ReportStoreUnavailableError("private Redis connection details")
+
+    def list_for_session(self, session_id: UUID) -> tuple[ReportUploadResponse, ...]:
+        del session_id
+        raise ReportStoreUnavailableError("private Redis connection details")
 
 
 def build_client() -> Client:
@@ -82,7 +114,7 @@ def test_ready_reports_session_and_agent_dependencies() -> None:
             {
                 "name": "report_store",
                 "status": "pass",
-                "detail": "retains up to 10 processed reports per session",
+                "detail": "retains up to 10 complete reports per session",
             },
             {
                 "name": "langfuse_tracing",
@@ -96,6 +128,110 @@ def test_ready_reports_session_and_agent_dependencies() -> None:
             },
         ],
     }
+
+
+def test_unavailable_persistent_store_fails_readiness_and_session_requests() -> None:
+    """Redis outages should be public-safe and make the service not ready."""
+    application = create_app(
+        AppSettings(app_name="Persistent Test Target"),
+        session_store=_UnavailableSessionStore(),
+        agent=_IntrospectionAgent(),
+    )
+    client = cast(Client, TestClient(application))
+
+    readiness = client.get("/ready")
+    assert readiness.status_code == 200
+    assert readiness.json()["status"] == "not_ready"
+    assert readiness.json()["checks"][1] == {
+        "name": "session_store",
+        "status": "fail",
+        "detail": "configured session store is unavailable",
+    }
+
+    response = client.post("/api/v1/sessions")
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": "session_store_unavailable",
+        "message": "The conversation session store is temporarily unavailable.",
+    }
+    assert "private" not in response.text
+
+
+def test_unavailable_report_store_fails_readiness_and_report_requests() -> None:
+    """Report-store outages should be public-safe and make the service not ready."""
+    session_store = InMemorySessionStore()
+    session = session_store.create()
+    application = create_app(
+        AppSettings(app_name="Persistent Test Target"),
+        session_store=session_store,
+        report_store=_UnavailableReportStore(max_reports_per_session=10),
+        agent=_IntrospectionAgent(),
+    )
+    client = cast(Client, TestClient(application))
+
+    readiness = client.get("/ready")
+    assert readiness.status_code == 200
+    assert readiness.json()["status"] == "not_ready"
+    assert readiness.json()["checks"][2] == {
+        "name": "report_store",
+        "status": "fail",
+        "detail": "configured report store is unavailable",
+    }
+
+    response = client.get(f"/api/v1/sessions/{session.session_id}/files")
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": "report_store_unavailable",
+        "message": "The report store is temporarily unavailable.",
+    }
+    assert "private" not in response.text
+
+
+def test_redis_backend_configuration_builds_the_persistent_stores() -> None:
+    """Application wiring should pass validated Redis settings to both stores."""
+    settings = AppSettings.model_validate(
+        {
+            "session_store_backend": SessionStoreBackend.REDIS,
+            "redis_url": "rediss://user:private@redis.example:6380/0",
+            "redis_key_prefix": "test-prefix",
+            "session_max_turns": 12,
+        }
+    )
+    session_store = InMemorySessionStore(max_turns=12)
+    report_store = InMemoryReportStore(max_reports_per_session=10)
+
+    with (
+        patch(
+            "agentic_eval_toyapp.app.RedisSessionStore.from_url",
+            return_value=session_store,
+        ) as session_from_url,
+        patch(
+            "agentic_eval_toyapp.app.RedisReportStore.from_url",
+            return_value=report_store,
+        ) as report_from_url,
+    ):
+        client = cast(
+            Client,
+            TestClient(create_app(settings, agent=_IntrospectionAgent())),
+        )
+        assert client.get("/ready").json()["status"] == "ready"
+
+    session_from_url.assert_called_once_with(
+        "rediss://user:private@redis.example:6380/0",
+        max_turns=12,
+        key_prefix="test-prefix",
+        socket_timeout_seconds=5.0,
+        lock_timeout_seconds=1_800.0,
+        lock_blocking_timeout_seconds=10.0,
+    )
+    report_from_url.assert_called_once_with(
+        "rediss://user:private@redis.example:6380/0",
+        max_reports_per_session=10,
+        key_prefix="test-prefix",
+        socket_timeout_seconds=5.0,
+        lock_timeout_seconds=1_800.0,
+        lock_blocking_timeout_seconds=10.0,
+    )
 
 
 def test_startup_initialises_the_agent_factory_exactly_once() -> None:

@@ -44,14 +44,20 @@ def test_docker_context_excludes_secrets_tests_and_private_runs() -> None:
     assert "design.md" in entries
 
 
-def test_compose_keeps_credentials_at_runtime_and_model_local() -> None:
-    """Compose must inject `.env` at runtime rather than adding it to the image."""
+def test_compose_keeps_credentials_at_runtime_and_persists_sessions() -> None:
+    """Compose should keep secrets at runtime and persist sessions in Redis."""
     compose = (REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8")
 
     assert "env_file:" in compose
     assert "- .env" in compose
     assert "TOYAPP_LANGFUSE_ENABLED: ${TOYAPP_LANGFUSE_ENABLED:-false}" in compose
     assert 'TOYAPP_EMBEDDING_LOCAL_FILES_ONLY: "true"' in compose
+    assert "image: redis:8.2-alpine" in compose
+    assert 'command: ["redis-server", "--appendonly", "yes"' in compose
+    assert "TOYAPP_SESSION_STORE_BACKEND: redis" in compose
+    assert "TOYAPP_REDIS_URL: redis://redis:6379/0" in compose
+    assert "condition: service_healthy" in compose
+    assert "redis-data:/data" in compose
     assert "no-new-privileges:true" in compose
 
 
