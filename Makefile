@@ -20,7 +20,7 @@ help:
 	@printf "  make docker-up     Build and start the Compose service\n"
 	@printf "  make docker-down   Stop and remove the Compose service\n"
 	@printf "  make docker-logs   Follow Compose service logs\n"
-	@printf "  make docker-smoke  Build and exercise one deterministic container turn\n"
+	@printf "  make docker-smoke  Build and verify RAG, coordinator, browser assets, and restart\n"
 	@printf "  make lock-check    Check that the uv lockfile is current\n"
 	@printf "  make lint          Run Ruff lint checks\n"
 	@printf "  make lint-fix      Apply safe Ruff lint fixes\n"
