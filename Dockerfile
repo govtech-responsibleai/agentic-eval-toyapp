@@ -10,7 +10,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 
-FROM ghcr.io/astral-sh/uv:0.12.7 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 
 
 FROM python-base AS builder
