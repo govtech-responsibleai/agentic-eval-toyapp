@@ -561,7 +561,7 @@ agentic-eval-toyapp/
 │           └── index.html                    # Accessible server-rendered chat page
 └── tests/
     ├── fixtures/
-    │   └── stage14_report.md                 # Synthetic longer report for manual analysis verification
+    │   └── test_report.md                    # Synthetic report for analysis verification
     ├── integration/
     │   ├── test_agent_retrieval.py           # Offline agent-to-FAISS composition test
     │   ├── test_api.py                       # Session/message API contract and failure tests
