@@ -73,7 +73,7 @@ async def test_turns_on_distinct_sessions_overlap_in_time() -> None:
     turn_count = 8
     store = InMemorySessionStore()
     agent = _GatedAgent()
-    sessions = [store.create() for _ in range(turn_count)]
+    sessions = [await store.create() for _ in range(turn_count)]
     tasks = [
         asyncio.create_task(
             store.run_turn(session.session_id, f"message-{index}", agent=agent)
@@ -89,7 +89,8 @@ async def test_turns_on_distinct_sessions_overlap_in_time() -> None:
     assert [result.message for result in results] == [
         f"Clarify: message-{index}" for index in range(turn_count)
     ]
-    assert all(store.get(s.session_id).retained_turns == 1 for s in sessions)
+    snapshots = [await store.get(s.session_id) for s in sessions]
+    assert all(snapshot.retained_turns == 1 for snapshot in snapshots)
 
 
 @pytest.mark.anyio
@@ -97,7 +98,7 @@ async def test_turns_on_one_session_run_strictly_in_order() -> None:
     """A waiting same-session turn must not enter the agent or see stale history."""
     store = InMemorySessionStore()
     agent = _GatedAgent()
-    session = store.create()
+    session = await store.create()
     first = asyncio.create_task(
         store.run_turn(session.session_id, "first", agent=agent)
     )
@@ -122,7 +123,7 @@ async def test_turns_on_one_session_run_strictly_in_order() -> None:
         "exit:second",
     ]
     assert agent.histories == {"first": 0, "second": 2}
-    assert [m.content for m in store.get(session.session_id).messages] == [
+    assert [m.content for m in (await store.get(session.session_id)).messages] == [
         "first",
         "Clarify: first",
         "second",
@@ -135,17 +136,17 @@ async def test_get_does_not_wait_for_an_in_flight_turn() -> None:
     """Reading a session mid-turn returns the committed history immediately."""
     store = InMemorySessionStore()
     agent = _GatedAgent()
-    session = store.create()
+    session = await store.create()
     turn = asyncio.create_task(store.run_turn(session.session_id, "held", agent=agent))
     await agent.wait_for_in_flight(1)
 
-    snapshot = store.get(session.session_id)
+    snapshot = await store.get(session.session_id)
 
     assert snapshot.messages == ()
     assert snapshot.retained_turns == 0
     agent.gate.set()
     await asyncio.wait_for(turn, _TIMEOUT_SECONDS)
-    assert store.get(session.session_id).retained_turns == 1
+    assert (await store.get(session.session_id)).retained_turns == 1
 
 
 @pytest.mark.anyio
@@ -153,7 +154,7 @@ async def test_cancelled_turn_releases_the_session_lock_without_appending() -> N
     """Cancelling an in-flight turn must not wedge or corrupt its session."""
     store = InMemorySessionStore()
     agent = _GatedAgent()
-    session = store.create()
+    session = await store.create()
     turn = asyncio.create_task(
         store.run_turn(session.session_id, "cancelled", agent=agent)
     )
@@ -163,9 +164,9 @@ async def test_cancelled_turn_releases_the_session_lock_without_appending() -> N
     with pytest.raises(asyncio.CancelledError):
         await turn
 
-    assert store.get(session.session_id).messages == ()
+    assert (await store.get(session.session_id)).messages == ()
     agent.gate.set()
     await asyncio.wait_for(
         store.run_turn(session.session_id, "after", agent=agent), _TIMEOUT_SECONDS
     )
-    assert store.get(session.session_id).retained_turns == 1
+    assert (await store.get(session.session_id)).retained_turns == 1

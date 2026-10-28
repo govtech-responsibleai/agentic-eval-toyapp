@@ -205,6 +205,7 @@ async def test_analysis_route_exports_one_complete_sdk_tree() -> None:
             extracted_text_length=len(text),
             sha256="0" * 64,
         ),
+        original_bytes=text.encode(),
         extracted_text=text,
     )
     agent = CoordinatorAgent(

@@ -33,11 +33,12 @@ The main design principles are:
 - controlled metric cases isolated from the normal application package;
 - a non-root runtime image with the pinned embedding model available offline.
 
-The current runtime is process-local. Each message request waits for its reply,
+The current runtime keeps conversation sessions and reports in process memory by
+default, or in Redis when configured. Each message request waits for its reply,
 but the turn path runs on the event loop, so one process holds many in-flight
-turns without dedicating a thread to each. Persistent storage, background
-jobs, cancellation, streaming, and lifecycle-failure scenarios are not part of
-the implemented architecture.
+turns without dedicating a thread to each. Background jobs, cancellation,
+streaming, and lifecycle-failure scenarios are not part of the implemented
+architecture.
 
 ## System overview
 
@@ -49,8 +50,10 @@ flowchart LR
     Client[METIS or API client] -->|HTTP| API
     Harness[Controlled trace harness] -->|In-process HTTP through TestClient| API
 
-    API --> Sessions[In-memory session store]
+    API --> Sessions[Configured memory or Redis session store]
+    Sessions -->|Persistent mode| Redis[(Redis)]
     API --> Reports[Session-scoped report store]
+    Reports -->|Persistent mode| Redis
     Sessions --> Runtime{Selected agent mode}
     Reports -->|Authorized reports on message submission| Runtime
     Runtime -->|Standalone rag| Agent[Bounded RAG agent]
@@ -239,7 +242,7 @@ both use this same application factory.
 | `GET /health` | Report process liveness and service version. |
 | `GET /ready` | Report validated configuration, session store, tracing state, and initialised agent. |
 | `GET /api/v1/capabilities` | Advertise the request/response chat lifecycle, semantic retrieval, tracing state, and available actions. |
-| `POST /api/v1/sessions` | Create an empty process-local session. |
+| `POST /api/v1/sessions` | Create an empty session in the configured store. |
 | `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |
 | `POST /api/v1/sessions/{session_id}/files` | Validate and retain one report without creating a conversation turn. |
 | `GET /api/v1/sessions/{session_id}/files` | List safe metadata for this session's retained reports in upload order. |
@@ -253,8 +256,8 @@ event loop, and the value was renamed because it described the server's old
 threading model rather than what a client observes.
 
 The public API uses stable error bodies for missing sessions, invalid requests,
-and unavailable agent dependencies. Internal exceptions and credentials are
-not copied into public errors.
+busy or unavailable session storage, and unavailable agent dependencies.
+Internal exceptions and credentials are not copied into public errors.
 
 <a id="api-flow"></a>
 
@@ -277,10 +280,12 @@ flowchart TD
     FileDelete --> Empty[204 No Content]
     Route -->|Submit message| Lookup[Validate session exists]
     Lookup -->|Missing| Error404[404 session_not_found]
+    Lookup -->|Store unavailable| Store503[503 session_store_unavailable]
     Lookup --> Attachments[Resolve authorized file IDs]
     Attachments --> Resolve[Resolve initialised agent]
     Resolve -->|Unavailable| Error503[503 agent_unavailable]
     Resolve --> Turn[Session store run_turn]
+    Turn -->|Lock timeout| Busy409[409 session_busy]
     Turn --> Result[Typed SessionMessageResponse]
     Create --> Response[JSON response]
     Snapshot --> Response
@@ -423,17 +428,24 @@ or ignored constraints.
 
 ## 5. Session store
 
-`InMemorySessionStore` maps random UUIDs to process-local records. A short
-`threading.Lock` protects the record dictionary during creation and lookup; it
-is never held across an `await`. Each session has its own `asyncio.Lock`, held
-for the whole turn, so a complete turn is atomic and later turns on the same
-session queue without occupying a thread, while other sessions proceed.
+The `SessionStore` boundary has two implementations. `InMemorySessionStore`
+maps random UUIDs to process-local records. A short `threading.Lock` protects
+the record dictionary during creation and lookup; it is never held across an
+`await`. Each session has its own `asyncio.Lock`, held for the whole turn, so a
+complete turn is atomic and later turns on the same session queue without
+occupying a thread, while other sessions proceed.
 
-`get()` takes no turn lock. It only snapshots a bounded deque with no `await`
-inside, so it is atomic on the event loop and returns the last committed
-history even while a turn is in flight. Every endpoint that touches the store
-is `async def`, so no worker thread ever iterates that deque while the loop
-appends to it. Uploads therefore never wait on a running turn.
+For the in-memory store, `get()` takes no turn lock. It only snapshots a
+bounded deque with no `await` inside, so it is atomic on the event loop and
+returns the last committed history even while a turn is in flight. Every
+endpoint that touches the store is `async def`, so no worker thread ever
+iterates that deque while the loop appends to it. Uploads therefore never wait
+on a running turn.
+
+`RedisSessionStore` stores a versioned JSON record under a namespaced UUID key
+and uses a Redis distributed lock for each session. That lock covers reading
+history, running the agent, and writing the resulting pair, so concurrent app
+workers cannot silently overwrite one another's turns.
 
 The configured `session_max_turns` value is a retention bound, not a lifetime
 message limit. Users can continue beyond ten turns by default; the oldest
@@ -447,9 +459,11 @@ clarification results are still completed assistant messages and are retained.
 ```mermaid
 flowchart TD
     Create[Create session] --> UUID[Allocate unique UUID]
-    UUID --> Record[Create bounded deque and per-session lock]
+    UUID --> Backend{Configured backend}
+    Backend -->|Memory| Record[Create bounded deque and thread lock]
+    Backend -->|Redis| RedisRecord[Atomically claim namespaced Redis key]
     Message[Submit message and authorized reports] --> Lookup[Look up session]
-    Lookup --> Lock[Acquire session lock]
+    Lookup --> Lock[Acquire local or distributed session lock]
     Lock --> History[Flatten retained complete turns]
     History --> Agent[Run selected agent with history, session ID, and reports]
     Agent --> Pair[Create user and assistant pair]
@@ -460,10 +474,11 @@ flowchart TD
     Drop --> Return
 ```
 
-Sessions disappear on process restart and are not shared across multiple
-worker processes. Session URLs therefore provide best-effort debugging and
-support links, not persistent history. A persistent database is intentionally
-outside the MVP.
+In Redis mode, complete turn pairs survive application restarts and are shared
+across workers while the Redis data remains available. The memory backend is
+retained for simple source-based development and deterministic tests; its
+sessions disappear on process restart. `/ready` pings Redis without exposing
+its URL, and storage or lock failures are mapped to stable public errors.
 
 [Back to component index](#component-index)
 
@@ -479,15 +494,18 @@ PDF text page by page, and enforces byte, page, and extracted-character limits.
 Encrypted, malformed, image-only, empty, and whitespace-only reports fail
 closed. OCR is not performed.
 
-`InMemoryReportStore` allocates a random UUID and retains immutable extracted
-text, page boundaries, and public metadata under the owning application
-session. It does not retain the original bytes. Missing and cross-session IDs
-produce the same public error so callers cannot discover another session's
-files. Listing returns only owned metadata in upload order. Deletion removes
-the stored metadata and extracted content and releases that session's capacity;
-it does not rewrite prior conversation messages or traces. A message already
-running from a resolved immutable report snapshot can finish after deletion.
-Stored reports disappear on process restart and are not shared between workers.
+The `ReportStore` boundary has in-memory and Redis implementations. Both retain
+immutable original bytes, extracted text, PDF page boundaries, and public
+metadata under the owning application session. `RedisReportStore` serializes a
+versioned, integrity-checked session report collection and protects mutations
+with a per-session distributed lock. Missing and cross-session IDs produce the
+same public error so callers cannot discover another session's files. Listing
+returns only owned metadata in upload order. Deletion removes the complete
+stored report and releases that session's capacity; it does not rewrite prior
+conversation messages or traces. A message already running from a resolved
+immutable report snapshot can finish after deletion. Redis reports survive
+application restarts and are shared between workers while Redis is available;
+in-memory reports disappear on process restart.
 
 ```mermaid
 flowchart TD
@@ -500,9 +518,12 @@ flowchart TD
     Extract -->|PDF| Pages[Strict parse and page-by-page extraction]
     UTF8 --> Bounds[Normalise and enforce text limit]
     Pages --> Bounds
-    Bounds --> Record[Immutable extracted record]
-    Record --> Store[Session-scoped in-memory report store]
-    Store --> Metadata[Return file ID and metadata]
+    Bounds --> Record[Immutable original and extracted record]
+    Record --> Store{Configured report store}
+    Store -->|Memory| Memory[Process-local record]
+    Store -->|Redis| RedisRecord[Versioned persistent record]
+    Memory --> Metadata[Return file ID and metadata]
+    RedisRecord --> Metadata
     Metadata -. no agent call .-> End[Upload complete]
 
     List[GET session files] --> Store
@@ -1054,7 +1075,8 @@ packages on their declared indexes.
 The build context excludes `.env`, Git state, tests, controlled trace tooling,
 private run manifests, caches, and local model artefacts. Platform AI and
 Langfuse remain external. Compose reads their settings from `.env` at container
-startup; Docker build steps cannot access those secrets.
+startup; Docker build steps cannot access those secrets. Its local Redis service
+uses append-only persistence in a named volume and is not published to the host.
 
 For managed TLS interception, the Makefile passes `DOCKER_CA_CERT`, defaulting
 to the host's `SSL_CERT_FILE`, as a BuildKit secret mount. The builder copies
@@ -1090,6 +1112,8 @@ flowchart LR
     subgraph Runtime[Container runtime]
         Env[Runtime .env values] --> Service[Non-root Uvicorn service]
         Image --> Service
+        Service --> Redis[(Redis session and report store)]
+        Volume[Named persistent volume] --> Redis
         Service --> LocalModel[Local-only embedding load]
         LocalModel --> Index[In-memory FAISS index]
         Health[Docker health check] -->|GET /health| Service
@@ -1099,10 +1123,10 @@ flowchart LR
     Service -->|Optional observations| Langfuse[External Langfuse]
 ```
 
-Compose operates one service and one worker because session state is held in
-process memory. The internal port remains 8000; the host-side port is
-configurable. `no-new-privileges` is enabled, and the image contains no default
-credentials.
+Compose operates the application and Redis services. The internal application
+port remains 8000; the host-side port is configurable, while Redis stays on the
+private Compose network. `no-new-privileges` is enabled, and neither image
+contains default credentials.
 
 [Back to component index](#component-index)
 
@@ -1161,9 +1185,9 @@ excluded from `make ci`.
 |---|---|---|---|
 | Synthetic policy corpus | Version-controlled JSON | Immutable across a run | Retrieved chunks only when searched |
 | FAISS index and corpus embeddings | Process memory | Rebuilt at application startup | Provenance only; returned chunks appear in search observations |
-| Conversation history | Process-local session store | Until eviction or process exit | Current user input plus history count; model generation contains serialized public context |
-| Extracted report text and metadata | Process-local report store under owning session | Until deletion or process exit | Metadata/locators by default; complete extracted text only with explicit opt-in |
-| Original uploaded report bytes | Request-scoped temporary upload | Discarded after extraction | No |
+| Conversation history | Configured memory or Redis session store | Until process exit in memory mode; until Redis data removal in Redis mode; both enforce bounded turns | Current user input plus history count; model generation contains serialized public context |
+| Extracted report text and metadata | Configured memory or Redis report store under owning session | Until deletion or process exit in memory mode; until deletion or Redis data removal in Redis mode | Metadata/locators by default; complete extracted text only with explicit opt-in |
+| Original uploaded report bytes | Configured memory or Redis report store under owning session | Until deletion or process exit in memory mode; until deletion or Redis data removal in Redis mode | No |
 | Model credentials | `.env` or process environment | Process configuration | No |
 | Langfuse credentials | `.env` or process environment | Process configuration | No |
 | Normal turn traces | Langfuse | Backend retention policy | Yes |
@@ -1176,11 +1200,19 @@ excluded from `make ci`.
   cancellation, or recovery lifecycle. Server-side concurrency is not yet
   bounded: retrieval runs through the shared worker-thread pool, and rate
   limiting and backpressure are deferred.
-- Session history is process-local, bounded, and lost on restart.
-- Multiple server workers would not share session state.
-- Uploaded reports are process-local and disappear on restart. Their delete
-  endpoint removes current stored content, not already-produced answers or
-  external traces. Per-session capacity prevents unbounded abandoned uploads.
+- The Redis stores use the synchronous client through the worker-thread pool,
+  so a turn waiting on a busy session's distributed lock occupies one thread
+  for up to the lock's blocking timeout. The in-memory store has no such cost.
+  Moving both Redis stores to `redis.asyncio` would remove it.
+- The in-memory backend loses bounded session history on restart. Redis makes
+  session history persistent and worker-shared, but Redis operation and backup
+  remain deployment responsibilities.
+- The in-memory report backend loses uploads on restart. Redis makes original
+  bytes, metadata, extracted text, and PDF page boundaries persistent and
+  worker-shared, but Redis operation, data protection, retention, and backup
+  remain deployment responsibilities. The delete endpoint removes current
+  stored content, not already-produced answers or external traces. Per-session
+  capacity prevents unbounded abandoned uploads.
 - PDF support is limited to extractable text. OCR, scanned-image analysis, and
   office-document formats are not supported.
 - Report content is not passed to the RAG agent. The coordinator can derive a

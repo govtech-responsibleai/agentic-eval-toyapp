@@ -80,15 +80,13 @@ def test_coordinator_api_analyzes_uploaded_report_with_default_composition() -> 
         generation_provider=GenerationProviderKind.DETERMINISTIC,
         langfuse_enabled=False,
     )
-    fixture = Path(__file__).parents[1] / "fixtures" / "stage14_report.md"
+    fixture = Path(__file__).parents[1] / "fixtures" / "test_report.md"
     with TestClient(create_app(settings)) as raw_client:
         client = cast(Client, raw_client)
         session_id = client.post("/api/v1/sessions").json()["session_id"]
         uploaded = client.post(
             f"/api/v1/sessions/{session_id}/files",
-            files={
-                "file": ("stage14_report.md", fixture.read_bytes(), "text/markdown")
-            },
+            files={"file": ("test_report.md", fixture.read_bytes(), "text/markdown")},
         )
         assert uploaded.status_code == 201
         assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []

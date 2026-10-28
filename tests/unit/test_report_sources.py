@@ -219,7 +219,7 @@ def test_every_accepted_type_reaches_sources_without_text_loss(
 
 def test_demo_report_includes_late_sections_in_one_source_set() -> None:
     """The checked-in report must expose its full contents to one analysis call."""
-    fixture = Path(__file__).parents[1] / "fixtures" / "stage14_report.md"
+    fixture = Path(__file__).parents[1] / "fixtures" / "test_report.md"
     processed = ReportProcessor(
         max_bytes=5 * 1024 * 1024,
         max_pdf_pages=50,

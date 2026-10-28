@@ -147,7 +147,7 @@ async def test_short_report_returns_one_grounded_answer_without_policy_search() 
 async def test_long_report_is_supplied_in_full_to_one_model_call() -> None:
     """The specialist neither truncates nor splits the checked-in report."""
     report_text = (
-        (Path(__file__).parents[1] / "fixtures" / "stage14_report.md")
+        (Path(__file__).parents[1] / "fixtures" / "test_report.md")
         .read_text(encoding="utf-8")
         .strip()
     )
