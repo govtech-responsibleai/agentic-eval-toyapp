@@ -2,11 +2,14 @@
 
 from collections.abc import Iterator
 
+import anyio
 import pytest
+from anyio import CapacityLimiter
 
 from agentic_eval_toyapp.config import AppSettings
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
-from agentic_eval_toyapp.retrieval import FaissRetriever, load_corpus
+from agentic_eval_toyapp.models import RetrievedChunk
+from agentic_eval_toyapp.retrieval import AsyncRetriever, FaissRetriever, load_corpus
 
 
 @pytest.fixture(scope="module")
@@ -112,3 +115,30 @@ def test_pinned_model_retrieves_overlapping_policy_evidence(
     results = live_retriever.search(query, top_k=3)
 
     assert expected_chunk_ids <= {result.chunk_id for result in results}
+
+
+@pytest.mark.live
+@pytest.mark.anyio
+async def test_fifty_concurrent_real_searches_match_serial_results(
+    live_retriever: FaissRetriever,
+) -> None:
+    """The single slot must serialise real searches without errors or drift."""
+    queries = [
+        "Can someone who just joined work away from the office?",
+        "Do I need proof for a forty-dollar taxi ride?",
+        "Can I buy a nine-hundred-dollar item directly?",
+        "What should I do if I think my account has been compromised?",
+        "May I paste sensitive information into a public chatbot?",
+    ] * 10
+    serial = [live_retriever.search(query) for query in queries]
+    adapter = AsyncRetriever(live_retriever, CapacityLimiter(1))
+    concurrent: list[tuple[RetrievedChunk, ...] | None] = [None] * len(queries)
+
+    async def run(index: int) -> None:
+        concurrent[index] = await adapter.search(queries[index])
+
+    async with anyio.create_task_group() as group:
+        for index in range(len(queries)):
+            group.start_soon(run, index)
+
+    assert concurrent == serial

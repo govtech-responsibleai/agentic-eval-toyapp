@@ -9,6 +9,7 @@ description = "A controlled RAG target application for agentic evaluation"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anyio>=4.0",
     "faiss-cpu>=1.15.1",
     "fastapi>=0.141.1",
     "jinja2>=3.1",

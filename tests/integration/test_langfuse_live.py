@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from anyio import CapacityLimiter
 from httpx2 import Client
 from langfuse import Langfuse
 from langfuse.api.commons.types.observation_v2 import ObservationV2
@@ -36,6 +37,7 @@ from agentic_eval_toyapp.orchestration_models import (
     CoordinatorRouteRagAction,
 )
 from agentic_eval_toyapp.providers import ScriptedGenerationProvider
+from agentic_eval_toyapp.retrieval import AsyncRetriever
 from agentic_eval_toyapp.tracing import LangfuseTraceRecorder
 
 
@@ -370,7 +372,7 @@ def test_api_turn_is_retrievable_by_app_session_id(
     )
     agent = RagAgent(
         provider=ScriptedGenerationProvider((search, answer)),
-        retriever=_LiveTestRetriever(),
+        retriever=AsyncRetriever(_LiveTestRetriever(), CapacityLimiter(1)),
         system_prompt="Search the policy corpus before answering.",
         trace_recorder=recorder,
     )
@@ -462,7 +464,7 @@ def test_coordinator_turn_is_one_retrievable_root_with_nested_rag(
                 ),
             )
         ),
-        retriever=_LiveTestRetriever(),
+        retriever=AsyncRetriever(_LiveTestRetriever(), CapacityLimiter(1)),
         system_prompt="Search the policy corpus before answering.",
     )
     agent = CoordinatorAgent(

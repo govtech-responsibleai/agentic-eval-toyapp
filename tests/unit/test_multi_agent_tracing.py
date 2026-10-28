@@ -9,6 +9,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from anyio import CapacityLimiter
 from langfuse import Langfuse
 from starlette.testclient import TestClient
 
@@ -49,6 +50,7 @@ from agentic_eval_toyapp.providers import (
     ScriptedGenerationProvider,
 )
 from agentic_eval_toyapp.reports import StoredReport
+from agentic_eval_toyapp.retrieval import AsyncRetriever
 
 
 def _updates() -> list[dict[str, object]]:
@@ -315,7 +317,7 @@ async def test_rag_route_has_one_nested_specialist_and_search_tool() -> None:
                 ),
             )
         ),
-        retriever=_Retriever(),
+        retriever=AsyncRetriever(_Retriever(), CapacityLimiter(1)),
         system_prompt="Answer policy questions.",
     )
     agent = CoordinatorAgent(

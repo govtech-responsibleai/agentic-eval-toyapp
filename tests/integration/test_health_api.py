@@ -9,6 +9,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from anyio import CapacityLimiter
 from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
@@ -278,7 +279,11 @@ def test_default_startup_builds_the_coordinator(
     ):
         assert client.get("/ready").json()["status"] == "ready"
 
-    build_coordinator.assert_called_once_with(settings)
+    build_coordinator.assert_called_once()
+    built_settings, built_limiter = build_coordinator.call_args.args
+    assert built_settings is settings
+    assert isinstance(built_limiter, CapacityLimiter)
+    assert built_limiter.total_tokens == 1
     build_rag.assert_not_called()
 
 
@@ -433,3 +438,52 @@ def test_openapi_contains_only_the_intended_application_routes() -> None:
         "/api/v1/sessions/{session_id}/files/{file_id}",
         "/api/v1/sessions/{session_id}/messages",
     }
+
+
+def test_default_factory_without_a_bound_limiter_fails_loudly() -> None:
+    """Resolving the default agent outside the lifespan must not make a second slot."""
+    from agentic_eval_toyapp.app import (
+        _AgentResolver,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    resolver = _AgentResolver(agent=None, factory=_IntrospectionAgent)
+
+    with pytest.raises(RuntimeError, match="retrieval limiter is not bound"):
+        resolver.require_retrieval_limiter()
+
+
+def test_coordinator_and_rag_agents_share_the_lifespan_limiter() -> None:
+    """Both default agent modes must receive the one limiter the lifespan created."""
+    from agentic_eval_toyapp.app import (
+        _build_coordinator_agent,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    settings = AppSettings(
+        generation_provider=GenerationProviderKind.DETERMINISTIC,
+        langfuse_enabled=False,
+    )
+    limiter = CapacityLimiter(1)
+    with patch("agentic_eval_toyapp.app._build_rag_agent") as build_rag:
+        build_rag.side_effect = RuntimeError("stop after capturing arguments")
+        with pytest.raises(RuntimeError, match="stop after capturing"):
+            _build_coordinator_agent(settings, limiter)
+
+    assert build_rag.call_args.args[1] is limiter
+
+
+def test_lifespan_binds_a_single_slot_limiter_to_the_default_factory() -> None:
+    """TestClient runs the lifespan, so the default factory sees one bound slot."""
+    seen: list[CapacityLimiter] = []
+
+    def fake_build(_settings: AppSettings, limiter: CapacityLimiter) -> AgentRunner:
+        seen.append(limiter)
+        return _IntrospectionAgent()
+
+    with (
+        patch("agentic_eval_toyapp.app._build_default_agent", side_effect=fake_build),
+        TestClient(create_app(AppSettings(langfuse_enabled=False))),
+    ):
+        pass
+
+    assert len(seen) == 1
+    assert seen[0].total_tokens == 1

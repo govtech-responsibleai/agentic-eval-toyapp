@@ -36,9 +36,11 @@ The main design principles are:
 The current runtime keeps conversation sessions and reports in process memory by
 default, or in Redis when configured. Each message request waits for its reply,
 but the turn path runs on the event loop, so one process holds many in-flight
-turns without dedicating a thread to each. Background jobs, cancellation,
-streaming, and lifecycle-failure scenarios are not part of the implemented
-architecture.
+turns without dedicating a thread to each. Semantic retrieval is the one CPU-bound
+step: it runs on a worker thread behind a fixed single-slot limiter, so at most
+one search is inside the embedding model at a time. Background jobs,
+cancellation, streaming, and lifecycle-failure scenarios are not part of the
+implemented architecture.
 
 ## System overview
 
@@ -425,6 +427,27 @@ failures such as unnecessary search, missing clarification, unsupported claims,
 or ignored constraints.
 
 [Back to component index](#component-index)
+
+### Retrieval concurrency
+
+`FaissRetriever.search` stays synchronous, because SentenceTransformer inference
+and FAISS search are CPU-bound. `AsyncRetriever` adapts it for the async agent:
+it awaits `anyio.to_thread.run_sync` with an anyio `CapacityLimiter(1)`, so
+context variables, including the active trace span and diagnostic IDs, reach the
+worker thread. The application lifespan creates the single limiter and the
+default factory passes it to both the standalone RAG agent and the coordinator's
+RAG specialist, so they share one slot. An injected agent supplies its own
+`AsyncRetriever`.
+
+Searches that arrive while the slot is busy wait as suspended tasks in anyio's
+first-in, first-out queue, not as blocked threads. A cancelled waiter leaves the
+queue without holding the slot, and an exception in `search` releases it. When a
+search had to wait, one INFO line `toyapp_retrieval event=slot_wait` records the
+queue depth and wait in milliseconds, with session and turn IDs and never the
+query text. The queue has no size limit or timeout, and the limiter is per
+process, which matches the single-worker deployment. Report upload parsing runs
+on the default thread pool, outside this limiter. There is deliberately no
+setting for the limit; the measurements and rationale are in issue #52.
 
 ## 5. Session store
 
@@ -1197,9 +1220,9 @@ excluded from `make ci`.
 ## Current limitations
 
 - A client waits for each turn's reply; there is no job polling, streaming,
-  cancellation, or recovery lifecycle. Server-side concurrency is not yet
-  bounded: retrieval runs through the shared worker-thread pool, and rate
-  limiting and backpressure are deferred.
+  cancellation, or recovery lifecycle. Retrieval is bounded to one concurrent
+  search per process, but the queue of waiting turns has no size limit or
+  timeout, and rate limiting and backpressure are deferred.
 - The Redis stores use the synchronous client through the worker-thread pool,
   so a turn waiting on a busy session's distributed lock occupies one thread
   for up to the lock's blocking timeout. The in-memory store has no such cost.

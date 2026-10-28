@@ -8,6 +8,7 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
+from anyio import CapacityLimiter
 from httpx2 import Client, Response
 from starlette.testclient import TestClient
 
@@ -46,6 +47,7 @@ from agentic_eval_toyapp.providers import (
     ScriptedGenerationProvider,
 )
 from agentic_eval_toyapp.reports import StoredReport
+from agentic_eval_toyapp.retrieval import AsyncRetriever
 from agentic_eval_toyapp.sessions import AgentRunner, InMemorySessionStore
 
 
@@ -123,7 +125,7 @@ class _CountingAgent:
 def _build_agent(retriever: _PolicyRetriever | None = None) -> RagAgent:
     return RagAgent(
         provider=ExtractiveGenerationProvider(),
-        retriever=retriever or _PolicyRetriever(),
+        retriever=AsyncRetriever((retriever or _PolicyRetriever()), CapacityLimiter(1)),
         system_prompt="Search before answering and cite retrieved evidence.",
     )
 
@@ -691,7 +693,7 @@ def test_coordinator_rag_delegation_preserves_multi_turn_history() -> None:
     )
     rag_agent = RagAgent(
         provider=provider,
-        retriever=_PolicyRetriever(),
+        retriever=AsyncRetriever(_PolicyRetriever(), CapacityLimiter(1)),
         system_prompt="Search before answering.",
     )
     coordinator = CoordinatorAgent(
@@ -723,7 +725,7 @@ def test_coordinator_preserves_zero_evidence_rag_answer() -> None:
     """An empty search should return the RAG agent's observation-first answer."""
     rag_agent = RagAgent(
         provider=ExtractiveGenerationProvider(),
-        retriever=_EmptyRetriever(),
+        retriever=AsyncRetriever(_EmptyRetriever(), CapacityLimiter(1)),
         system_prompt="Search before answering.",
     )
     coordinator = CoordinatorAgent(
@@ -832,7 +834,7 @@ def test_api_preserves_provider_response_after_empty_retrieval() -> None:
     """METIS should observe the response together with an empty evidence list."""
     agent = RagAgent(
         provider=ExtractiveGenerationProvider(),
-        retriever=_EmptyRetriever(),
+        retriever=AsyncRetriever(_EmptyRetriever(), CapacityLimiter(1)),
         system_prompt="Search before answering and expose empty evidence.",
     )
     client = _build_client(agent=agent)
@@ -872,7 +874,7 @@ def test_api_repeated_turns_allow_no_citations_for_irrelevant_candidates() -> No
                 ),
             )
         ),
-        retriever=_PolicyRetriever(),
+        retriever=AsyncRetriever(_PolicyRetriever(), CapacityLimiter(1)),
         system_prompt="Treat retrieved chunks as candidates.",
     )
     client = _build_client(agent=agent)
@@ -910,7 +912,7 @@ def test_api_recovers_after_clarification_and_repeated_search() -> None:
     )
     agent = RagAgent(
         provider=provider,
-        retriever=_PolicyRetriever(),
+        retriever=AsyncRetriever(_PolicyRetriever(), CapacityLimiter(1)),
         system_prompt="Treat retrieved chunks as candidates.",
     )
     client = _build_client(agent=agent)
@@ -1060,7 +1062,7 @@ def test_api_returns_safe_typed_result_for_generation_provider_failure() -> None
     """Provider transport details must not cross the public API boundary."""
     agent = RagAgent(
         provider=_FailingGenerationProvider(),
-        retriever=_PolicyRetriever(),
+        retriever=AsyncRetriever(_PolicyRetriever(), CapacityLimiter(1)),
         system_prompt="Choose one action.",
     )
     client = _build_client(agent=agent)
