@@ -29,6 +29,7 @@ from agentic_eval_toyapp.config import (
     AgentMode,
     AppSettings,
     GenerationProviderKind,
+    SessionStoreBackend,
     get_settings,
 )
 from agentic_eval_toyapp.coordinator import (
@@ -73,11 +74,15 @@ from agentic_eval_toyapp.providers import (
 )
 from agentic_eval_toyapp.reports import (
     InMemoryReportStore,
+    RedisReportStore,
     ReportAttachmentLimitError,
     ReportCapacityError,
     ReportNotFoundError,
     ReportProcessingError,
     ReportProcessor,
+    ReportStore,
+    ReportStoreBusyError,
+    ReportStoreUnavailableError,
     ReportTooLargeError,
     UnsupportedReportTypeError,
 )
@@ -85,7 +90,11 @@ from agentic_eval_toyapp.retrieval import FaissRetriever, corpus_sha256, load_co
 from agentic_eval_toyapp.sessions import (
     AgentRunner,
     InMemorySessionStore,
+    RedisSessionStore,
+    SessionBusyError,
     SessionNotFoundError,
+    SessionStore,
+    SessionStoreUnavailableError,
 )
 from agentic_eval_toyapp.tracing import (
     LangfuseTraceRecorder,
@@ -362,6 +371,36 @@ def _build_default_agent(settings: AppSettings) -> AgentRunner:
     return _build_rag_agent(settings)
 
 
+def _build_session_store(settings: AppSettings) -> SessionStore:
+    """Construct the explicitly selected conversation-session backend."""
+    if settings.session_store_backend is SessionStoreBackend.MEMORY:
+        return InMemorySessionStore(max_turns=settings.session_max_turns)
+    return RedisSessionStore.from_url(
+        settings.require_redis_configuration(),
+        max_turns=settings.session_max_turns,
+        key_prefix=settings.redis_key_prefix,
+        socket_timeout_seconds=settings.redis_socket_timeout_seconds,
+        lock_timeout_seconds=settings.redis_lock_timeout_seconds,
+        lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
+    )
+
+
+def _build_report_store(settings: AppSettings) -> ReportStore:
+    """Construct the report backend selected with conversation persistence."""
+    if settings.session_store_backend is SessionStoreBackend.MEMORY:
+        return InMemoryReportStore(
+            max_reports_per_session=settings.upload_max_reports_per_session
+        )
+    return RedisReportStore.from_url(
+        settings.require_redis_configuration(),
+        max_reports_per_session=settings.upload_max_reports_per_session,
+        key_prefix=settings.redis_key_prefix,
+        socket_timeout_seconds=settings.redis_socket_timeout_seconds,
+        lock_timeout_seconds=settings.redis_lock_timeout_seconds,
+        lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
+    )
+
+
 def _public_error(*, status_code: int, code: str, message: str) -> JSONResponse:
     error = ErrorResponse(code=code, message=message)
     return JSONResponse(
@@ -377,6 +416,44 @@ async def _handle_session_not_found(
         status_code=404,
         code="session_not_found",
         message="The requested session was not found.",
+    )
+
+
+async def _handle_session_store_unavailable(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    return _public_error(
+        status_code=503,
+        code="session_store_unavailable",
+        message="The conversation session store is temporarily unavailable.",
+    )
+
+
+async def _handle_session_busy(_request: Request, _error: Exception) -> JSONResponse:
+    return _public_error(
+        status_code=409,
+        code="session_busy",
+        message="Another request is currently updating this session.",
+    )
+
+
+async def _handle_report_store_unavailable(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    return _public_error(
+        status_code=503,
+        code="report_store_unavailable",
+        message="The report store is temporarily unavailable.",
+    )
+
+
+async def _handle_report_store_busy(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    return _public_error(
+        status_code=409,
+        code="report_store_busy",
+        message="Another request is currently updating this session's reports.",
     )
 
 
@@ -463,25 +540,21 @@ async def _handle_report_attachment_limit(
 def create_app(
     settings: AppSettings | None = None,
     *,
-    session_store: InMemorySessionStore | None = None,
+    session_store: SessionStore | None = None,
     agent: AgentRunner | None = None,
     agent_factory: Callable[[], AgentRunner] | None = None,
     report_processor: ReportProcessor | None = None,
-    report_store: InMemoryReportStore | None = None,
+    report_store: ReportStore | None = None,
 ) -> FastAPI:
     """Construct an application with explicit, injectable dependencies."""
     resolved_settings = settings or get_settings()
-    resolved_store = session_store or InMemorySessionStore(
-        max_turns=resolved_settings.session_max_turns
-    )
+    resolved_store = session_store or _build_session_store(resolved_settings)
     resolved_report_processor = report_processor or ReportProcessor(
         max_bytes=resolved_settings.upload_max_bytes,
         max_pdf_pages=resolved_settings.upload_max_pdf_pages,
         max_extracted_characters=(resolved_settings.upload_max_extracted_characters),
     )
-    resolved_report_store = report_store or InMemoryReportStore(
-        max_reports_per_session=resolved_settings.upload_max_reports_per_session
-    )
+    resolved_report_store = report_store or _build_report_store(resolved_settings)
     if agent is None and agent_factory is None:
         agent_factory = partial(_build_default_agent, resolved_settings)
     resolver = _AgentResolver(agent=agent, factory=agent_factory)
@@ -518,6 +591,11 @@ def create_app(
         _handle_session_not_found,
     )
     application.add_exception_handler(
+        SessionStoreUnavailableError,
+        _handle_session_store_unavailable,
+    )
+    application.add_exception_handler(SessionBusyError, _handle_session_busy)
+    application.add_exception_handler(
         AgentInitialisationError,
         _handle_agent_initialisation_error,
     )
@@ -526,6 +604,11 @@ def create_app(
         _handle_request_validation_error,
     )
     application.add_exception_handler(ReportNotFoundError, _handle_report_not_found)
+    application.add_exception_handler(
+        ReportStoreUnavailableError,
+        _handle_report_store_unavailable,
+    )
+    application.add_exception_handler(ReportStoreBusyError, _handle_report_store_busy)
     application.add_exception_handler(
         UnsupportedReportTypeError,
         _handle_unsupported_report_type,
@@ -590,26 +673,44 @@ def create_app(
     @application.get("/ready", response_model=ReadinessResponse, tags=["service"])
     def ready() -> ReadinessResponse:
         """Report the dependencies initialised during application startup."""
+        session_store_ready = True
+        try:
+            resolved_store.check()
+            session_store_check = ReadinessCheck(
+                name="session_store",
+                status=CheckStatus.PASS,
+                detail=resolved_store.readiness_detail,
+            )
+        except SessionStoreUnavailableError:
+            session_store_ready = False
+            session_store_check = ReadinessCheck(
+                name="session_store",
+                status=CheckStatus.FAIL,
+                detail="configured session store is unavailable",
+            )
+        report_store_ready = True
+        try:
+            resolved_report_store.check()
+            report_store_check = ReadinessCheck(
+                name="report_store",
+                status=CheckStatus.PASS,
+                detail=resolved_report_store.readiness_detail,
+            )
+        except ReportStoreUnavailableError:
+            report_store_ready = False
+            report_store_check = ReadinessCheck(
+                name="report_store",
+                status=CheckStatus.FAIL,
+                detail="configured report store is unavailable",
+            )
         checks = [
             ReadinessCheck(
                 name="configuration",
                 status=CheckStatus.PASS,
                 detail="service settings validated",
             ),
-            ReadinessCheck(
-                name="session_store",
-                status=CheckStatus.PASS,
-                detail=f"retains up to {resolved_store.max_turns} complete turns",
-            ),
-            ReadinessCheck(
-                name="report_store",
-                status=CheckStatus.PASS,
-                detail=(
-                    "retains up to "
-                    f"{resolved_report_store.max_reports_per_session} "
-                    "processed reports per session"
-                ),
-            ),
+            session_store_check,
+            report_store_check,
             ReadinessCheck(
                 name="langfuse_tracing",
                 status=CheckStatus.PASS,
@@ -646,7 +747,11 @@ def create_app(
             )
         )
         return ReadinessResponse(
-            status=ReadinessStatus.READY,
+            status=(
+                ReadinessStatus.READY
+                if session_store_ready and report_store_ready
+                else ReadinessStatus.NOT_READY
+            ),
             checks=tuple(checks),
         )
 
@@ -678,17 +783,24 @@ def create_app(
         f"{API_PREFIX}/sessions",
         response_model=SessionResponse,
         status_code=201,
-        responses={422: {"model": ErrorResponse}},
+        responses={
+            422: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
         tags=["chat"],
     )
     def create_session() -> SessionResponse:
-        """Create one empty process-local conversation session."""
+        """Create one empty conversation session in the configured store."""
         return resolved_store.create()
 
     @application.get(
         f"{API_PREFIX}/sessions/{{session_id}}",
         response_model=SessionResponse,
-        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+        responses={
+            404: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
         tags=["chat"],
     )
     def get_session(session_id: UUID) -> SessionResponse:
@@ -705,6 +817,7 @@ def create_app(
             413: {"model": ErrorResponse},
             415: {"model": ErrorResponse},
             422: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
         },
         tags=["files"],
     )
@@ -750,6 +863,8 @@ def create_app(
                     error=error,
                 )
                 raise
+            except (ReportStoreUnavailableError, ReportStoreBusyError):
+                raise
             except Exception as error:
                 log_failure(
                     event="upload",
@@ -763,7 +878,10 @@ def create_app(
     @application.get(
         f"{API_PREFIX}/sessions/{{session_id}}/files",
         response_model=ReportListResponse,
-        responses={404: {"model": ErrorResponse}},
+        responses={
+            404: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
         tags=["files"],
     )
     def list_reports(session_id: UUID) -> ReportListResponse:
@@ -776,7 +894,11 @@ def create_app(
     @application.delete(
         f"{API_PREFIX}/sessions/{{session_id}}/files/{{file_id}}",
         status_code=204,
-        responses={404: {"model": ErrorResponse}},
+        responses={
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
         tags=["files"],
     )
     def delete_report(session_id: UUID, file_id: UUID) -> Response:
@@ -790,6 +912,7 @@ def create_app(
         response_model=SessionMessageResponse,
         responses={
             404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
             422: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
         },

@@ -69,6 +69,7 @@ def _processed_report(text: str = "Findings") -> ProcessedReport:
         filename="report.txt",
         media_type=ReportMediaType.TEXT,
         byte_size=len(content),
+        original_bytes=content,
         extracted_text=text,
         sha256=hashlib.sha256(content).hexdigest(),
     )
@@ -91,6 +92,7 @@ def test_text_and_markdown_processing_is_reproducible() -> None:
     )
 
     assert text_report.filename == "report.txt"
+    assert text_report.original_bytes == content
     assert text_report.extracted_text == "Revenue rose 12%.\n第二行"
     assert text_report.sha256 == hashlib.sha256(content).hexdigest()
     assert text_report.pages == ()
@@ -99,17 +101,19 @@ def test_text_and_markdown_processing_is_reproducible() -> None:
 
 def test_text_pdf_preserves_page_numbers_and_combined_text() -> None:
     """PDF extraction should retain source pages for future report references."""
+    content = _text_pdf(
+        "Revenue increased by 12 percent.",
+        "",
+        "Risk remains high.",
+    )
     report = _processor().process(
         filename="quarterly.pdf",
         media_type="application/pdf",
-        content=_text_pdf(
-            "Revenue increased by 12 percent.",
-            "",
-            "Risk remains high.",
-        ),
+        content=content,
     )
 
     assert report.media_type is ReportMediaType.PDF
+    assert report.original_bytes == content
     assert report.extracted_text == (
         "Revenue increased by 12 percent.\n\nRisk remains high."
     )
@@ -213,8 +217,8 @@ def test_processor_rejects_non_positive_limits(limits: dict[str, int]) -> None:
         ReportProcessor(**limits)
 
 
-def test_store_enforces_ownership_and_retains_no_raw_bytes() -> None:
-    """Only the owning session may resolve immutable extracted content."""
+def test_store_enforces_ownership_and_retains_original_bytes() -> None:
+    """Only the owning session may resolve complete immutable content."""
     store = InMemoryReportStore(max_reports_per_session=2)
     owner = uuid4()
     other = uuid4()
@@ -223,8 +227,7 @@ def test_store_enforces_ownership_and_retains_no_raw_bytes() -> None:
     stored = store.resolve(owner, (metadata.file_id,))[0]
 
     assert stored.extracted_text == "Known finding"
-    assert not hasattr(stored, "content")
-    assert not hasattr(stored, "raw_bytes")
+    assert stored.original_bytes == b"Known finding"
     with pytest.raises(ReportNotFoundError):
         store.resolve(other, (metadata.file_id,))
     with pytest.raises(ReportNotFoundError):

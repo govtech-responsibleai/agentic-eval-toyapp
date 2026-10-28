@@ -10,6 +10,7 @@ from agentic_eval_toyapp.config import (
     AppSettings,
     GenerationProviderKind,
     LogLevel,
+    SessionStoreBackend,
 )
 
 _SETTING_ENV_VARS = (
@@ -49,6 +50,13 @@ _SETTING_ENV_VARS = (
     "TOYAPP_LANGFUSE_ENVIRONMENT",
     "TOYAPP_LANGFUSE_FLUSH_ON_TURN",
     "TOYAPP_SESSION_MAX_TURNS",
+    "TOYAPP_SESSION_STORE_BACKEND",
+    "TOYAPP_REDIS_URL",
+    "REDIS_URL",
+    "TOYAPP_REDIS_KEY_PREFIX",
+    "TOYAPP_REDIS_SOCKET_TIMEOUT_SECONDS",
+    "TOYAPP_REDIS_LOCK_TIMEOUT_SECONDS",
+    "TOYAPP_REDIS_LOCK_BLOCKING_TIMEOUT_SECONDS",
     "TOYAPP_UPLOAD_MAX_BYTES",
     "TOYAPP_UPLOAD_MAX_PDF_PAGES",
     "TOYAPP_UPLOAD_MAX_EXTRACTED_CHARACTERS",
@@ -103,6 +111,12 @@ def test_settings_defaults_select_the_live_runtime_without_storing_credentials()
     assert settings.langfuse_environment == "development"
     assert settings.langfuse_flush_on_turn is True
     assert settings.session_max_turns == 10
+    assert settings.session_store_backend is SessionStoreBackend.MEMORY
+    assert settings.redis_url is None
+    assert settings.redis_key_prefix == "agentic-eval-toyapp"
+    assert settings.redis_socket_timeout_seconds == 5.0
+    assert settings.redis_lock_timeout_seconds == 1_800.0
+    assert settings.redis_lock_blocking_timeout_seconds == 10.0
     assert settings.upload_max_bytes == 5 * 1024 * 1024
     assert settings.upload_max_pdf_pages == 50
     assert settings.upload_max_extracted_characters == 100_000
@@ -142,6 +156,12 @@ def test_settings_load_prefixed_environment_variables(
     monkeypatch.setenv("TOYAPP_LANGFUSE_ENVIRONMENT", "test")
     monkeypatch.setenv("TOYAPP_LANGFUSE_FLUSH_ON_TURN", "false")
     monkeypatch.setenv("TOYAPP_SESSION_MAX_TURNS", "20")
+    monkeypatch.setenv("TOYAPP_SESSION_STORE_BACKEND", "redis")
+    monkeypatch.setenv("REDIS_URL", "rediss://user:private@redis.example:6380/0")
+    monkeypatch.setenv("TOYAPP_REDIS_KEY_PREFIX", "test-target")
+    monkeypatch.setenv("TOYAPP_REDIS_SOCKET_TIMEOUT_SECONDS", "4")
+    monkeypatch.setenv("TOYAPP_REDIS_LOCK_TIMEOUT_SECONDS", "1200")
+    monkeypatch.setenv("TOYAPP_REDIS_LOCK_BLOCKING_TIMEOUT_SECONDS", "8")
     monkeypatch.setenv("TOYAPP_UPLOAD_MAX_BYTES", "4096")
     monkeypatch.setenv("TOYAPP_UPLOAD_MAX_PDF_PAGES", "25")
     monkeypatch.setenv("TOYAPP_UPLOAD_MAX_EXTRACTED_CHARACTERS", "50000")
@@ -181,6 +201,15 @@ def test_settings_load_prefixed_environment_variables(
     assert settings.langfuse_environment == "test"
     assert settings.langfuse_flush_on_turn is False
     assert settings.session_max_turns == 20
+    assert settings.session_store_backend is SessionStoreBackend.REDIS
+    assert settings.redis_url is not None
+    assert settings.redis_url.get_secret_value() == (
+        "rediss://user:private@redis.example:6380/0"
+    )
+    assert settings.redis_key_prefix == "test-target"
+    assert settings.redis_socket_timeout_seconds == 4.0
+    assert settings.redis_lock_timeout_seconds == 1_200.0
+    assert settings.redis_lock_blocking_timeout_seconds == 8.0
     assert settings.upload_max_bytes == 4096
     assert settings.upload_max_pdf_pages == 25
     assert settings.upload_max_extracted_characters == 50_000
@@ -251,6 +280,24 @@ def test_langfuse_configuration_masks_secrets_and_normalises_url() -> None:
     assert "private-secret" not in repr(settings)
 
 
+def test_redis_configuration_requires_and_masks_a_supported_url() -> None:
+    """Persistent storage must reject missing/unsafe URLs and mask credentials."""
+    with pytest.raises(ValueError, match="REDIS_URL"):
+        AppSettings().require_redis_configuration()
+    with pytest.raises(ValueError, match="redis:// or rediss://"):
+        AppSettings.model_validate(
+            {"redis_url": "https://redis.example"}
+        ).require_redis_configuration()
+
+    settings = AppSettings.model_validate(
+        {"redis_url": "rediss://user:private@redis.example:6380/0"}
+    )
+    assert settings.require_redis_configuration() == (
+        "rediss://user:private@redis.example:6380/0"
+    )
+    assert "private" not in repr(settings)
+
+
 @pytest.mark.parametrize("port", [0, 65536])
 def test_settings_reject_out_of_range_ports(port: int) -> None:
     """TCP ports must stay within the valid range."""
@@ -269,6 +316,7 @@ def test_settings_reject_out_of_range_ports(port: int) -> None:
         "generation_model",
         "generation_model_revision",
         "langfuse_environment",
+        "redis_key_prefix",
     ],
 )
 def test_settings_reject_blank_required_text(field: str) -> None:
@@ -297,6 +345,12 @@ def test_settings_reject_blank_required_text(field: str) -> None:
         ("generation_timeout_seconds", 0),
         ("session_max_turns", 0),
         ("session_max_turns", 101),
+        ("redis_socket_timeout_seconds", 0),
+        ("redis_socket_timeout_seconds", 31),
+        ("redis_lock_timeout_seconds", 0),
+        ("redis_lock_timeout_seconds", 3_601),
+        ("redis_lock_blocking_timeout_seconds", -1),
+        ("redis_lock_blocking_timeout_seconds", 61),
         ("upload_max_bytes", 0),
         ("upload_max_pdf_pages", 0),
         ("upload_max_extracted_characters", 0),

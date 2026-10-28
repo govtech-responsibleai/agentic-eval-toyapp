@@ -57,7 +57,11 @@ def _report(text: str = "Revenue increased by 12%.") -> StoredReport:
         extracted_text_length=len(text),
         sha256="0" * 64,
     )
-    return StoredReport(metadata=metadata, extracted_text=text)
+    return StoredReport(
+        metadata=metadata,
+        original_bytes=text.encode(),
+        extracted_text=text,
+    )
 
 
 def _answer_result(message: str, *, agent: ExecutionAgent) -> AgentTurnResult:

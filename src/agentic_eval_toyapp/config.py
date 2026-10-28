@@ -32,6 +32,13 @@ class AgentMode(StrEnum):
     COORDINATOR = "coordinator"
 
 
+class SessionStoreBackend(StrEnum):
+    """Supported conversation-session and report storage backends."""
+
+    MEMORY = "memory"
+    REDIS = "redis"
+
+
 class AppSettings(BaseSettings):
     """Validated service settings.
 
@@ -105,6 +112,19 @@ class AppSettings(BaseSettings):
     langfuse_flush_on_turn: bool = True
     langfuse_include_report_text: bool = False
     session_max_turns: int = Field(default=10, ge=1, le=100)
+    session_store_backend: SessionStoreBackend = SessionStoreBackend.MEMORY
+    redis_url: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("REDIS_URL", "TOYAPP_REDIS_URL"),
+    )
+    redis_key_prefix: str = "agentic-eval-toyapp"
+    redis_socket_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    redis_lock_timeout_seconds: float = Field(default=1_800.0, gt=0.0, le=3_600.0)
+    redis_lock_blocking_timeout_seconds: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=60.0,
+    )
     upload_max_bytes: int = Field(default=5 * 1024 * 1024, ge=1, le=50 * 1024 * 1024)
     upload_max_pdf_pages: int = Field(default=50, ge=1, le=1_000)
     upload_max_extracted_characters: int = Field(
@@ -124,6 +144,7 @@ class AppSettings(BaseSettings):
         "generation_model",
         "generation_model_revision",
         "langfuse_environment",
+        "redis_key_prefix",
     )
     @classmethod
     def reject_blank_text(cls, value: str) -> str:
@@ -192,6 +213,21 @@ class AppSettings(BaseSettings):
         if base_url is None:  # Defensive; the missing-value branch raises above.
             raise AssertionError("validated Langfuse base URL is unavailable")
         return public_key, secret_key, base_url
+
+    def require_redis_configuration(self) -> str:
+        """Return a Redis URL only when it is present and uses a safe scheme."""
+        url = (
+            self.redis_url.get_secret_value().strip()
+            if self.redis_url is not None
+            else ""
+        )
+        if not url:
+            raise ValueError(
+                "Redis session storage requires REDIS_URL or TOYAPP_REDIS_URL"
+            )
+        if not url.startswith(("redis://", "rediss://")):
+            raise ValueError("Redis session storage requires redis:// or rediss://")
+        return url
 
 
 @lru_cache(maxsize=1)
