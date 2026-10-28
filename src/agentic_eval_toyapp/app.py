@@ -4,12 +4,12 @@ import hashlib
 import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
-from functools import partial
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
 from uuid import UUID
 
+from anyio import CapacityLimiter
 from fastapi import FastAPI, File, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -81,7 +81,12 @@ from agentic_eval_toyapp.reports import (
     ReportTooLargeError,
     UnsupportedReportTypeError,
 )
-from agentic_eval_toyapp.retrieval import FaissRetriever, corpus_sha256, load_corpus
+from agentic_eval_toyapp.retrieval import (
+    AsyncRetriever,
+    FaissRetriever,
+    corpus_sha256,
+    load_corpus,
+)
 from agentic_eval_toyapp.sessions import (
     AgentRunner,
     InMemorySessionStore,
@@ -123,6 +128,17 @@ class _AgentResolver:
         self._agent = agent
         self._factory = factory
         self._lock = Lock()
+        self._retrieval_limiter: CapacityLimiter | None = None
+
+    def bind_retrieval_limiter(self, limiter: CapacityLimiter) -> None:
+        """Record the lifespan-owned limiter used by the default agent."""
+        self._retrieval_limiter = limiter
+
+    def require_retrieval_limiter(self) -> CapacityLimiter:
+        """Return the bound limiter or fail rather than create a second slot."""
+        if self._retrieval_limiter is None:
+            raise RuntimeError("retrieval limiter is not bound; run the lifespan")
+        return self._retrieval_limiter
 
     def get(self) -> AgentRunner:
         """Return the injected agent or initialise the default exactly once."""
@@ -230,6 +246,7 @@ def _build_trace_recorder(
 
 def _build_rag_agent(
     settings: AppSettings,
+    retrieval_limiter: CapacityLimiter,
     *,
     trace_export_enabled: bool | None = None,
 ) -> RagAgent:
@@ -269,7 +286,7 @@ def _build_rag_agent(
     )
     return RagAgent(
         provider=generation_provider,
-        retriever=retriever,
+        retriever=AsyncRetriever(retriever, retrieval_limiter),
         system_prompt=system_prompt,
         max_model_calls=settings.agent_max_model_calls,
         max_searches=settings.agent_max_searches,
@@ -278,7 +295,9 @@ def _build_rag_agent(
     )
 
 
-def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
+def _build_coordinator_agent(
+    settings: AppSettings, retrieval_limiter: CapacityLimiter
+) -> CoordinatorAgent:
     """Construct the coordinator with RAG and report-analysis specialists."""
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
         provider = DeterministicCoordinatorGenerationProvider()
@@ -293,7 +312,9 @@ def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
             max_tokens=settings.generation_max_tokens,
             timeout_seconds=settings.generation_timeout_seconds,
         )
-    rag_agent = _build_rag_agent(settings, trace_export_enabled=False)
+    rag_agent = _build_rag_agent(
+        settings, retrieval_limiter, trace_export_enabled=False
+    )
     rag_specialist = RagSpecialistAdapter(rag_agent)
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
         analysis_provider = DeterministicAnalysisGenerationProvider()
@@ -355,11 +376,13 @@ def _build_coordinator_agent(settings: AppSettings) -> CoordinatorAgent:
     )
 
 
-def _build_default_agent(settings: AppSettings) -> AgentRunner:
+def _build_default_agent(
+    settings: AppSettings, retrieval_limiter: CapacityLimiter
+) -> AgentRunner:
     """Construct the explicitly selected top-level agent runtime."""
     if settings.agent_mode is AgentMode.COORDINATOR:
-        return _build_coordinator_agent(settings)
-    return _build_rag_agent(settings)
+        return _build_coordinator_agent(settings, retrieval_limiter)
+    return _build_rag_agent(settings, retrieval_limiter)
 
 
 def _public_error(*, status_code: int, code: str, message: str) -> JSONResponse:
@@ -482,13 +505,23 @@ def create_app(
     resolved_report_store = report_store or InMemoryReportStore(
         max_reports_per_session=resolved_settings.upload_max_reports_per_session
     )
+    resolver: _AgentResolver
+
+    def default_agent_factory() -> AgentRunner:
+        return _build_default_agent(
+            resolved_settings, resolver.require_retrieval_limiter()
+        )
+
     if agent is None and agent_factory is None:
-        agent_factory = partial(_build_default_agent, resolved_settings)
+        agent_factory = default_agent_factory
     resolver = _AgentResolver(agent=agent, factory=agent_factory)
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncGenerator[None, None]:
         """Finish RAG initialisation before the server accepts requests."""
+        # One slot for the whole process, created on the running loop and shared
+        # by every agent built from the default factory.
+        resolver.bind_retrieval_limiter(CapacityLimiter(1))
         resolver.get()
         LOGGER.info(
             "application_started agent_mode=%s generation_provider=%s "

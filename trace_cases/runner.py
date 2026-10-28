@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+from anyio import CapacityLimiter
 from fastapi import FastAPI
 from langfuse import Langfuse
 from starlette.testclient import TestClient
@@ -21,7 +22,7 @@ from agentic_eval_toyapp.providers import (
     OpenAIChatGenerationProvider,
     OpenAICompatibleChatClient,
 )
-from agentic_eval_toyapp.retrieval import FaissRetriever, load_corpus
+from agentic_eval_toyapp.retrieval import AsyncRetriever, FaissRetriever, load_corpus
 from agentic_eval_toyapp.tracing import LangfuseTraceRecorder
 from trace_cases.catalog import load_metric_bundle
 from trace_cases.controlled_client import (
@@ -146,7 +147,7 @@ def _build_live_application(
     )
     agent = RagAgent(
         provider=provider,
-        retriever=retriever,
+        retriever=AsyncRetriever(retriever, CapacityLimiter(1)),
         system_prompt=system_prompt,
         max_model_calls=settings.agent_max_model_calls,
         max_searches=settings.agent_max_searches,

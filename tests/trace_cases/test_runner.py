@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from anyio import CapacityLimiter
 from trace_cases.catalog import load_metric_bundle
 from trace_cases.controlled_client import ControlledStructuredCompletionClient
 from trace_cases.models import CaseVariant, TraceCaseRun
@@ -22,6 +23,7 @@ from agentic_eval_toyapp.app import create_app
 from agentic_eval_toyapp.config import AgentMode, AppSettings, GenerationProviderKind
 from agentic_eval_toyapp.models import ModelRequest, RetrievedChunk
 from agentic_eval_toyapp.providers import OpenAIChatGenerationProvider
+from agentic_eval_toyapp.retrieval import AsyncRetriever
 
 
 class _EmptyRetriever:
@@ -99,7 +101,7 @@ def test_controlled_case_exercises_the_normal_session_message_api(
     )
     agent = RagAgent(
         provider=provider,
-        retriever=_EmptyRetriever(),
+        retriever=AsyncRetriever(_EmptyRetriever(), CapacityLimiter(1)),
         system_prompt="Return one structured action.",
     )
     settings = AppSettings(
@@ -156,7 +158,7 @@ def test_run_manifest_retains_private_ground_truth_outside_trace(
             ),
             agent=RagAgent(
                 provider=provider,
-                retriever=_EmptyRetriever(),
+                retriever=AsyncRetriever(_EmptyRetriever(), CapacityLimiter(1)),
                 system_prompt="Return one structured action.",
             ),
         ),

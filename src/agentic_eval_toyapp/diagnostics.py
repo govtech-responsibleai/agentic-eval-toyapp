@@ -209,6 +209,19 @@ def log_trace_observation(
     )
 
 
+def log_retrieval_contention(*, queue_depth: int, wait_ms: int) -> None:
+    """Log a search that waited for the retrieval slot; never the query text."""
+    context = _CONTEXT.get() or DiagnosticContext()
+    LOGGER.info(
+        "toyapp_retrieval event=slot_wait session_id=%s turn_id=%s "
+        "queue_depth=%s wait_ms=%s",
+        context.session_id,
+        context.turn_id,
+        queue_depth,
+        wait_ms,
+    )
+
+
 def log_provider_failure(
     *,
     agent: str,

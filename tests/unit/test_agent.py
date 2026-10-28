@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from anyio import CapacityLimiter
 
 from agentic_eval_toyapp.agent import (
     PromptLoadError,
@@ -38,7 +39,7 @@ from agentic_eval_toyapp.providers import (
     InvalidGenerationActionError,
     ScriptedGenerationProvider,
 )
-from agentic_eval_toyapp.retrieval import load_corpus
+from agentic_eval_toyapp.retrieval import AsyncRetriever, load_corpus
 from agentic_eval_toyapp.tracing import TurnTrace
 
 
@@ -143,7 +144,7 @@ def _agent(
     return (
         RagAgent(
             provider=provider,
-            retriever=retriever,
+            retriever=AsyncRetriever(retriever, CapacityLimiter(1)),
             system_prompt="Search, clarify, or answer with citations.",
             max_model_calls=max_model_calls,
             max_searches=max_searches,
@@ -323,7 +324,7 @@ async def test_agent_repairs_one_invalid_structured_action() -> None:
     provider = _RepairingProvider()
     agent = RagAgent(
         provider=provider,
-        retriever=_StubRetriever({}),
+        retriever=AsyncRetriever(_StubRetriever({}), CapacityLimiter(1)),
         system_prompt="Choose one valid action.",
     )
 
@@ -343,7 +344,7 @@ async def test_agent_fails_after_one_unsuccessful_structured_action_repair() -> 
     provider = _AlwaysInvalidProvider()
     agent = RagAgent(
         provider=provider,
-        retriever=_StubRetriever({}),
+        retriever=AsyncRetriever(_StubRetriever({}), CapacityLimiter(1)),
         system_prompt="Choose one valid action.",
     )
 
@@ -763,7 +764,7 @@ async def test_rag_specialist_adapter_bypasses_standalone_trace_root() -> None:
         provider=ScriptedGenerationProvider(
             (AnswerAction(markdown="Direct policy answer", citations=()),)
         ),
-        retriever=_StubRetriever({}),
+        retriever=AsyncRetriever(_StubRetriever({}), CapacityLimiter(1)),
         system_prompt="Search, clarify, or answer.",
         trace_recorder=recorder,
     )
@@ -840,7 +841,7 @@ def test_agent_rejects_invalid_construction_limits(
     """Invalid bounds must fail before an agent turn starts."""
     arguments: dict[str, object] = {
         "provider": ScriptedGenerationProvider((ClarifyAction(question="Question?"),)),
-        "retriever": _StubRetriever({}),
+        "retriever": AsyncRetriever(_StubRetriever({}), CapacityLimiter(1)),
         "system_prompt": "Prompt",
         "max_model_calls": 3,
         "max_searches": 2,

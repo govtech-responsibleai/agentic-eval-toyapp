@@ -7,9 +7,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from anyio import CapacityLimiter
 from httpx2 import Request, Response
 from openai import APIStatusError
-from starlette.concurrency import run_in_threadpool
 
 from agentic_eval_toyapp.diagnostics import (
     CompletionDiagnostics,
@@ -19,6 +19,7 @@ from agentic_eval_toyapp.diagnostics import (
     log_trace_observation,
 )
 from agentic_eval_toyapp.models import RetrievedChunk
+from agentic_eval_toyapp.retrieval import AsyncRetriever
 
 
 def test_missing_or_malformed_provider_usage_remains_unknown() -> None:
@@ -212,7 +213,7 @@ async def test_diagnostic_context_survives_the_retrieval_thread_hop(
     retriever = _LoggingRetriever()
 
     with caplog.at_level(logging.DEBUG), diagnostic_context(session_id, turn=True):
-        await run_in_threadpool(retriever.search, "question", top_k=1)
+        await AsyncRetriever(retriever, CapacityLimiter(1)).search("question", top_k=1)
 
     assert retriever.thread_id != threading.get_ident()
     probe = [r.getMessage() for r in caplog.records if "thread_probe" in r.getMessage()]

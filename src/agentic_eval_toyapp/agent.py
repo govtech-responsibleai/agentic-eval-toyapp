@@ -6,8 +6,6 @@ from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
-from starlette.concurrency import run_in_threadpool
-
 from agentic_eval_toyapp.diagnostics import log_failure
 from agentic_eval_toyapp.models import (
     AgentAction,
@@ -38,7 +36,7 @@ from agentic_eval_toyapp.providers import (
     InvalidGenerationActionError,
 )
 from agentic_eval_toyapp.reports import StoredReport
-from agentic_eval_toyapp.retrieval import Retriever
+from agentic_eval_toyapp.retrieval import AsyncSearcher
 from agentic_eval_toyapp.tracing import NoOpTraceRecorder, TraceRecorder, TurnTrace
 
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system.md"
@@ -67,7 +65,7 @@ class RagAgent:
         self,
         *,
         provider: GenerationProvider,
-        retriever: Retriever,
+        retriever: AsyncSearcher,
         system_prompt: str,
         max_model_calls: int = 4,
         max_searches: int = 2,
@@ -306,8 +304,7 @@ class RagAgent:
                 seen_queries.add(normalised_query)
                 searches += 1
                 try:
-                    results = await run_in_threadpool(
-                        self._retriever.search,
+                    results = await self._retriever.search(
                         action.query,
                         top_k=action.top_k,
                     )

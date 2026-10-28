@@ -7,6 +7,7 @@ from datetime import date
 from uuid import uuid4
 
 import pytest
+from anyio import CapacityLimiter
 from langfuse import Langfuse
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
@@ -46,6 +47,7 @@ from agentic_eval_toyapp.orchestration_models import (
 )
 from agentic_eval_toyapp.providers import ScriptedGenerationProvider
 from agentic_eval_toyapp.reports import StoredReport
+from agentic_eval_toyapp.retrieval import AsyncRetriever
 
 
 def _recorder() -> tuple[LangfuseCoordinatorTraceRecorder, InMemorySpanExporter]:
@@ -144,7 +146,7 @@ async def test_rag_route_exports_one_complete_sdk_tree() -> None:
                 ),
             )
         ),
-        retriever=_Retriever(),
+        retriever=AsyncRetriever(_Retriever(), CapacityLimiter(1)),
         system_prompt="Answer policy questions.",
     )
     agent = CoordinatorAgent(
@@ -308,7 +310,7 @@ async def test_concurrent_traced_turns_keep_separate_span_trees() -> None:
         rag_specialist=RagSpecialistAdapter(
             RagAgent(
                 provider=_GatedRagProvider(turn_count),
-                retriever=_Retriever(),
+                retriever=AsyncRetriever(_Retriever(), CapacityLimiter(1)),
                 system_prompt="Answer policy questions.",
             )
         ),
@@ -406,7 +408,7 @@ async def test_trace_context_survives_the_retrieval_thread_hop() -> None:
                         ),
                     )
                 ),
-                retriever=retriever,
+                retriever=AsyncRetriever(retriever, CapacityLimiter(1)),
                 system_prompt="Answer policy questions.",
             )
         ),

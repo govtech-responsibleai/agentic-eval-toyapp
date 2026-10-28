@@ -3,6 +3,7 @@
 from datetime import date
 
 import pytest
+from anyio import CapacityLimiter
 
 from agentic_eval_toyapp.agent import RagAgent, load_system_prompt
 from agentic_eval_toyapp.embeddings import DeterministicEmbeddingProvider
@@ -15,7 +16,7 @@ from agentic_eval_toyapp.models import (
     SearchAction,
 )
 from agentic_eval_toyapp.providers import ScriptedGenerationProvider
-from agentic_eval_toyapp.retrieval import FaissRetriever
+from agentic_eval_toyapp.retrieval import AsyncRetriever, FaissRetriever
 
 
 @pytest.mark.anyio
@@ -59,7 +60,7 @@ async def test_scripted_agent_uses_faiss_evidence_for_grounded_answer() -> None:
     )
     agent = RagAgent(
         provider=provider,
-        retriever=retriever,
+        retriever=AsyncRetriever(retriever, CapacityLimiter(1)),
         system_prompt=load_system_prompt(),
     )
 

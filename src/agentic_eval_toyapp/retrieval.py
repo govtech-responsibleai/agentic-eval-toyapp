@@ -3,11 +3,17 @@
 import hashlib
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
+from anyio import CapacityLimiter, to_thread
 from pydantic import ValidationError
 
+from agentic_eval_toyapp.diagnostics import (
+    elapsed_milliseconds,
+    log_retrieval_contention,
+)
 from agentic_eval_toyapp.embeddings import (
     EmbeddingProvider,
     l2_normalize_embeddings,
@@ -36,6 +42,49 @@ class Retriever(Protocol):
     ) -> tuple[RetrievedChunk, ...]:
         """Return ranked chunks for one non-blank query."""
         ...
+
+
+class AsyncSearcher(Protocol):
+    """Async search interface consumed by the RAG agent."""
+
+    async def search(
+        self, query: str, *, top_k: int | None = None
+    ) -> tuple[RetrievedChunk, ...]:
+        """Return ranked chunks for one non-blank query."""
+        ...
+
+
+class AsyncRetriever:
+    """Run a synchronous retriever on worker threads through one bounded limiter.
+
+    The limiter is supplied by the caller so it can be created inside the running
+    application. anyio copies context variables into the worker thread, which
+    keeps the active trace span and diagnostic IDs attached to the search.
+    """
+
+    def __init__(self, retriever: Retriever, limiter: CapacityLimiter) -> None:
+        self._retriever = retriever
+        self._limiter = limiter
+
+    async def search(
+        self, query: str, *, top_k: int | None = None
+    ) -> tuple[RetrievedChunk, ...]:
+        """Wait for the retrieval slot, then search on a worker thread."""
+        statistics = self._limiter.statistics()
+        contended = statistics.borrowed_tokens > 0 or statistics.tasks_waiting > 0
+        queue_depth = statistics.tasks_waiting
+        arrived_at = perf_counter()
+        waited_ms: list[int] = []
+
+        def run() -> tuple[RetrievedChunk, ...]:
+            waited_ms.append(elapsed_milliseconds(arrived_at))
+            return self._retriever.search(query, top_k=top_k)
+
+        try:
+            return await to_thread.run_sync(run, limiter=self._limiter)
+        finally:
+            if contended and waited_ms:
+                log_retrieval_contention(queue_depth=queue_depth, wait_ms=waited_ms[0])
 
 
 def load_corpus(path: Path = DEFAULT_CORPUS_PATH) -> KnowledgeCorpus:
