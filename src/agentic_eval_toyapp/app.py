@@ -25,6 +25,12 @@ from agentic_eval_toyapp.analysis import (
     ReportAnalysisAgent,
     load_analysis_prompt,
 )
+from agentic_eval_toyapp.backpressure import (
+    RETRY_AFTER_SECONDS,
+    RateLimitedCompletionClient,
+    ServerBusyError,
+    TurnAdmission,
+)
 from agentic_eval_toyapp.config import (
     AgentMode,
     AppSettings,
@@ -71,6 +77,7 @@ from agentic_eval_toyapp.providers import (
     GenerationProvider,
     OpenAIChatGenerationProvider,
     OpenAICompatibleChatClient,
+    StructuredCompletionClient,
 )
 from agentic_eval_toyapp.reports import (
     InMemoryReportStore,
@@ -193,10 +200,30 @@ class _AgentResolver:
             self._agent.shutdown()
 
 
+def _build_completion_client(
+    settings: AppSettings,
+    *,
+    instrument_with_langfuse: bool,
+) -> StructuredCompletionClient:
+    """Build the one rate-limited client that every live agent call shares."""
+    api_key, base_url = settings.require_openai_configuration()
+    return RateLimitedCompletionClient(
+        OpenAICompatibleChatClient(
+            api_key=api_key,
+            base_url=base_url,
+            timeout_seconds=settings.generation_timeout_seconds,
+            instrument_with_langfuse=instrument_with_langfuse,
+        ),
+        max_requests_per_minute=settings.llm_max_requests_per_minute,
+        max_concurrent_calls=settings.llm_max_concurrent_calls,
+    )
+
+
 def _build_generation_provider(
     settings: AppSettings,
     *,
     instrument_with_langfuse: bool | None = None,
+    completion_client: StructuredCompletionClient | None = None,
 ) -> GenerationProvider:
     """Construct the explicitly selected process-level generation provider."""
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
@@ -207,6 +234,9 @@ def _build_generation_provider(
         if instrument_with_langfuse is None
         else instrument_with_langfuse
     )
+    completion_client = completion_client or _build_completion_client(
+        settings, instrument_with_langfuse=tracing_enabled
+    )
     return OpenAIChatGenerationProvider(
         api_key=api_key,
         base_url=base_url,
@@ -216,6 +246,7 @@ def _build_generation_provider(
         max_tokens=settings.generation_max_tokens,
         timeout_seconds=settings.generation_timeout_seconds,
         instrument_with_langfuse=tracing_enabled,
+        client=completion_client,
     )
 
 
@@ -258,6 +289,7 @@ def _build_rag_agent(
     retrieval_limiter: CapacityLimiter,
     *,
     trace_export_enabled: bool | None = None,
+    completion_client: StructuredCompletionClient | None = None,
 ) -> RagAgent:
     """Construct the configured RAG provider, retriever, and tracing boundary."""
     export_traces = (
@@ -268,6 +300,7 @@ def _build_rag_agent(
     generation_provider = _build_generation_provider(
         settings,
         instrument_with_langfuse=export_traces,
+        completion_client=completion_client,
     )
     embedding_provider = SentenceTransformerEmbeddingProvider(
         model_id=settings.embedding_model_id,
@@ -308,10 +341,16 @@ def _build_coordinator_agent(
     settings: AppSettings, retrieval_limiter: CapacityLimiter
 ) -> CoordinatorAgent:
     """Construct the coordinator with RAG and report-analysis specialists."""
+    completion_client: StructuredCompletionClient | None = None
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
         provider = DeterministicCoordinatorGenerationProvider()
     else:
         api_key, base_url = settings.require_openai_configuration()
+        # One client, so one pacing clock and one semaphore, serves the
+        # coordinator, the RAG specialist and the analysis specialist.
+        completion_client = _build_completion_client(
+            settings, instrument_with_langfuse=False
+        )
         provider = build_openai_coordinator_provider(
             api_key=api_key,
             base_url=base_url,
@@ -320,26 +359,25 @@ def _build_coordinator_agent(
             temperature=settings.generation_temperature,
             max_tokens=settings.generation_max_tokens,
             timeout_seconds=settings.generation_timeout_seconds,
+            client=completion_client,
         )
     rag_agent = _build_rag_agent(
-        settings, retrieval_limiter, trace_export_enabled=False
+        settings,
+        retrieval_limiter,
+        trace_export_enabled=False,
+        completion_client=completion_client,
     )
     rag_specialist = RagSpecialistAdapter(rag_agent)
     if settings.generation_provider is GenerationProviderKind.DETERMINISTIC:
         analysis_provider = DeterministicAnalysisGenerationProvider()
     else:
-        api_key, base_url = settings.require_openai_configuration()
         analysis_provider = OpenAIAnalysisGenerationProvider(
             model=settings.generation_model,
             revision=settings.generation_model_revision,
             temperature=settings.generation_temperature,
             max_tokens=settings.analysis_max_output_tokens,
-            client=OpenAICompatibleChatClient(
-                api_key=api_key,
-                base_url=base_url,
-                timeout_seconds=settings.generation_timeout_seconds,
-                instrument_with_langfuse=False,
-            ),
+            client=completion_client
+            or _build_completion_client(settings, instrument_with_langfuse=False),
         )
     analysis_specialist = ReportAnalysisAgent(
         provider=analysis_provider,
@@ -424,11 +462,18 @@ def _build_report_store(settings: AppSettings) -> ReportStore:
     )
 
 
-def _public_error(*, status_code: int, code: str, message: str) -> JSONResponse:
+def _public_error(
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     error = ErrorResponse(code=code, message=message)
     return JSONResponse(
         status_code=status_code,
         content=error.model_dump(mode="json"),
+        headers=headers,
     )
 
 
@@ -487,6 +532,15 @@ async def _handle_agent_initialisation_error(
         status_code=503,
         code="agent_unavailable",
         message="The configured agent runtime is not ready.",
+    )
+
+
+async def _handle_server_busy(_request: Request, _error: Exception) -> JSONResponse:
+    return _public_error(
+        status_code=503,
+        code="server_busy",
+        message="The service is at capacity. Retry the request shortly.",
+        headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
     )
 
 
@@ -578,6 +632,7 @@ def create_app(
         max_extracted_characters=(resolved_settings.upload_max_extracted_characters),
     )
     resolved_report_store = report_store or _build_report_store(resolved_settings)
+    admission = TurnAdmission(resolved_settings.max_pending_turns)
     resolver: _AgentResolver
 
     def default_agent_factory() -> AgentRunner:
@@ -632,6 +687,7 @@ def create_app(
         AgentInitialisationError,
         _handle_agent_initialisation_error,
     )
+    application.add_exception_handler(ServerBusyError, _handle_server_busy)
     application.add_exception_handler(
         RequestValidationError,
         _handle_request_validation_error,
@@ -986,12 +1042,26 @@ def create_app(
                 )
                 raise
             resolved_agent = resolver.get()
-            result = await resolved_store.run_turn(
-                session_id,
-                request.message,
-                agent=resolved_agent,
-                reports=reports,
-            )
+            # Refuse overload before any agent code, trace or stored turn exists.
+            if not admission.try_acquire():
+                log_failure(
+                    event="message",
+                    agent="api",
+                    operation="admit_turn",
+                    code="server_busy",
+                    level=logging.WARNING,
+                    status_code=503,
+                )
+                raise ServerBusyError
+            try:
+                result = await resolved_store.run_turn(
+                    session_id,
+                    request.message,
+                    agent=resolved_agent,
+                    reports=reports,
+                )
+            finally:
+                admission.release()
             return SessionMessageResponse(session_id=session_id, result=result)
 
     return application

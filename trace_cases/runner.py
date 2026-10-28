@@ -15,6 +15,7 @@ from starlette.testclient import TestClient
 from agentic_eval_toyapp import __version__
 from agentic_eval_toyapp.agent import RagAgent, load_system_prompt
 from agentic_eval_toyapp.app import create_app
+from agentic_eval_toyapp.backpressure import RateLimitedCompletionClient
 from agentic_eval_toyapp.config import AgentMode, AppSettings, GenerationProviderKind
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
 from agentic_eval_toyapp.models import AnswerAction, SessionMessageResponse
@@ -87,11 +88,15 @@ def _build_live_application(
         environment=settings.langfuse_environment,
         release=__version__,
     )
-    raw_client = OpenAICompatibleChatClient(
-        api_key=api_key,
-        base_url=openai_base_url,
-        timeout_seconds=settings.generation_timeout_seconds,
-        instrument_with_langfuse=False,
+    raw_client = RateLimitedCompletionClient(
+        OpenAICompatibleChatClient(
+            api_key=api_key,
+            base_url=openai_base_url,
+            timeout_seconds=settings.generation_timeout_seconds,
+            instrument_with_langfuse=False,
+        ),
+        max_requests_per_minute=settings.llm_max_requests_per_minute,
+        max_concurrent_calls=settings.llm_max_concurrent_calls,
     )
     controlled_client = ControlledStructuredCompletionClient(
         delegate=raw_client,
