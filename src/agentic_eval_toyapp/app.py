@@ -111,6 +111,7 @@ from agentic_eval_toyapp.sessions import (
 from agentic_eval_toyapp.tracing import (
     LangfuseTraceRecorder,
     NoOpTraceRecorder,
+    TraceExportError,
     TraceRecorder,
 )
 
@@ -195,7 +196,15 @@ class _AgentResolver:
             return candidate
 
     def shutdown(self) -> None:
-        """Release resources owned by the default agent, if initialised."""
+        """Release the agent's tracing resources, if it has been initialised.
+
+        This is the one place the final Langfuse flush happens when
+        `TOYAPP_LANGFUSE_FLUSH_ON_TURN=false`: the recorder's `shutdown()` drains
+        the SDK's background queue.
+        """
+        # Intentional: `AgentRunner` has no `shutdown()`, so only the two agent
+        # types known to own a trace recorder are closed. An injected custom
+        # runner owns its own resources and its caller must close them.
         if isinstance(self._agent, (RagAgent, CoordinatorAgent)):
             self._agent.shutdown()
 
@@ -544,6 +553,19 @@ async def _handle_server_busy(_request: Request, _error: Exception) -> JSONRespo
     )
 
 
+async def _handle_trace_export_error(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    return _public_error(
+        status_code=503,
+        code="trace_export_failed",
+        message=(
+            "The turn ran but its trace could not be exported to Langfuse. "
+            "Treat the trace as incomplete."
+        ),
+    )
+
+
 async def _handle_request_validation_error(
     _request: Request, _error: Exception
 ) -> JSONResponse:
@@ -688,6 +710,7 @@ def create_app(
         _handle_agent_initialisation_error,
     )
     application.add_exception_handler(ServerBusyError, _handle_server_busy)
+    application.add_exception_handler(TraceExportError, _handle_trace_export_error)
     application.add_exception_handler(
         RequestValidationError,
         _handle_request_validation_error,

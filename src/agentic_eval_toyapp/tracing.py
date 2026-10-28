@@ -287,6 +287,10 @@ class LangfuseTurnTrace:
         )
 
 
+class TraceExportError(RuntimeError):
+    """Raised when a per-turn Langfuse flush fails, so the trace may be incomplete."""
+
+
 class LangfuseTraceRecorder:
     """Export output-bearing agent-turn traces grouped by app session UUID."""
 
@@ -373,7 +377,7 @@ class LangfuseTraceRecorder:
                 code="langfuse_flush_error",
                 error=error,
             )
-            raise RuntimeError("Langfuse trace flush failed") from None
+            raise TraceExportError("Langfuse trace flush failed") from None
 
     def shutdown(self) -> None:
         try:
