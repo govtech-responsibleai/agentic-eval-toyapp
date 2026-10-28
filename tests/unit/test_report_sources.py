@@ -159,7 +159,8 @@ def test_duplicate_markdown_headings_get_distinct_locators() -> None:
         ("long.pdf", "application/pdf"),
     ],
 )
-def test_every_accepted_type_reaches_sources_without_text_loss(
+@pytest.mark.anyio
+async def test_every_accepted_type_reaches_sources_without_text_loss(
     filename: str,
     media_type: str,
 ) -> None:
@@ -180,9 +181,9 @@ def test_every_accepted_type_reaches_sources_without_text_loss(
     ).process(filename=filename, media_type=media_type, content=content)
     session_id = uuid4()
     store = InMemoryReportStore(max_reports_per_session=1)
-    metadata = store.add(session_id, processed)
+    metadata = await store.add(session_id, processed)
     attachment = CoordinatorAgent.attachment_from_report(
-        store.resolve(session_id, (metadata.file_id,))[0]
+        (await store.resolve(session_id, (metadata.file_id,)))[0]
     )
     blocks = source_blocks((attachment,))
 

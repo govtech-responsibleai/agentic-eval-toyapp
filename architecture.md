@@ -1229,10 +1229,15 @@ excluded from `make ci`.
   cancellation, or recovery lifecycle. Retrieval is bounded to one concurrent
   search per process, but the queue of waiting turns has no size limit or
   timeout, and rate limiting and backpressure are deferred.
-- The Redis stores use the synchronous client through the worker-thread pool,
-  so a turn waiting on a busy session's distributed lock occupies one thread
-  for up to the lock's blocking timeout. The in-memory store has no such cost.
-  Moving both Redis stores to `redis.asyncio` would remove it.
+- The Redis stores use `redis.asyncio`, so Redis calls and distributed-lock
+  waits run on the event loop and a turn waiting on a busy session holds no
+  worker thread. The async connection pool is bound to one event loop, so the
+  application lifespan opens it and closes it with `aclose()` at shutdown; a
+  store used outside the lifespan reports itself unavailable unless a client
+  was injected. Only the CPU-bound JSON and base64 encoding of report payloads
+  still runs in a worker thread. A turn cancelled in the instant between Redis
+  granting the lock and the client recording it can leave the lock held until
+  its TTL (`redis_lock_timeout_seconds`, 30 minutes by default).
 - The in-memory backend loses bounded session history on restart. Redis makes
   session history persistent and worker-shared, but Redis operation and backup
   remain deployment responsibilities.
