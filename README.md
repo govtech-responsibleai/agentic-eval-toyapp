@@ -138,7 +138,10 @@ The application session UUID is also used as the Langfuse session ID. Use the
 service base URL, including a reverse-proxy prefix such as `/langfuse`; do not
 append the OTLP API path. Keep `TOYAPP_LANGFUSE_FLUSH_ON_TURN=true` for evaluation
 runs so the SDK attempts export before the HTTP turn completes. A returned
-flush is not proof of successful ingestion.
+flush is not proof of successful ingestion. If the per-turn flush itself fails,
+the message route returns 503 with code `trace_export_failed` and the turn is not
+saved to the session history, so a failed export is distinguishable from an
+application error and the trace should be treated as incomplete.
 
 `TOYAPP_LANGFUSE_FLUSH_ON_TURN=false` is a supported deferred mode for load
 tests. No flush is made per turn, so the HTTP response no longer waits for

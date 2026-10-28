@@ -111,6 +111,7 @@ from agentic_eval_toyapp.sessions import (
 from agentic_eval_toyapp.tracing import (
     LangfuseTraceRecorder,
     NoOpTraceRecorder,
+    TraceExportError,
     TraceRecorder,
 )
 
@@ -552,6 +553,19 @@ async def _handle_server_busy(_request: Request, _error: Exception) -> JSONRespo
     )
 
 
+async def _handle_trace_export_error(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    return _public_error(
+        status_code=503,
+        code="trace_export_failed",
+        message=(
+            "The turn ran but its trace could not be exported to Langfuse. "
+            "Treat the trace as incomplete."
+        ),
+    )
+
+
 async def _handle_request_validation_error(
     _request: Request, _error: Exception
 ) -> JSONResponse:
@@ -696,6 +710,7 @@ def create_app(
         _handle_agent_initialisation_error,
     )
     application.add_exception_handler(ServerBusyError, _handle_server_busy)
+    application.add_exception_handler(TraceExportError, _handle_trace_export_error)
     application.add_exception_handler(
         RequestValidationError,
         _handle_request_validation_error,

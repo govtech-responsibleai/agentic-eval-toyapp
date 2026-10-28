@@ -234,3 +234,37 @@ def test_injected_agent_without_shutdown_is_left_alone() -> None:
         pass
 
     assert client.shutdowns == 0
+
+
+class _FailingFlushClient(_FakeLangfuseClient):
+    def flush(self) -> None:
+        raise OSError("private network detail")
+
+
+@pytest.mark.parametrize("mode", ["rag", "coordinator"])
+def test_failed_per_turn_flush_returns_a_distinct_503(mode: str) -> None:
+    """A trace that could not be delivered must be distinguishable from a crash."""
+    client = _FailingFlushClient()
+    agent: AgentRunner = (
+        _rag_agent(client, flush_on_turn=True)
+        if mode == "rag"
+        else _coordinator_agent(client, flush_on_turn=True)
+    )
+    application = create_app(
+        AppSettings(
+            generation_provider=GenerationProviderKind.DETERMINISTIC,
+            langfuse_enabled=False,
+        ),
+        agent=agent,
+    )
+
+    with TestClient(application) as api:
+        session_id = api.post("/api/v1/sessions").json()["session_id"]
+        response = api.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"message": "How much annual leave do I get?"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "trace_export_failed"
+    assert "private network detail" not in response.text
