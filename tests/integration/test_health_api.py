@@ -53,7 +53,7 @@ class _IntrospectionAgent:
 
 
 class _UnavailableSessionStore(InMemorySessionStore):
-    def check(self) -> None:
+    async def check(self) -> None:
         raise SessionStoreUnavailableError("private Redis connection details")
 
     async def create(self) -> SessionResponse:
@@ -61,10 +61,12 @@ class _UnavailableSessionStore(InMemorySessionStore):
 
 
 class _UnavailableReportStore(InMemoryReportStore):
-    def check(self) -> None:
+    async def check(self) -> None:
         raise ReportStoreUnavailableError("private Redis connection details")
 
-    def list_for_session(self, session_id: UUID) -> tuple[ReportUploadResponse, ...]:
+    async def list_for_session(
+        self, session_id: UUID
+    ) -> tuple[ReportUploadResponse, ...]:
         del session_id
         raise ReportStoreUnavailableError("private Redis connection details")
 

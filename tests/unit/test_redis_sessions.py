@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from uuid import UUID, uuid4
 
 import pytest
+from anyio import to_thread
 from redis.exceptions import ConnectionError
 
 from agentic_eval_toyapp.models import (
@@ -65,18 +66,18 @@ class _FailingAgent:
 class _FakeLock:
     def __init__(self, client: "_FakeRedisClient") -> None:
         self._client = client
-        self._acquired = False
+        self.acquired = False
 
-    def acquire(self) -> bool:
+    async def acquire(self) -> bool:
         self._client.ensure_available()
-        self._acquired = self._client.lock_available
-        return self._acquired
+        self.acquired = self._client.lock_available
+        return self.acquired
 
-    def release(self) -> None:
+    async def release(self) -> None:
         self._client.ensure_available()
-        if not self._acquired:
+        if not self.acquired:
             raise AssertionError("cannot release an unowned fake lock")
-        self._acquired = False
+        self.acquired = False
 
 
 class _FakeRedisClient:
@@ -84,24 +85,28 @@ class _FakeRedisClient:
         self.data: dict[str, str] = {}
         self.available = True
         self.lock_available = True
+        self.locks: list[_FakeLock] = []
+        self.closed = False
 
     def ensure_available(self) -> None:
         if not self.available:
             raise ConnectionError("fake Redis unavailable")
 
-    def ping(self) -> bool:
+    async def ping(self) -> bool:
         self.ensure_available()
         return True
 
-    def set(self, name: str, value: str, *, nx: bool = False) -> object:
+    async def set(self, name: str, value: str, *, nx: bool = False) -> object:
         self.ensure_available()
+        await asyncio.sleep(0)
         if nx and name in self.data:
             return False
         self.data[name] = value
         return True
 
-    def get(self, name: str) -> str | bytes | None:
+    async def get(self, name: str) -> str | bytes | None:
         self.ensure_available()
+        await asyncio.sleep(0)
         return self.data.get(name)
 
     def lock(
@@ -110,11 +115,17 @@ class _FakeRedisClient:
         *,
         timeout: float,
         blocking_timeout: float,
-        thread_local: bool,
     ) -> _FakeLock:
         del name, timeout, blocking_timeout
-        assert thread_local is False, "lock is released from another worker thread"
+        lock = self._new_lock()
+        self.locks.append(lock)
+        return lock
+
+    def _new_lock(self) -> _FakeLock:
         return _FakeLock(self)
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 @pytest.mark.anyio
@@ -179,7 +190,7 @@ async def test_redis_store_rejects_missing_busy_and_unavailable_sessions() -> No
 
     client.available = False
     with pytest.raises(SessionStoreUnavailableError):
-        store.check()
+        await store.check()
     with pytest.raises(SessionStoreUnavailableError):
         await store.get(session.session_id)
     assert agent.calls == []
@@ -226,54 +237,202 @@ async def test_redis_store_retries_uuid_collisions_and_validates_configuration()
         RedisSessionStore(_FakeRedisClient(), lock_timeout_seconds=0)
 
 
-class _SlowLockClient(_FakeRedisClient):
-    """Block lock acquisition in the calling thread, as a real Redis wait would."""
+class _BlockingLock(_FakeLock):
+    """Wait on an event in `acquire`, as a busy distributed lock would."""
 
-    def __init__(self, release: threading.Event) -> None:
+    def __init__(self, client: "_BlockingLockClient") -> None:
+        super().__init__(client)
+        self._blocking_client = client
+
+    async def acquire(self) -> bool:
+        self._blocking_client.acquire_started.set()
+        await self._blocking_client.proceed.wait()
+        return await super().acquire()
+
+
+class _BlockingLockClient(_FakeRedisClient):
+    def __init__(self) -> None:
         super().__init__()
-        self.release = release
-        self.acquire_threads: list[int] = []
+        self.proceed = asyncio.Event()
+        self.acquire_started = asyncio.Event()
 
-    def lock(
-        self,
-        name: str,
-        *,
-        timeout: float,
-        blocking_timeout: float,
-        thread_local: bool,
-    ) -> _FakeLock:
-        del name, timeout, blocking_timeout, thread_local
-        client = self
-
-        class _BlockingLock(_FakeLock):
-            def acquire(self) -> bool:
-                client.acquire_threads.append(threading.get_ident())
-                client.release.wait(timeout=5.0)
-                return super().acquire()
-
+    def _new_lock(self) -> _FakeLock:
         return _BlockingLock(self)
 
 
 @pytest.mark.anyio
-async def test_redis_store_waiting_on_a_lock_does_not_block_the_event_loop() -> None:
-    """A second same-session turn waits in a worker thread, not on the loop."""
-    release = threading.Event()
-    client = _SlowLockClient(release)
+async def test_redis_store_waiter_holds_no_thread_with_the_pool_saturated() -> None:
+    """A turn waiting on a busy lock must not need a worker thread to wait."""
+    client = _BlockingLockClient()
     store = RedisSessionStore(client)
     session = await store.create()
-    turn = asyncio.create_task(
-        store.run_turn(session.session_id, "held", agent=_RecordingAgent())
-    )
+    limiter = to_thread.current_default_thread_limiter()
+    original = limiter.total_tokens
+    limiter.total_tokens = 1
+    try:
+        # Occupy the only worker thread; any threadpool-based wait would hang.
+        gate = threading.Event()
+        blocker = asyncio.create_task(to_thread.run_sync(gate.wait, 5.0))
+        await asyncio.sleep(0.01)
+        assert limiter.borrowed_tokens == 1
 
-    ticks = 0
-    for _ in range(50):
-        await asyncio.sleep(0.001)
-        ticks += 1
-    assert client.acquire_threads
-    assert client.acquire_threads[0] != threading.get_ident()
-    assert ticks == 50
+        waiter = asyncio.create_task(
+            store.run_turn(session.session_id, "held", agent=_RecordingAgent())
+        )
+        await asyncio.wait_for(client.acquire_started.wait(), 1.0)
+        client.proceed.set()
+        result = await asyncio.wait_for(waiter, 1.0)
+        assert result.message == "Please clarify: held"
+        gate.set()
+        await blocker
+    finally:
+        limiter.total_tokens = original
 
-    release.set()
-    result = await asyncio.wait_for(turn, 5.0)
-    assert result.message == "Please clarify: held"
-    assert (await store.get(session.session_id)).retained_turns == 1
+
+@pytest.mark.anyio
+async def test_redis_store_releases_the_lock_when_the_turn_raises() -> None:
+    """A failing agent must still free the distributed lock."""
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client)
+    session = await store.create()
+
+    with pytest.raises(RuntimeError, match="agent failed"):
+        await store.run_turn(session.session_id, "q", agent=_FailingAgent())
+
+    assert len(client.locks) == 1
+    assert client.locks[0].acquired is False
+
+
+class _HangingAgent:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def run(
+        self,
+        user_message: str,
+        *,
+        history: Sequence[ConversationMessage] = (),
+        session_id: str | None = None,
+        reports: Sequence[StoredReport] = (),
+    ) -> AgentTurnResult:
+        del user_message, history, session_id, reports
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.anyio
+async def test_redis_store_releases_the_lock_when_the_turn_is_cancelled() -> None:
+    """Cancelling a running turn must free the lock and persist no partial turn."""
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client)
+    session = await store.create()
+    agent = _HangingAgent()
+    turn = asyncio.create_task(store.run_turn(session.session_id, "q", agent=agent))
+    await asyncio.wait_for(agent.started.wait(), 1.0)
+
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert client.locks[0].acquired is False
+    assert (await store.get(session.session_id)).retained_turns == 0
+
+
+@pytest.mark.anyio
+async def test_redis_store_cancel_while_waiting_for_the_lock_leaves_no_lock() -> None:
+    """A turn cancelled before acquiring never holds, or tries to release, a lock."""
+    client = _BlockingLockClient()
+    store = RedisSessionStore(client)
+    session = await store.create()
+    agent = _RecordingAgent()
+    turn = asyncio.create_task(store.run_turn(session.session_id, "q", agent=agent))
+    await asyncio.wait_for(client.acquire_started.wait(), 1.0)
+
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert client.locks[0].acquired is False
+    assert agent.calls == []
+    assert (await store.get(session.session_id)).retained_turns == 0
+
+
+@pytest.mark.anyio
+async def test_redis_store_serialises_same_session_turns_in_order() -> None:
+    """Two simultaneous same-session turns both complete, one after the other."""
+    client = _FakeRedisClient()
+    shared = asyncio.Lock()
+
+    class _SerialLock(_FakeLock):
+        async def acquire(self) -> bool:
+            await shared.acquire()
+            return await super().acquire()
+
+        async def release(self) -> None:
+            await super().release()
+            shared.release()
+
+    client._new_lock = lambda: _SerialLock(client)  # pyright: ignore[reportPrivateUsage]
+    store = RedisSessionStore(client)
+    session = await store.create()
+    agent = _RecordingAgent()
+
+    first = asyncio.create_task(store.run_turn(session.session_id, "one", agent=agent))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(store.run_turn(session.session_id, "two", agent=agent))
+    await asyncio.gather(first, second)
+
+    snapshot = await store.get(session.session_id)
+    assert [m.content for m in snapshot.messages][::2] == ["one", "two"]
+    assert [m.content for m in agent.calls[1][1]] == ["one", "Please clarify: one"]
+
+
+@pytest.mark.anyio
+async def test_redis_store_client_lifecycle_is_lazy_idempotent_and_reopenable() -> None:
+    """from_url builds no client until open(); aclose closes only an owned client."""
+    clients: list[_FakeRedisClient] = []
+
+    def factory() -> _FakeRedisClient:
+        clients.append(_FakeRedisClient())
+        return clients[-1]
+
+    store = RedisSessionStore(client_factory=factory)
+    assert clients == []
+    with pytest.raises(SessionStoreUnavailableError, match="not open"):
+        await store.check()
+
+    await store.open()
+    await store.open()
+    assert len(clients) == 1
+    await store.check()
+
+    await store.aclose()
+    await store.aclose()
+    assert clients[0].closed is True
+    with pytest.raises(SessionStoreUnavailableError, match="not open"):
+        await store.check()
+
+    await store.open()
+    assert len(clients) == 2
+    await store.aclose()
+
+
+@pytest.mark.anyio
+async def test_redis_store_does_not_close_an_injected_client() -> None:
+    """A caller-owned client must survive the store's aclose."""
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client)
+
+    await store.open()
+    await store.aclose()
+
+    assert client.closed is False
+
+
+def test_redis_store_requires_exactly_one_of_client_or_factory() -> None:
+    """Neither or both sources of a client is a configuration error."""
+    with pytest.raises(ValueError, match="exactly one"):
+        RedisSessionStore()
+    with pytest.raises(ValueError, match="exactly one"):
+        RedisSessionStore(_FakeRedisClient(), client_factory=_FakeRedisClient)

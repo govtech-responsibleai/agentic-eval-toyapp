@@ -11,9 +11,8 @@ from typing import Protocol, cast
 from uuid import UUID, uuid4
 
 import anyio
-from redis import Redis
+from redis.asyncio import Redis
 from redis.exceptions import LockError, RedisError
-from starlette.concurrency import run_in_threadpool
 
 from agentic_eval_toyapp.models import (
     AgentTurnResult,
@@ -65,7 +64,15 @@ class SessionStore(Protocol):
         """Return a non-sensitive description of the configured backend."""
         ...
 
-    def check(self) -> None:
+    async def open(self) -> None:
+        """Acquire loop-bound resources; call from the running event loop."""
+        ...
+
+    async def aclose(self) -> None:
+        """Release resources acquired by `open`."""
+        ...
+
+    async def check(self) -> None:
         """Raise when the backing store cannot serve requests."""
         ...
 
@@ -131,7 +138,13 @@ class InMemorySessionStore:
         """Describe the process-local store without exposing internal state."""
         return f"retains up to {self.max_turns} complete turns"
 
-    def check(self) -> None:
+    async def open(self) -> None:
+        """The process-local store has no loop-bound resources."""
+
+    async def aclose(self) -> None:
+        """The process-local store has nothing to release."""
+
+    async def check(self) -> None:
         """The process-local store has no external dependency to check."""
 
     async def create(self) -> SessionResponse:
@@ -203,29 +216,29 @@ class InMemorySessionStore:
 
 
 class _RedisLock(Protocol):
-    """Subset of the redis-py distributed lock used by the session store."""
+    """Subset of the redis.asyncio distributed lock used by the session store."""
 
-    def acquire(self) -> bool:
+    async def acquire(self) -> bool:
         """Acquire the configured lock within its blocking timeout."""
         ...
 
-    def release(self) -> None:
+    async def release(self) -> None:
         """Release a lock owned by this client."""
         ...
 
 
 class _RedisClient(Protocol):
-    """Small redis-py surface kept injectable for offline tests."""
+    """Small redis.asyncio surface kept injectable for offline tests."""
 
-    def ping(self) -> bool:
+    async def ping(self) -> bool:
         """Check connectivity to the Redis service."""
         ...
 
-    def set(self, name: str, value: str, *, nx: bool = False) -> object:
+    async def set(self, name: str, value: str, *, nx: bool = False) -> object:
         """Set a string value, optionally only when the key is absent."""
         ...
 
-    def get(self, name: str) -> str | bytes | None:
+    async def get(self, name: str) -> str | bytes | None:
         """Return one stored string value."""
         ...
 
@@ -235,27 +248,40 @@ class _RedisClient(Protocol):
         *,
         timeout: float,
         blocking_timeout: float,
-        thread_local: bool,
     ) -> _RedisLock:
         """Return a distributed lock for one session."""
         ...
 
+    async def aclose(self) -> None:
+        """Close the client and its connection pool."""
+        ...
+
 
 class RedisSessionStore:
-    """Persist bounded complete turns in an external Redis service."""
+    """Persist bounded complete turns in an external Redis service.
+
+    Every Redis call and lock wait is awaited on the event loop, so a turn
+    waiting on a busy session holds no worker thread. The async connection pool
+    is bound to one event loop, so a store built by `from_url` creates its
+    client in `open()` (the application lifespan) and closes it in `aclose()`.
+    A client passed to the constructor is owned by the caller and never closed.
+    """
 
     _PAYLOAD_VERSION = 1
 
     def __init__(
         self,
-        client: _RedisClient,
+        client: _RedisClient | None = None,
         *,
+        client_factory: Callable[[], _RedisClient] | None = None,
         max_turns: int = 10,
         key_prefix: str = "agentic-eval-toyapp",
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
         id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
+        if (client is None) == (client_factory is None):
+            raise ValueError("provide exactly one of client or client_factory")
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
         normalised_key_prefix = key_prefix.strip().rstrip(":")
@@ -266,6 +292,8 @@ class RedisSessionStore:
         if lock_blocking_timeout_seconds < 0:
             raise ValueError("lock_blocking_timeout_seconds must not be negative")
         self._client = client
+        self._client_factory = client_factory
+        self._owns_client = False
         self._max_turns = max_turns
         self._key_prefix = normalised_key_prefix
         self._lock_timeout_seconds = lock_timeout_seconds
@@ -283,15 +311,19 @@ class RedisSessionStore:
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
     ) -> "RedisSessionStore":
-        """Construct a decoded Redis client without opening a connection yet."""
-        client = Redis.from_url(  # pyright: ignore[reportUnknownMemberType]
-            url,
-            decode_responses=True,
-            socket_connect_timeout=socket_timeout_seconds,
-            socket_timeout=socket_timeout_seconds,
-        )
+        """Describe a Redis client that `open()` creates on the running loop."""
+
+        def build_client() -> _RedisClient:
+            client = Redis.from_url(  # pyright: ignore[reportUnknownMemberType]
+                url,
+                decode_responses=True,
+                socket_connect_timeout=socket_timeout_seconds,
+                socket_timeout=socket_timeout_seconds,
+            )
+            return cast(_RedisClient, client)
+
         return cls(
-            cast(_RedisClient, client),
+            client_factory=build_client,
             max_turns=max_turns,
             key_prefix=key_prefix,
             lock_timeout_seconds=lock_timeout_seconds,
@@ -308,23 +340,47 @@ class RedisSessionStore:
         """Describe Redis persistence without exposing its connection URL."""
         return f"Redis reachable; retains up to {self.max_turns} complete turns"
 
-    def check(self) -> None:
+    async def open(self) -> None:
+        """Create the loop-bound client once; later calls change nothing."""
+        if self._client is None and self._client_factory is not None:
+            self._client = self._client_factory()
+            self._owns_client = True
+
+    async def aclose(self) -> None:
+        """Close a client this store created; an injected client is left open."""
+        client, self._client = self._client, None
+        owned, self._owns_client = self._owns_client, False
+        if client is not None and owned:
+            try:
+                await client.aclose()
+            except RedisError as error:
+                raise SessionStoreUnavailableError(
+                    "Redis client could not be closed"
+                ) from error
+
+    def _require_client(self) -> _RedisClient:
+        if self._client is None:
+            raise SessionStoreUnavailableError(
+                "Redis client is not open; run the application lifespan"
+            )
+        return self._client
+
+    async def check(self) -> None:
         """Verify Redis connectivity without reading application data."""
+        client = self._require_client()
         try:
-            if not self._client.ping():
+            if not await client.ping():
                 raise SessionStoreUnavailableError("Redis ping did not succeed")
         except RedisError as error:
             raise SessionStoreUnavailableError("Redis is unavailable") from error
 
     async def create(self) -> SessionResponse:
         """Create an empty persistent session using an atomic unique-key claim."""
-        return await run_in_threadpool(self._create)
-
-    def _create(self) -> SessionResponse:
+        client = self._require_client()
         for _ in range(100):
             session_id = self._id_factory()
             try:
-                created = self._client.set(
+                created = await client.set(
                     self._session_key(session_id),
                     self._serialize(()),
                     nx=True,
@@ -337,10 +393,7 @@ class RedisSessionStore:
 
     async def get(self, session_id: UUID) -> SessionResponse:
         """Return one atomically read persistent session snapshot."""
-        return await run_in_threadpool(self._get, session_id)
-
-    def _get(self, session_id: UUID) -> SessionResponse:
-        turns = self._read_turns(session_id)
+        turns = await self._read_turns(session_id)
         return SessionResponse(
             session_id=session_id,
             messages=_flatten_turns(turns),
@@ -362,7 +415,7 @@ class RedisSessionStore:
             content=validated_request.message,
         )
         async with self._session_lock(session_id):
-            turns = await run_in_threadpool(self._read_turns, session_id)
+            turns = await self._read_turns(session_id)
             result = await agent.run(
                 user.content,
                 history=_flatten_turns(turns),
@@ -374,7 +427,7 @@ class RedisSessionStore:
                 content=result.message,
             )
             turns.append(_StoredTurn(user=user, assistant=assistant))
-            await run_in_threadpool(self._write_turns, session_id, turns)
+            await self._write_turns(session_id, turns)
             return result
 
     def _session_key(self, session_id: UUID) -> str:
@@ -383,9 +436,10 @@ class RedisSessionStore:
     def _lock_key(self, session_id: UUID) -> str:
         return f"{self._session_key(session_id)}:turn-lock"
 
-    def _read_turns(self, session_id: UUID) -> deque[_StoredTurn]:
+    async def _read_turns(self, session_id: UUID) -> deque[_StoredTurn]:
+        client = self._require_client()
         try:
-            raw = self._client.get(self._session_key(session_id))
+            raw = await client.get(self._session_key(session_id))
         except RedisError as error:
             raise SessionStoreUnavailableError("Redis is unavailable") from error
         if raw is None:
@@ -394,9 +448,12 @@ class RedisSessionStore:
             raw = raw.decode("utf-8")
         return self._deserialize(raw)
 
-    def _write_turns(self, session_id: UUID, turns: Iterable[_StoredTurn]) -> None:
+    async def _write_turns(
+        self, session_id: UUID, turns: Iterable[_StoredTurn]
+    ) -> None:
+        client = self._require_client()
         try:
-            stored = self._client.set(
+            stored = await client.set(
                 self._session_key(session_id),
                 self._serialize(turns),
             )
@@ -407,16 +464,14 @@ class RedisSessionStore:
 
     @asynccontextmanager
     async def _session_lock(self, session_id: UUID) -> AsyncGenerator[None, None]:
-        # Acquire and release run on worker threads, possibly different ones, so
-        # the lock token must not live in thread-local storage.
+        client = self._require_client()
         try:
-            lock = self._client.lock(
+            lock = client.lock(
                 self._lock_key(session_id),
                 timeout=self._lock_timeout_seconds,
                 blocking_timeout=self._lock_blocking_timeout_seconds,
-                thread_local=False,
             )
-            acquired = await run_in_threadpool(lock.acquire)
+            acquired = await lock.acquire()
         except (LockError, RedisError) as error:
             raise SessionStoreUnavailableError(
                 "Redis locking is unavailable"
@@ -429,7 +484,7 @@ class RedisSessionStore:
             try:
                 # Shielded so a cancelled turn still frees the distributed lock.
                 with anyio.CancelScope(shield=True):
-                    await run_in_threadpool(lock.release)
+                    await lock.release()
             except (LockError, RedisError) as error:
                 raise SessionStoreUnavailableError(
                     "Redis session lock could not be released"

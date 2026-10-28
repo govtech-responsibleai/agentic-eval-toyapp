@@ -3,7 +3,7 @@
 import hashlib
 import logging
 from collections.abc import AsyncGenerator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
@@ -669,21 +669,28 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncGenerator[None, None]:
         """Finish RAG initialisation before the server accepts requests."""
-        # One slot for the whole process, created on the running loop and shared
-        # by every agent built from the default factory.
-        resolver.bind_retrieval_limiter(CapacityLimiter(1))
-        resolver.get()
-        LOGGER.info(
-            "application_started agent_mode=%s generation_provider=%s "
-            "langfuse_enabled=%s",
-            resolved_settings.agent_mode.value,
-            resolved_settings.generation_provider.value,
-            str(resolved_settings.langfuse_enabled).lower(),
-        )
-        try:
-            yield
-        finally:
-            resolver.shutdown()
+        async with AsyncExitStack() as stack:
+            # Redis connection pools are bound to this loop, so the stores build
+            # their clients here and close them last, after the agent's flush.
+            await resolved_store.open()
+            stack.push_async_callback(resolved_store.aclose)
+            await resolved_report_store.open()
+            stack.push_async_callback(resolved_report_store.aclose)
+            # One slot for the whole process, created on the running loop and
+            # shared by every agent built from the default factory.
+            resolver.bind_retrieval_limiter(CapacityLimiter(1))
+            resolver.get()
+            LOGGER.info(
+                "application_started agent_mode=%s generation_provider=%s "
+                "langfuse_enabled=%s",
+                resolved_settings.agent_mode.value,
+                resolved_settings.generation_provider.value,
+                str(resolved_settings.langfuse_enabled).lower(),
+            )
+            try:
+                yield
+            finally:
+                resolver.shutdown()
 
     application = FastAPI(
         title=resolved_settings.app_name,
@@ -783,11 +790,11 @@ def create_app(
         )
 
     @application.get("/ready", response_model=ReadinessResponse, tags=["service"])
-    def ready() -> ReadinessResponse:
+    async def ready() -> ReadinessResponse:
         """Report the dependencies initialised during application startup."""
         session_store_ready = True
         try:
-            resolved_store.check()
+            await resolved_store.check()
             session_store_check = ReadinessCheck(
                 name="session_store",
                 status=CheckStatus.PASS,
@@ -802,7 +809,7 @@ def create_app(
             )
         report_store_ready = True
         try:
-            resolved_report_store.check()
+            await resolved_report_store.check()
             report_store_check = ReadinessCheck(
                 name="report_store",
                 status=CheckStatus.PASS,
@@ -951,9 +958,7 @@ def create_app(
                     )
                 finally:
                     await file.close()
-                return await run_in_threadpool(
-                    resolved_report_store.add, session_id, processed
-                )
+                return await resolved_report_store.add(session_id, processed)
             except (
                 UnsupportedReportTypeError,
                 ReportTooLargeError,
@@ -1002,9 +1007,7 @@ def create_app(
         """List safe metadata for reports retained by this session."""
         await resolved_store.get(session_id)
         return ReportListResponse(
-            files=await run_in_threadpool(
-                resolved_report_store.list_for_session, session_id
-            )
+            files=await resolved_report_store.list_for_session(session_id)
         )
 
     @application.delete(
@@ -1020,7 +1023,7 @@ def create_app(
     async def delete_report(session_id: UUID, file_id: UUID) -> Response:
         """Remove one owned report without changing past conversation turns."""
         await resolved_store.get(session_id)
-        await run_in_threadpool(resolved_report_store.delete, session_id, file_id)
+        await resolved_report_store.delete(session_id, file_id)
         return Response(status_code=204)
 
     @application.post(
@@ -1051,8 +1054,8 @@ def create_app(
                 )
                 raise ReportAttachmentLimitError
             try:
-                reports = await run_in_threadpool(
-                    resolved_report_store.resolve, session_id, request.file_ids
+                reports = await resolved_report_store.resolve(
+                    session_id, request.file_ids
                 )
             except ReportNotFoundError as error:
                 log_failure(

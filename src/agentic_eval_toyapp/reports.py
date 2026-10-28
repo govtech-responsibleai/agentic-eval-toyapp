@@ -5,8 +5,8 @@ import binascii
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import PurePath
@@ -14,8 +14,10 @@ from threading import Lock
 from typing import Protocol, cast
 from uuid import UUID, uuid4
 
+import anyio
+from anyio import to_thread
 from pypdf import PdfReader
-from redis import Redis
+from redis.asyncio import Redis
 from redis.exceptions import LockError, RedisError
 
 from agentic_eval_toyapp.models import ReportMediaType, ReportUploadResponse
@@ -98,23 +100,35 @@ class ReportStore(Protocol):
         """Return a non-sensitive description of the configured backend."""
         ...
 
-    def check(self) -> None:
+    async def open(self) -> None:
+        """Acquire loop-bound resources; call from the running event loop."""
+        ...
+
+    async def aclose(self) -> None:
+        """Release resources acquired by `open`."""
+        ...
+
+    async def check(self) -> None:
         """Raise when the backing store cannot serve requests."""
         ...
 
-    def add(self, session_id: UUID, report: ProcessedReport) -> ReportUploadResponse:
+    async def add(
+        self, session_id: UUID, report: ProcessedReport
+    ) -> ReportUploadResponse:
         """Persist one processed report under its owning session."""
         ...
 
-    def list_for_session(self, session_id: UUID) -> tuple[ReportUploadResponse, ...]:
+    async def list_for_session(
+        self, session_id: UUID
+    ) -> tuple[ReportUploadResponse, ...]:
         """Return safe metadata for a session's reports in upload order."""
         ...
 
-    def delete(self, session_id: UUID, file_id: UUID) -> None:
+    async def delete(self, session_id: UUID, file_id: UUID) -> None:
         """Delete one report owned by the supplied session."""
         ...
 
-    def resolve(
+    async def resolve(
         self,
         session_id: UUID,
         file_ids: Sequence[UUID],
@@ -301,10 +315,18 @@ class InMemoryReportStore:
             f"retains up to {self.max_reports_per_session} complete reports per session"
         )
 
-    def check(self) -> None:
+    async def open(self) -> None:
+        """The process-local store has no loop-bound resources."""
+
+    async def aclose(self) -> None:
+        """The process-local store has nothing to release."""
+
+    async def check(self) -> None:
         """The process-local store has no external dependency to check."""
 
-    def add(self, session_id: UUID, report: ProcessedReport) -> ReportUploadResponse:
+    async def add(
+        self, session_id: UUID, report: ProcessedReport
+    ) -> ReportUploadResponse:
         """Allocate a globally unique file ID and retain the complete report."""
         with self._lock:
             session_file_ids = self._session_file_ids[session_id]
@@ -339,7 +361,9 @@ class InMemoryReportStore:
             session_file_ids.append(file_id)
             return metadata
 
-    def list_for_session(self, session_id: UUID) -> tuple[ReportUploadResponse, ...]:
+    async def list_for_session(
+        self, session_id: UUID
+    ) -> tuple[ReportUploadResponse, ...]:
         """List retained report metadata in upload order, without report text."""
         with self._lock:
             return tuple(
@@ -347,7 +371,7 @@ class InMemoryReportStore:
                 for file_id in self._session_file_ids.get(session_id, ())
             )
 
-    def delete(self, session_id: UUID, file_id: UUID) -> None:
+    async def delete(self, session_id: UUID, file_id: UUID) -> None:
         """Remove one owned report's original bytes, metadata, and extracted text."""
         with self._lock:
             if self._owners.get(file_id) != session_id:
@@ -356,7 +380,7 @@ class InMemoryReportStore:
             del self._owners[file_id]
             self._session_file_ids[session_id].remove(file_id)
 
-    def resolve(
+    async def resolve(
         self,
         session_id: UUID,
         file_ids: Sequence[UUID],
@@ -372,29 +396,29 @@ class InMemoryReportStore:
 
 
 class _RedisReportLock(Protocol):
-    """Subset of the redis-py distributed lock used by the report store."""
+    """Subset of the redis.asyncio distributed lock used by the report store."""
 
-    def acquire(self) -> bool:
+    async def acquire(self) -> bool:
         """Acquire the configured lock within its blocking timeout."""
         ...
 
-    def release(self) -> None:
+    async def release(self) -> None:
         """Release a lock owned by this client."""
         ...
 
 
 class _RedisReportClient(Protocol):
-    """Small redis-py surface kept injectable for offline tests."""
+    """Small redis.asyncio surface kept injectable for offline tests."""
 
-    def ping(self) -> bool:
+    async def ping(self) -> bool:
         """Check connectivity to the Redis service."""
         ...
 
-    def set(self, name: str, value: str) -> object:
+    async def set(self, name: str, value: str) -> object:
         """Persist one serialized session report collection."""
         ...
 
-    def get(self, name: str) -> str | bytes | None:
+    async def get(self, name: str) -> str | bytes | None:
         """Return one serialized session report collection."""
         ...
 
@@ -408,22 +432,36 @@ class _RedisReportClient(Protocol):
         """Return a distributed lock for one session's reports."""
         ...
 
+    async def aclose(self) -> None:
+        """Close the client and its connection pool."""
+        ...
+
 
 class RedisReportStore:
-    """Persist original bytes, metadata, and extracted report text in Redis."""
+    """Persist original bytes, metadata, and extracted report text in Redis.
+
+    Redis calls and lock waits are awaited on the event loop. Only the pure
+    JSON and base64 work on payloads that can reach several megabytes is moved
+    to a worker thread, so it neither stalls the loop nor touches Redis.
+    A store built by `from_url` creates its loop-bound client in `open()` and
+    closes it in `aclose()`; a client passed in is owned by the caller.
+    """
 
     _PAYLOAD_VERSION = 1
 
     def __init__(
         self,
-        client: _RedisReportClient,
+        client: _RedisReportClient | None = None,
         *,
+        client_factory: Callable[[], _RedisReportClient] | None = None,
         max_reports_per_session: int,
         key_prefix: str = "agentic-eval-toyapp",
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
         id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
+        if (client is None) == (client_factory is None):
+            raise ValueError("provide exactly one of client or client_factory")
         if max_reports_per_session < 1:
             raise ValueError("max_reports_per_session must be at least 1")
         normalised_key_prefix = key_prefix.strip().rstrip(":")
@@ -434,6 +472,8 @@ class RedisReportStore:
         if lock_blocking_timeout_seconds < 0:
             raise ValueError("lock_blocking_timeout_seconds must not be negative")
         self._client = client
+        self._client_factory = client_factory
+        self._owns_client = False
         self._max_reports_per_session = max_reports_per_session
         self._key_prefix = normalised_key_prefix
         self._lock_timeout_seconds = lock_timeout_seconds
@@ -451,15 +491,19 @@ class RedisReportStore:
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
     ) -> "RedisReportStore":
-        """Construct a decoded Redis client without opening a connection yet."""
-        client = Redis.from_url(  # pyright: ignore[reportUnknownMemberType]
-            url,
-            decode_responses=True,
-            socket_connect_timeout=socket_timeout_seconds,
-            socket_timeout=socket_timeout_seconds,
-        )
+        """Describe a Redis client that `open()` creates on the running loop."""
+
+        def build_client() -> _RedisReportClient:
+            client = Redis.from_url(  # pyright: ignore[reportUnknownMemberType]
+                url,
+                decode_responses=True,
+                socket_connect_timeout=socket_timeout_seconds,
+                socket_timeout=socket_timeout_seconds,
+            )
+            return cast(_RedisReportClient, client)
+
         return cls(
-            cast(_RedisReportClient, client),
+            client_factory=build_client,
             max_reports_per_session=max_reports_per_session,
             key_prefix=key_prefix,
             lock_timeout_seconds=lock_timeout_seconds,
@@ -479,18 +523,46 @@ class RedisReportStore:
             f"{self.max_reports_per_session} reports per session"
         )
 
-    def check(self) -> None:
+    async def open(self) -> None:
+        """Create the loop-bound client once; later calls change nothing."""
+        if self._client is None and self._client_factory is not None:
+            self._client = self._client_factory()
+            self._owns_client = True
+
+    async def aclose(self) -> None:
+        """Close a client this store created; an injected client is left open."""
+        client, self._client = self._client, None
+        owned, self._owns_client = self._owns_client, False
+        if client is not None and owned:
+            try:
+                await client.aclose()
+            except RedisError as error:
+                raise ReportStoreUnavailableError(
+                    "Redis client could not be closed"
+                ) from error
+
+    def _require_client(self) -> _RedisReportClient:
+        if self._client is None:
+            raise ReportStoreUnavailableError(
+                "Redis client is not open; run the application lifespan"
+            )
+        return self._client
+
+    async def check(self) -> None:
         """Verify Redis connectivity without reading application data."""
+        client = self._require_client()
         try:
-            if not self._client.ping():
+            if not await client.ping():
                 raise ReportStoreUnavailableError("Redis ping did not succeed")
         except RedisError as error:
             raise ReportStoreUnavailableError("Redis is unavailable") from error
 
-    def add(self, session_id: UUID, report: ProcessedReport) -> ReportUploadResponse:
+    async def add(
+        self, session_id: UUID, report: ProcessedReport
+    ) -> ReportUploadResponse:
         """Persist one complete report under a session-scoped mutation lock."""
-        with self._session_lock(session_id):
-            reports = self._read_reports(session_id)
+        async with self._session_lock(session_id):
+            reports = await self._read_reports(session_id)
             if len(reports) >= self.max_reports_per_session:
                 raise ReportCapacityError("session report capacity reached")
             existing_ids = {stored.metadata.file_id for stored in reports}
@@ -519,32 +591,36 @@ class RedisReportStore:
                     pages=report.pages,
                 )
             )
-            self._write_reports(session_id, reports)
+            await self._write_reports(session_id, reports)
             return metadata
 
-    def list_for_session(self, session_id: UUID) -> tuple[ReportUploadResponse, ...]:
+    async def list_for_session(
+        self, session_id: UUID
+    ) -> tuple[ReportUploadResponse, ...]:
         """List persistent report metadata without returning private contents."""
-        return tuple(report.metadata for report in self._read_reports(session_id))
+        reports = await self._read_reports(session_id)
+        return tuple(report.metadata for report in reports)
 
-    def delete(self, session_id: UUID, file_id: UUID) -> None:
+    async def delete(self, session_id: UUID, file_id: UUID) -> None:
         """Delete one persistent report only from its owning session."""
-        with self._session_lock(session_id):
-            reports = self._read_reports(session_id)
+        async with self._session_lock(session_id):
+            reports = await self._read_reports(session_id)
             retained = [
                 report for report in reports if report.metadata.file_id != file_id
             ]
             if len(retained) == len(reports):
                 raise ReportNotFoundError from None
-            self._write_reports(session_id, retained)
+            await self._write_reports(session_id, retained)
 
-    def resolve(
+    async def resolve(
         self,
         session_id: UUID,
         file_ids: Sequence[UUID],
     ) -> tuple[StoredReport, ...]:
         """Resolve persistent reports only for their owning session."""
         reports_by_id = {
-            report.metadata.file_id: report for report in self._read_reports(session_id)
+            report.metadata.file_id: report
+            for report in await self._read_reports(session_id)
         }
         try:
             return tuple(reports_by_id[file_id] for file_id in file_ids)
@@ -557,9 +633,10 @@ class RedisReportStore:
     def _lock_key(self, session_id: UUID) -> str:
         return f"{self._session_key(session_id)}:mutation-lock"
 
-    def _read_reports(self, session_id: UUID) -> list[StoredReport]:
+    async def _read_reports(self, session_id: UUID) -> list[StoredReport]:
+        client = self._require_client()
         try:
-            raw = self._client.get(self._session_key(session_id))
+            raw = await client.get(self._session_key(session_id))
         except RedisError as error:
             raise ReportStoreUnavailableError("Redis is unavailable") from error
         if raw is None:
@@ -571,32 +648,32 @@ class RedisReportStore:
             raise ReportStoreUnavailableError(
                 "Redis contains invalid report data"
             ) from error
-        return self._deserialize(raw)
+        return await to_thread.run_sync(self._deserialize, raw)
 
-    def _write_reports(
+    async def _write_reports(
         self,
         session_id: UUID,
         reports: Sequence[StoredReport],
     ) -> None:
+        client = self._require_client()
+        payload = await to_thread.run_sync(self._serialize, reports)
         try:
-            stored = self._client.set(
-                self._session_key(session_id),
-                self._serialize(reports),
-            )
+            stored = await client.set(self._session_key(session_id), payload)
         except RedisError as error:
             raise ReportStoreUnavailableError("Redis is unavailable") from error
         if not stored:
             raise ReportStoreUnavailableError("Redis did not persist the reports")
 
-    @contextmanager
-    def _session_lock(self, session_id: UUID) -> Generator[None, None, None]:
+    @asynccontextmanager
+    async def _session_lock(self, session_id: UUID) -> AsyncGenerator[None, None]:
+        client = self._require_client()
         try:
-            lock = self._client.lock(
+            lock = client.lock(
                 self._lock_key(session_id),
                 timeout=self._lock_timeout_seconds,
                 blocking_timeout=self._lock_blocking_timeout_seconds,
             )
-            acquired = lock.acquire()
+            acquired = await lock.acquire()
         except (LockError, RedisError) as error:
             raise ReportStoreUnavailableError("Redis locking is unavailable") from error
         if not acquired:
@@ -605,7 +682,9 @@ class RedisReportStore:
             yield
         finally:
             try:
-                lock.release()
+                # Shielded so a cancelled request still frees the distributed lock.
+                with anyio.CancelScope(shield=True):
+                    await lock.release()
             except (LockError, RedisError) as error:
                 raise ReportStoreUnavailableError(
                     "Redis report lock could not be released"

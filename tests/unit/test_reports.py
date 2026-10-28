@@ -217,24 +217,26 @@ def test_processor_rejects_non_positive_limits(limits: dict[str, int]) -> None:
         ReportProcessor(**limits)
 
 
-def test_store_enforces_ownership_and_retains_original_bytes() -> None:
+@pytest.mark.anyio
+async def test_store_enforces_ownership_and_retains_original_bytes() -> None:
     """Only the owning session may resolve complete immutable content."""
     store = InMemoryReportStore(max_reports_per_session=2)
     owner = uuid4()
     other = uuid4()
-    metadata = store.add(owner, _processed_report("Known finding"))
+    metadata = await store.add(owner, _processed_report("Known finding"))
 
-    stored = store.resolve(owner, (metadata.file_id,))[0]
+    stored = (await store.resolve(owner, (metadata.file_id,)))[0]
 
     assert stored.extracted_text == "Known finding"
     assert stored.original_bytes == b"Known finding"
     with pytest.raises(ReportNotFoundError):
-        store.resolve(other, (metadata.file_id,))
+        await store.resolve(other, (metadata.file_id,))
     with pytest.raises(ReportNotFoundError):
-        store.resolve(owner, (uuid4(),))
+        await store.resolve(owner, (uuid4(),))
 
 
-def test_store_retries_id_collisions_and_enforces_session_capacity() -> None:
+@pytest.mark.anyio
+async def test_store_retries_id_collisions_and_enforces_session_capacity() -> None:
     """ID collisions cannot overwrite data and capacity cannot silently evict it."""
     first_id = UUID("00000000-0000-0000-0000-000000000001")
     second_id = UUID("00000000-0000-0000-0000-000000000002")
@@ -251,41 +253,42 @@ def test_store_retries_id_collisions_and_enforces_session_capacity() -> None:
     )
     session_id = uuid4()
 
-    first = store.add(session_id, _processed_report("first"))
-    second = store.add(session_id, _processed_report("second"))
+    first = await store.add(session_id, _processed_report("first"))
+    second = await store.add(session_id, _processed_report("second"))
 
     assert first.file_id == first_id
     assert second.file_id == second_id
-    assert store.resolve(session_id, (first_id,))[0].extracted_text == "first"
+    assert (await store.resolve(session_id, (first_id,)))[0].extracted_text == "first"
     with pytest.raises(ReportCapacityError):
-        store.add(session_id, _processed_report("third"))
+        await store.add(session_id, _processed_report("third"))
     with pytest.raises(ValueError, match="at least 1"):
         InMemoryReportStore(max_reports_per_session=0)
 
 
-def test_store_lists_and_deletes_only_owned_reports() -> None:
+@pytest.mark.anyio
+async def test_store_lists_and_deletes_only_owned_reports() -> None:
     """Deletion releases capacity without leaking another session's metadata."""
     store = InMemoryReportStore(max_reports_per_session=2)
     owner = uuid4()
     other = uuid4()
-    first = store.add(owner, _processed_report("first"))
-    second = store.add(owner, _processed_report("second"))
-    foreign = store.add(other, _processed_report("foreign"))
+    first = await store.add(owner, _processed_report("first"))
+    second = await store.add(owner, _processed_report("second"))
+    foreign = await store.add(other, _processed_report("foreign"))
 
-    assert store.list_for_session(owner) == (first, second)
-    assert store.list_for_session(other) == (foreign,)
-    assert store.list_for_session(uuid4()) == ()
+    assert await store.list_for_session(owner) == (first, second)
+    assert await store.list_for_session(other) == (foreign,)
+    assert await store.list_for_session(uuid4()) == ()
     with pytest.raises(ReportNotFoundError):
-        store.delete(other, first.file_id)
+        await store.delete(other, first.file_id)
     with pytest.raises(ReportNotFoundError):
-        store.delete(owner, uuid4())
+        await store.delete(owner, uuid4())
 
-    store.delete(owner, first.file_id)
-    assert store.list_for_session(owner) == (second,)
-    assert store.list_for_session(other) == (foreign,)
+    await store.delete(owner, first.file_id)
+    assert await store.list_for_session(owner) == (second,)
+    assert await store.list_for_session(other) == (foreign,)
     with pytest.raises(ReportNotFoundError):
-        store.resolve(owner, (first.file_id,))
+        await store.resolve(owner, (first.file_id,))
     with pytest.raises(ReportNotFoundError):
-        store.delete(owner, first.file_id)
-    third = store.add(owner, _processed_report("third"))
-    assert store.list_for_session(owner) == (second, third)
+        await store.delete(owner, first.file_id)
+    third = await store.add(owner, _processed_report("third"))
+    assert await store.list_for_session(owner) == (second, third)
