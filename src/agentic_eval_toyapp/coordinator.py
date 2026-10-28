@@ -973,9 +973,10 @@ def build_openai_coordinator_provider(
     temperature: float,
     max_tokens: int,
     timeout_seconds: float,
+    client: StructuredCompletionClient | None = None,
 ) -> OpenAICoordinatorGenerationProvider:
     """Construct the live adapter without enabling incomplete Stage 16 tracing."""
-    client = OpenAICompatibleChatClient(
+    client = client or OpenAICompatibleChatClient(
         api_key=api_key,
         base_url=base_url,
         timeout_seconds=timeout_seconds,

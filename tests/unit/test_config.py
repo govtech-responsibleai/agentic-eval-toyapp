@@ -62,6 +62,9 @@ _SETTING_ENV_VARS = (
     "TOYAPP_UPLOAD_MAX_EXTRACTED_CHARACTERS",
     "TOYAPP_UPLOAD_MAX_FILES_PER_MESSAGE",
     "TOYAPP_UPLOAD_MAX_REPORTS_PER_SESSION",
+    "TOYAPP_MAX_PENDING_TURNS",
+    "TOYAPP_LLM_MAX_REQUESTS_PER_MINUTE",
+    "TOYAPP_LLM_MAX_CONCURRENT_CALLS",
 )
 
 
@@ -358,9 +361,35 @@ def test_settings_reject_blank_required_text(field: str) -> None:
         ("upload_max_files_per_message", 11),
         ("upload_max_reports_per_session", 0),
         ("upload_max_reports_per_session", 101),
+        ("max_pending_turns", 0),
+        ("llm_max_requests_per_minute", 0),
+        ("llm_max_concurrent_calls", 0),
+        ("max_pending_turns", -1),
     ],
 )
 def test_settings_reject_invalid_retrieval_values(field: str, value: float) -> None:
     """Retrieval limits must stay within their mathematical domains."""
     with pytest.raises(ValidationError):
         AppSettings.model_validate({field: value})
+
+
+def test_backpressure_settings_default_to_the_documented_values() -> None:
+    settings = AppSettings()
+
+    assert settings.max_pending_turns == 128
+    assert settings.llm_max_requests_per_minute == 180
+    assert settings.llm_max_concurrent_calls == 16
+
+
+def test_backpressure_settings_accept_one_and_read_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TOYAPP_MAX_PENDING_TURNS", "1")
+    monkeypatch.setenv("TOYAPP_LLM_MAX_REQUESTS_PER_MINUTE", "450")
+    monkeypatch.setenv("TOYAPP_LLM_MAX_CONCURRENT_CALLS", "1")
+
+    settings = AppSettings()
+
+    assert settings.max_pending_turns == 1
+    assert settings.llm_max_requests_per_minute == 450
+    assert settings.llm_max_concurrent_calls == 1
