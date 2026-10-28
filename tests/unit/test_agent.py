@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractAsyncContextManager
 from datetime import date
 from pathlib import Path
 
@@ -82,7 +82,7 @@ class _RepairingProvider:
     def __init__(self) -> None:
         self.requests: list[ModelRequest] = []
 
-    def generate_action(self, request: ModelRequest) -> AgentAction:
+    async def generate_action(self, request: ModelRequest) -> AgentAction:
         self.requests.append(request)
         if len(self.requests) == 1:
             raise InvalidGenerationActionError("invalid fixture action")
@@ -100,7 +100,7 @@ class _AlwaysInvalidProvider:
     def __init__(self) -> None:
         self.requests: list[ModelRequest] = []
 
-    def generate_action(self, request: ModelRequest) -> AgentAction:
+    async def generate_action(self, request: ModelRequest) -> AgentAction:
         self.requests.append(request)
         raise InvalidGenerationActionError("invalid fixture action")
 
@@ -121,7 +121,7 @@ class _ForbiddenRootTraceRecorder:
         session_id: str | None,
         user_message: str,
         history_message_count: int,
-    ) -> AbstractContextManager[TurnTrace]:
+    ) -> AbstractAsyncContextManager[TurnTrace]:
         del session_id, user_message, history_message_count
         raise AssertionError("delegated RAG must not create a root trace")
 
@@ -153,7 +153,8 @@ def _agent(
     )
 
 
-def test_agent_searches_then_returns_grounded_answer() -> None:
+@pytest.mark.anyio
+async def test_agent_searches_then_returns_grounded_answer() -> None:
     """Evidence must reach the second model call before an answer is accepted."""
     chunk = _chunk()
     retriever = _StubRetriever({"domestic meals": (chunk,)})
@@ -172,7 +173,7 @@ def test_agent_searches_then_returns_grounded_answer() -> None:
         ConversationMessage(role=ConversationRole.ASSISTANT, content="Earlier reply"),
     )
 
-    result = agent.run("What is the domestic meal limit?", history=history)
+    result = await agent.run("What is the domestic meal limit?", history=history)
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.termination_reason is TerminationReason.ANSWERED
@@ -205,7 +206,8 @@ def test_agent_searches_then_returns_grounded_answer() -> None:
     )
 
 
-def test_agent_returns_clarification_without_searching() -> None:
+@pytest.mark.anyio
+async def test_agent_returns_clarification_without_searching() -> None:
     """Material ambiguity can terminate with one direct clarification action."""
     retriever = _StubRetriever({})
     agent, _ = _agent(
@@ -213,7 +215,7 @@ def test_agent_returns_clarification_without_searching() -> None:
         retriever,
     )
 
-    result = agent.run("What travel allowance can I claim?")
+    result = await agent.run("What travel allowance can I claim?")
 
     assert result.status is AgentTurnStatus.CLARIFICATION_REQUIRED
     assert result.message == "Is the trip domestic or international?"
@@ -222,7 +224,8 @@ def test_agent_returns_clarification_without_searching() -> None:
     assert retriever.calls == []
 
 
-def test_agent_action_summaries_pluralise_multiple_counts() -> None:
+@pytest.mark.anyio
+async def test_agent_action_summaries_pluralise_multiple_counts() -> None:
     """Observable summaries should use grammatical nouns for multiple items."""
     first = _chunk("TRAVEL-001#1")
     second = _chunk("TRAVEL-001#2")
@@ -240,7 +243,7 @@ def test_agent_action_summaries_pluralise_multiple_counts() -> None:
         _StubRetriever({"travel": (first, second)}),
     )
 
-    result = agent.run("Summarise travel policy")
+    result = await agent.run("Summarise travel policy")
 
     assert [summary.detail for summary in result.action_summaries] == [
         "Retrieved 2 chunks with top_k=3.",
@@ -248,7 +251,8 @@ def test_agent_action_summaries_pluralise_multiple_counts() -> None:
     ]
 
 
-def test_agent_preserves_answer_without_retrieval_for_metis() -> None:
+@pytest.mark.anyio
+async def test_agent_preserves_answer_without_retrieval_for_metis() -> None:
     """Tool choice remains model behavior for METIS to evaluate."""
     agent, _ = _agent(
         (
@@ -260,7 +264,7 @@ def test_agent_preserves_answer_without_retrieval_for_metis() -> None:
         _StubRetriever({}),
     )
 
-    result = agent.run("What is the limit?")
+    result = await agent.run("What is the limit?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.termination_reason is TerminationReason.ANSWERED
@@ -271,7 +275,8 @@ def test_agent_preserves_answer_without_retrieval_for_metis() -> None:
     ]
 
 
-def test_agent_accepts_direct_capability_answer_without_findings() -> None:
+@pytest.mark.anyio
+async def test_agent_accepts_direct_capability_answer_without_findings() -> None:
     """System-prompt capability answers need neither retrieval nor citations."""
     expected_action = AnswerAction(
         markdown="I support eight Northstar policy areas.",
@@ -279,7 +284,7 @@ def test_agent_accepts_direct_capability_answer_without_findings() -> None:
     )
     agent, provider = _agent((expected_action,), _StubRetriever({}))
 
-    result = agent.run("What policies do you support?")
+    result = await agent.run("What policies do you support?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.searches == 0
@@ -289,7 +294,8 @@ def test_agent_accepts_direct_capability_answer_without_findings() -> None:
     assert provider.requests[0].available_actions == tuple(AgentActionKind)
 
 
-def test_agent_uses_model_selected_retrieval_breadth() -> None:
+@pytest.mark.anyio
+async def test_agent_uses_model_selected_retrieval_breadth() -> None:
     """The model may choose bounded breadth while ranking stays deterministic."""
     chunk = _chunk()
     retriever = _StubRetriever({"broad policy question": (chunk,)})
@@ -304,14 +310,15 @@ def test_agent_uses_model_selected_retrieval_breadth() -> None:
         retriever,
     )
 
-    result = agent.run("Summarise the relevant policies")
+    result = await agent.run("Summarise the relevant policies")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert retriever.calls == [("broad policy question", 8)]
     assert result.action_summaries[0].detail.endswith("top_k=8.")
 
 
-def test_agent_repairs_one_invalid_structured_action() -> None:
+@pytest.mark.anyio
+async def test_agent_repairs_one_invalid_structured_action() -> None:
     """A single schema mistake gets one bounded, observable correction call."""
     provider = _RepairingProvider()
     agent = RagAgent(
@@ -320,7 +327,7 @@ def test_agent_repairs_one_invalid_structured_action() -> None:
         system_prompt="Choose one valid action.",
     )
 
-    result = agent.run("What can you do?")
+    result = await agent.run("What can you do?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.model_calls == 2
@@ -330,7 +337,8 @@ def test_agent_repairs_one_invalid_structured_action() -> None:
     ]
 
 
-def test_agent_fails_after_one_unsuccessful_structured_action_repair() -> None:
+@pytest.mark.anyio
+async def test_agent_fails_after_one_unsuccessful_structured_action_repair() -> None:
     """Protocol repair is bounded and cannot become an unbounded model loop."""
     provider = _AlwaysInvalidProvider()
     agent = RagAgent(
@@ -339,7 +347,7 @@ def test_agent_fails_after_one_unsuccessful_structured_action_repair() -> None:
         system_prompt="Choose one valid action.",
     )
 
-    result = agent.run("What can you do?")
+    result = await agent.run("What can you do?")
 
     assert result.status is AgentTurnStatus.FAILED
     assert result.termination_reason is TerminationReason.PROVIDER_ERROR
@@ -349,7 +357,8 @@ def test_agent_fails_after_one_unsuccessful_structured_action_repair() -> None:
     assert result.controller_events == ()
 
 
-def test_agent_passes_empty_retrieval_to_provider_for_a_response() -> None:
+@pytest.mark.anyio
+async def test_agent_passes_empty_retrieval_to_provider_for_a_response() -> None:
     """No evidence must remain visible to the model before it responds."""
     agent, provider = _agent(
         (
@@ -362,7 +371,7 @@ def test_agent_passes_empty_retrieval_to_provider_for_a_response() -> None:
         _StubRetriever({"unknown policy": ()}),
     )
 
-    result = agent.run("Unknown question")
+    result = await agent.run("Unknown question")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.termination_reason is TerminationReason.ANSWERED
@@ -379,7 +388,8 @@ def test_agent_passes_empty_retrieval_to_provider_for_a_response() -> None:
     ]
 
 
-def test_agent_preserves_unsupported_zero_evidence_model_response() -> None:
+@pytest.mark.anyio
+async def test_agent_preserves_unsupported_zero_evidence_model_response() -> None:
     """A hallucination after empty retrieval must remain observable to METIS."""
     agent, _ = _agent(
         (
@@ -392,7 +402,7 @@ def test_agent_preserves_unsupported_zero_evidence_model_response() -> None:
         _StubRetriever({"unknown policy": ()}),
     )
 
-    result = agent.run("What is the unknown allowance?")
+    result = await agent.run("What is the unknown allowance?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.message == "Employees receive a fictional $900 allowance."
@@ -400,7 +410,10 @@ def test_agent_preserves_unsupported_zero_evidence_model_response() -> None:
     assert result.citations == ()
 
 
-def test_agent_accepts_zero_citations_when_candidates_do_not_support_answer() -> None:
+@pytest.mark.anyio
+async def test_agent_accepts_zero_citations_when_candidates_do_not_support_answer() -> (
+    None
+):
     """Retrieved candidates are not necessarily relevant supporting evidence."""
     chunk = _chunk()
     agent, _ = _agent(
@@ -414,7 +427,7 @@ def test_agent_accepts_zero_citations_when_candidates_do_not_support_answer() ->
         _StubRetriever({"sick leave": (chunk,)}),
     )
 
-    result = agent.run("I need help with sick leave")
+    result = await agent.run("I need help with sick leave")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.termination_reason is TerminationReason.ANSWERED
@@ -423,7 +436,8 @@ def test_agent_accepts_zero_citations_when_candidates_do_not_support_answer() ->
     assert result.action_summaries[-1].detail == "Returned an answer with 0 citations."
 
 
-def test_agent_recovers_from_repeated_normalised_search() -> None:
+@pytest.mark.anyio
+async def test_agent_recovers_from_repeated_normalised_search() -> None:
     """A repeated query gets one constrained correction call, not an early failure."""
     chunk = _chunk()
     retriever = _StubRetriever({"travel policy": (chunk,)})
@@ -439,7 +453,7 @@ def test_agent_recovers_from_repeated_normalised_search() -> None:
         retriever,
     )
 
-    result = agent.run("Travel question")
+    result = await agent.run("Travel question")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.termination_reason is TerminationReason.ANSWERED
@@ -457,7 +471,8 @@ def test_agent_recovers_from_repeated_normalised_search() -> None:
     ]
 
 
-def test_agent_stops_on_repeated_search_without_a_correction_call(
+@pytest.mark.anyio
+async def test_agent_stops_on_repeated_search_without_a_correction_call(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A repeated query remains a typed failure when no model call remains."""
@@ -473,7 +488,7 @@ def test_agent_stops_on_repeated_search_without_a_correction_call(
     )
 
     with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
-        result = agent.run("Travel question")
+        result = await agent.run("Travel question")
 
     assert result.termination_reason is TerminationReason.REPEATED_SEARCH
     assert result.model_calls == 2
@@ -482,7 +497,8 @@ def test_agent_stops_on_repeated_search_without_a_correction_call(
     assert "code=repeated_search" in caplog.text
 
 
-def test_agent_records_citation_that_was_not_retrieved(
+@pytest.mark.anyio
+async def test_agent_records_citation_that_was_not_retrieved(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Invalid citations remain observable without replacing the answer."""
@@ -499,7 +515,7 @@ def test_agent_records_citation_that_was_not_retrieved(
     )
 
     with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
-        result = agent.run("What is the limit?")
+        result = await agent.run("What is the limit?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.termination_reason is TerminationReason.ANSWERED
@@ -514,7 +530,8 @@ def test_agent_records_citation_that_was_not_retrieved(
     assert "The limit is $80" not in caplog.text
 
 
-def test_agent_preserves_duplicate_citations_as_a_finding() -> None:
+@pytest.mark.anyio
+async def test_agent_preserves_duplicate_citations_as_a_finding() -> None:
     """Duplicate model output remains intact for downstream evaluation."""
     chunk = _chunk()
     agent, _ = _agent(
@@ -528,7 +545,7 @@ def test_agent_preserves_duplicate_citations_as_a_finding() -> None:
         _StubRetriever({"travel": (chunk,)}),
     )
 
-    result = agent.run("What is the limit?")
+    result = await agent.run("What is the limit?")
 
     assert result.citations == ("TRAVEL-001#1", "TRAVEL-001#1")
     assert [finding.code for finding in result.validation_findings] == [
@@ -536,6 +553,7 @@ def test_agent_preserves_duplicate_citations_as_a_finding() -> None:
     ]
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("markdown", "citations"),
     [
@@ -546,7 +564,7 @@ def test_agent_preserves_duplicate_citations_as_a_finding() -> None:
         ),
     ],
 )
-def test_agent_records_markdown_and_declared_citation_mismatch(
+async def test_agent_records_markdown_and_declared_citation_mismatch(
     markdown: str, citations: tuple[str, ...]
 ) -> None:
     """Citation disagreement is returned as a non-blocking finding."""
@@ -559,7 +577,7 @@ def test_agent_records_markdown_and_declared_citation_mismatch(
         _StubRetriever({"travel": (chunk,)}),
     )
 
-    result = agent.run("What is the limit?")
+    result = await agent.run("What is the limit?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.termination_reason is TerminationReason.ANSWERED
@@ -568,7 +586,8 @@ def test_agent_records_markdown_and_declared_citation_mismatch(
     )
 
 
-def test_agent_preserves_answer_with_multiple_independent_findings() -> None:
+@pytest.mark.anyio
+async def test_agent_preserves_answer_with_multiple_independent_findings() -> None:
     """One imperfect answer can expose every applicable mechanical observation."""
     chunk = _chunk()
     agent, _ = _agent(
@@ -582,7 +601,7 @@ def test_agent_preserves_answer_with_multiple_independent_findings() -> None:
         _StubRetriever({"travel": (chunk,)}),
     )
 
-    result = agent.run("What is the limit?")
+    result = await agent.run("What is the limit?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.message == "The limit is $80. [TRAVEL-001#1]"
@@ -594,7 +613,8 @@ def test_agent_preserves_answer_with_multiple_independent_findings() -> None:
     ]
 
 
-def test_agent_enforces_search_and_model_call_limits(
+@pytest.mark.anyio
+async def test_agent_enforces_search_and_model_call_limits(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Independent bounds prevent unbounded tool or provider loops."""
@@ -611,8 +631,8 @@ def test_agent_enforces_search_and_model_call_limits(
     )
 
     with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
-        search_limited = search_limited_agent.run("Question")
-        call_limited = call_limited_agent.run("Question")
+        search_limited = await search_limited_agent.run("Question")
+        call_limited = await call_limited_agent.run("Question")
 
     assert search_limited.termination_reason is TerminationReason.SEARCH_LIMIT
     assert search_limited.model_calls == 2
@@ -629,7 +649,8 @@ def test_agent_enforces_search_and_model_call_limits(
     assert "code=model_call_limit" in caplog.records[1].message
 
 
-def test_agent_converts_provider_and_retriever_errors_to_safe_results(
+@pytest.mark.anyio
+async def test_agent_converts_provider_and_retriever_errors_to_safe_results(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Internal exception details must not leak from the agent boundary."""
@@ -645,8 +666,8 @@ def test_agent_converts_provider_and_retriever_errors_to_safe_results(
     )
 
     with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
-        provider_result = provider_agent.run("Question")
-        retrieval_result = retrieval_agent.run("Question")
+        provider_result = await provider_agent.run("Question")
+        retrieval_result = await retrieval_agent.run("Question")
 
     assert provider_result.termination_reason is TerminationReason.PROVIDER_ERROR
     assert "exhausted" not in provider_result.message
@@ -657,8 +678,9 @@ def test_agent_converts_provider_and_retriever_errors_to_safe_results(
     assert "sensitive backend detail" not in caplog.text
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize("message", ["", "   "])
-def test_agent_rejects_blank_user_message(message: str) -> None:
+async def test_agent_rejects_blank_user_message(message: str) -> None:
     """Blank input must fail before consuming a scripted model action."""
     agent, provider = _agent(
         (ClarifyAction(question="Please provide a question."),),
@@ -666,24 +688,28 @@ def test_agent_rejects_blank_user_message(message: str) -> None:
     )
 
     with pytest.raises(ValueError, match="user_message"):
-        agent.run(message)
+        await agent.run(message)
     assert provider.actions_remaining == 1
 
 
-def test_agent_accepts_unicode_user_message() -> None:
+@pytest.mark.anyio
+async def test_agent_accepts_unicode_user_message() -> None:
     """Unicode user input reaches the typed provider request unchanged."""
     agent, provider = _agent(
         (ClarifyAction(question="どのポリシーですか？"),),
         _StubRetriever({}),
     )
 
-    result = agent.run("休暇ポリシーは何ですか？")
+    result = await agent.run("休暇ポリシーは何ですか？")
 
     assert result.status is AgentTurnStatus.CLARIFICATION_REQUIRED
     assert provider.requests[0].user_message == "休暇ポリシーは何ですか？"
 
 
-def test_rag_specialist_adapter_preserves_grounded_result_and_public_steps() -> None:
+@pytest.mark.anyio
+async def test_rag_specialist_adapter_preserves_grounded_result_and_public_steps() -> (
+    None
+):
     """Delegation should expose executed RAG work without changing its result."""
     chunk = _chunk()
     agent, provider = _agent(
@@ -707,7 +733,7 @@ def test_rag_specialist_adapter_preserves_grounded_result_and_public_steps() -> 
         ),
     )
 
-    result = RagSpecialistAdapter(agent).run(
+    result = await RagSpecialistAdapter(agent).run(
         RagHandoffRequest(task="Explain domestic meal limits", history=history),
         session_id="session-123",
     )
@@ -729,7 +755,8 @@ def test_rag_specialist_adapter_preserves_grounded_result_and_public_steps() -> 
     )
 
 
-def test_rag_specialist_adapter_bypasses_standalone_trace_root() -> None:
+@pytest.mark.anyio
+async def test_rag_specialist_adapter_bypasses_standalone_trace_root() -> None:
     """Stage 13 must not create a second root before shared tracing exists."""
     recorder = _ForbiddenRootTraceRecorder()
     agent = RagAgent(
@@ -742,21 +769,22 @@ def test_rag_specialist_adapter_bypasses_standalone_trace_root() -> None:
     )
     adapter = RagSpecialistAdapter(agent)
 
-    result = adapter.run(RagHandoffRequest(task="Policy question"))
+    result = await adapter.run(RagHandoffRequest(task="Policy question"))
     adapter.shutdown()
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert recorder.shutdown_calls == 1
 
 
-def test_rag_adapter_marks_retrieval_failure_without_private_detail() -> None:
+@pytest.mark.anyio
+async def test_rag_adapter_marks_retrieval_failure_without_private_detail() -> None:
     """A failed delegated search should remain observable and safely bounded."""
     agent, _provider = _agent(
         (SearchAction(query="domestic meals"),),
         _StubRetriever({}, error=RuntimeError("private retrieval detail")),
     )
 
-    result = RagSpecialistAdapter(agent).run(
+    result = await RagSpecialistAdapter(agent).run(
         RagHandoffRequest(task="Explain domestic meal limits")
     )
 
@@ -768,7 +796,8 @@ def test_rag_adapter_marks_retrieval_failure_without_private_detail() -> None:
     assert "private" not in result.execution_steps[0].summary
 
 
-def test_rag_specialist_adapter_records_rejected_repeated_search() -> None:
+@pytest.mark.anyio
+async def test_rag_specialist_adapter_records_rejected_repeated_search() -> None:
     """A terminal duplicate search should appear after the completed retrieval."""
     chunk = _chunk()
     agent, _provider = _agent(
@@ -780,7 +809,7 @@ def test_rag_specialist_adapter_records_rejected_repeated_search() -> None:
         max_model_calls=2,
     )
 
-    result = RagSpecialistAdapter(agent).run(
+    result = await RagSpecialistAdapter(agent).run(
         RagHandoffRequest(task="Explain domestic meal limits")
     )
 

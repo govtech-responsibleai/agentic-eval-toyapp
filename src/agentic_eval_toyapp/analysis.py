@@ -69,7 +69,9 @@ class AnalysisGenerationProvider(Protocol):
     @property
     def revision(self) -> str: ...
 
-    def generate_action(self, request: AnalysisModelRequest) -> AnalysisAction: ...
+    async def generate_action(
+        self, request: AnalysisModelRequest
+    ) -> AnalysisAction: ...
 
 
 class _FlatReportReference(BaseModel):
@@ -176,7 +178,7 @@ class OpenAIAnalysisGenerationProvider:
     def revision(self) -> str:
         return self._revision
 
-    def generate_action(self, request: AnalysisModelRequest) -> AnalysisAction:
+    async def generate_action(self, request: AnalysisModelRequest) -> AnalysisAction:
         """Send all selected report sources and validate the model result."""
         context: dict[str, object] = {
             "task": request.task,
@@ -200,7 +202,7 @@ class OpenAIAnalysisGenerationProvider:
         }
         started_at = perf_counter()
         try:
-            completion = self._client.create(
+            completion = await self._client.create(
                 model=self._model_id,
                 messages=(
                     {"role": "system", "content": request.system_prompt},
@@ -264,7 +266,7 @@ class DeterministicAnalysisGenerationProvider:
     def revision(self) -> str:
         return "v1"
 
-    def generate_action(self, request: AnalysisModelRequest) -> AnalysisAction:
+    async def generate_action(self, request: AnalysisModelRequest) -> AnalysisAction:
         statements: list[str] = []
         references: list[ReportReference] = []
         for block in request.blocks:
@@ -305,7 +307,7 @@ class ReportAnalysisAgent:
         self._provider = provider
         self._system_prompt = system_prompt.strip()
 
-    def run(
+    async def run(
         self,
         request: AnalysisHandoffRequest,
         *,
@@ -355,7 +357,7 @@ class ReportAnalysisAgent:
             model_request, model=self._provider.model_id
         ) as model_trace:
             try:
-                action = self._provider.generate_action(model_request)
+                action = await self._provider.generate_action(model_request)
             except GenerationProviderError as error:
                 model_trace.fail(error.code)
                 return self._failure(

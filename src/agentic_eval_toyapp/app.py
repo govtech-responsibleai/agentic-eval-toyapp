@@ -761,7 +761,7 @@ def create_app(
         tags=["target"],
     )
     def capabilities() -> CapabilityResponse:
-        """Advertise the synchronous session and semantic-retrieval path."""
+        """Advertise the request/response session and semantic-retrieval path."""
         tracing_operational = resolved_settings.langfuse_enabled
         advertised_actions = (
             tuple(action.value for action in CoordinatorActionKind)
@@ -789,9 +789,9 @@ def create_app(
         },
         tags=["chat"],
     )
-    def create_session() -> SessionResponse:
+    async def create_session() -> SessionResponse:
         """Create one empty conversation session in the configured store."""
-        return resolved_store.create()
+        return await resolved_store.create()
 
     @application.get(
         f"{API_PREFIX}/sessions/{{session_id}}",
@@ -803,9 +803,9 @@ def create_app(
         },
         tags=["chat"],
     )
-    def get_session(session_id: UUID) -> SessionResponse:
+    async def get_session(session_id: UUID) -> SessionResponse:
         """Return safe public messages for one existing session."""
-        return resolved_store.get(session_id)
+        return await resolved_store.get(session_id)
 
     @application.post(
         f"{API_PREFIX}/sessions/{{session_id}}/files",
@@ -827,7 +827,7 @@ def create_app(
     ) -> ReportUploadResponse:
         """Validate and retain one report without invoking an agent turn."""
         with diagnostic_context(session_id):
-            resolved_store.get(session_id)
+            await resolved_store.get(session_id)
             try:
                 try:
                     content = await file.read(resolved_report_processor.max_bytes + 1)
@@ -839,7 +839,9 @@ def create_app(
                     )
                 finally:
                     await file.close()
-                return resolved_report_store.add(session_id, processed)
+                return await run_in_threadpool(
+                    resolved_report_store.add, session_id, processed
+                )
             except (
                 UnsupportedReportTypeError,
                 ReportTooLargeError,
@@ -884,11 +886,13 @@ def create_app(
         },
         tags=["files"],
     )
-    def list_reports(session_id: UUID) -> ReportListResponse:
+    async def list_reports(session_id: UUID) -> ReportListResponse:
         """List safe metadata for reports retained by this session."""
-        resolved_store.get(session_id)
+        await resolved_store.get(session_id)
         return ReportListResponse(
-            files=resolved_report_store.list_for_session(session_id)
+            files=await run_in_threadpool(
+                resolved_report_store.list_for_session, session_id
+            )
         )
 
     @application.delete(
@@ -901,10 +905,10 @@ def create_app(
         },
         tags=["files"],
     )
-    def delete_report(session_id: UUID, file_id: UUID) -> Response:
+    async def delete_report(session_id: UUID, file_id: UUID) -> Response:
         """Remove one owned report without changing past conversation turns."""
-        resolved_store.get(session_id)
-        resolved_report_store.delete(session_id, file_id)
+        await resolved_store.get(session_id)
+        await run_in_threadpool(resolved_report_store.delete, session_id, file_id)
         return Response(status_code=204)
 
     @application.post(
@@ -918,13 +922,13 @@ def create_app(
         },
         tags=["chat"],
     )
-    def submit_message(
+    async def submit_message(
         session_id: UUID,
         request: SessionMessageRequest,
     ) -> SessionMessageResponse:
-        """Execute and retain one synchronous bounded agent turn."""
+        """Execute and retain one bounded agent turn."""
         with diagnostic_context(session_id, turn=True):
-            resolved_store.get(session_id)
+            await resolved_store.get(session_id)
             if len(request.file_ids) > resolved_settings.upload_max_files_per_message:
                 log_failure(
                     event="message",
@@ -935,7 +939,9 @@ def create_app(
                 )
                 raise ReportAttachmentLimitError
             try:
-                reports = resolved_report_store.resolve(session_id, request.file_ids)
+                reports = await run_in_threadpool(
+                    resolved_report_store.resolve, session_id, request.file_ids
+                )
             except ReportNotFoundError as error:
                 log_failure(
                     event="message",
@@ -947,7 +953,7 @@ def create_app(
                 )
                 raise
             resolved_agent = resolver.get()
-            result = resolved_store.run_turn(
+            result = await resolved_store.run_turn(
                 session_id,
                 request.message,
                 agent=resolved_agent,

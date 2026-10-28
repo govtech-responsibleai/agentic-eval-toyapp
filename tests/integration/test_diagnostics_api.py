@@ -16,7 +16,7 @@ from agentic_eval_toyapp.providers import OpenAIChatGenerationProvider
 
 
 class _FailingCompletionClient:
-    def create(
+    async def create(
         self,
         *,
         model: str,

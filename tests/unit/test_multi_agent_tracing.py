@@ -186,7 +186,8 @@ def _updated(observation: _Observation, key: str) -> list[object]:
     return [update[key] for update in observation.updates if key in update]
 
 
-def test_direct_answer_has_one_output_bearing_root_and_no_delegation(
+@pytest.mark.anyio
+async def test_direct_answer_has_one_output_bearing_root_and_no_delegation(
     _fake_propagation: list[dict[str, object]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -200,7 +201,7 @@ def test_direct_answer_has_one_output_bearing_root_and_no_delegation(
     )
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
-        result = agent.run("Hello", session_id="session-123")
+        result = await agent.run("Hello", session_id="session-123")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert _shape(client) == [
@@ -259,7 +260,10 @@ def test_upload_only_does_not_create_a_root_and_message_does() -> None:
     assert client.flushes == 1
 
 
-def test_failed_provider_attempt_is_a_classified_generation_not_a_second_root() -> None:
+@pytest.mark.anyio
+async def test_failed_provider_attempt_is_a_classified_generation_not_a_second_root() -> (
+    None
+):
     class _RepairingProvider:
         model_id = "scripted-model"
         revision = "v1"
@@ -267,7 +271,7 @@ def test_failed_provider_attempt_is_a_classified_generation_not_a_second_root() 
         def __init__(self) -> None:
             self.calls = 0
 
-        def generate_action(
+        async def generate_action(
             self, request: CoordinatorRequest
         ) -> CoordinatorAnswerAction:
             del request
@@ -283,7 +287,7 @@ def test_failed_provider_attempt_is_a_classified_generation_not_a_second_root() 
         trace_recorder=_recorder(client),
     )
 
-    result = agent.run("Hello", session_id="session-repair")
+    result = await agent.run("Hello", session_id="session-repair")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert [item.name for item in client.observations].count("agent-turn") == 1
@@ -298,7 +302,8 @@ def test_failed_provider_attempt_is_a_classified_generation_not_a_second_root() 
     assert "private malformed output" not in str(client.observations)
 
 
-def test_rag_route_has_one_nested_specialist_and_search_tool() -> None:
+@pytest.mark.anyio
+async def test_rag_route_has_one_nested_specialist_and_search_tool() -> None:
     client = _Client()
     rag = RagAgent(
         provider=ScriptedGenerationProvider(
@@ -322,7 +327,7 @@ def test_rag_route_has_one_nested_specialist_and_search_tool() -> None:
         trace_recorder=_recorder(client),
     )
 
-    result = agent.run("How much annual leave?", session_id="session-rag")
+    result = await agent.run("How much annual leave?", session_id="session-rag")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert _shape(client) == [
@@ -341,8 +346,9 @@ def test_rag_route_has_one_nested_specialist_and_search_tool() -> None:
     assert client.observations[4].model == "scripted-rag-fixture"
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize("include_report_text", [False, True])
-def test_analysis_route_exports_only_selected_report_context_by_policy(
+async def test_analysis_route_exports_only_selected_report_context_by_policy(
     include_report_text: bool,
 ) -> None:
     client = _Client()
@@ -364,7 +370,7 @@ def test_analysis_route_exports_only_selected_report_context_by_policy(
         trace_recorder=_recorder(client, include_report_text=include_report_text),
     )
 
-    result = agent.run(
+    result = await agent.run(
         "Summarise findings", session_id="session-analysis", reports=(report,)
     )
 
@@ -392,33 +398,32 @@ def test_analysis_route_exports_only_selected_report_context_by_policy(
     assert analysis_input["report_text_exported"] is include_report_text
 
 
-def test_provider_usage_is_attached_only_to_active_generation() -> None:
+@pytest.mark.anyio
+async def test_provider_usage_is_attached_only_to_active_generation() -> None:
     client = _Client()
     recorder = _recorder(client)
     record_completion_usage(
         CompletionDiagnostics(input_tokens=1, output_tokens=2, total_tokens=3)
     )
-    with (
-        recorder.start_turn(
-            session_id="session-usage", user_message="Hello", history_message_count=0
-        ) as turn,
-        turn.model_action(
+    async with recorder.start_turn(
+        session_id="session-usage", user_message="Hello", history_message_count=0
+    ) as turn:
+        with turn.model_action(
             CoordinatorRequest(
                 system_prompt="Hidden", user_message="Hello", model_call_number=1
             ),
             model="live-model",
-        ) as action,
-    ):
-        record_completion_usage(
-            CompletionDiagnostics(
-                input_tokens=11,
-                output_tokens=7,
-                total_tokens=18,
-                reasoning_tokens=3,
-                finish_reason="stop",
+        ) as action:
+            record_completion_usage(
+                CompletionDiagnostics(
+                    input_tokens=11,
+                    output_tokens=7,
+                    total_tokens=18,
+                    reasoning_tokens=3,
+                    finish_reason="stop",
+                )
             )
-        )
-        action.succeed(CoordinatorAnswerAction(markdown="Hi"))
+            action.succeed(CoordinatorAnswerAction(markdown="Hi"))
     generation = client.observations[1]
     assert generation.model == "live-model"
     assert _updated(generation, "usage_details") == [

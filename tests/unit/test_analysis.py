@@ -76,7 +76,7 @@ class _ScriptedProvider:
         self.actions = list(actions)
         self.requests: list[AnalysisModelRequest] = []
 
-    def generate_action(self, request: AnalysisModelRequest) -> AnalysisAction:
+    async def generate_action(self, request: AnalysisModelRequest) -> AnalysisAction:
         self.requests.append(request)
         if not self.actions:
             raise GenerationProviderError("private provider detail")
@@ -96,7 +96,7 @@ class _RecordingClient:
         self.diagnostics = diagnostics
         self.calls: list[dict[str, object]] = []
 
-    def create(
+    async def create(
         self,
         *,
         model: str,
@@ -122,10 +122,11 @@ class _RecordingClient:
         return content
 
 
-def test_short_report_returns_one_grounded_answer_without_policy_search() -> None:
+@pytest.mark.anyio
+async def test_short_report_returns_one_grounded_answer_without_policy_search() -> None:
     """One short report should need exactly one specialist model call."""
     report = _attachment("Revenue rose 18%. Supplier share is 62%.")
-    result = _agent(DeterministicAnalysisGenerationProvider()).run(
+    result = await _agent(DeterministicAnalysisGenerationProvider()).run(
         AnalysisHandoffRequest(task="Summarise findings", attachments=(report,))
     )
 
@@ -142,7 +143,8 @@ def test_short_report_returns_one_grounded_answer_without_policy_search() -> Non
     ]
 
 
-def test_long_report_is_supplied_in_full_to_one_model_call() -> None:
+@pytest.mark.anyio
+async def test_long_report_is_supplied_in_full_to_one_model_call() -> None:
     """The specialist neither truncates nor splits the checked-in report."""
     report_text = (
         (Path(__file__).parents[1] / "fixtures" / "test_report.md")
@@ -152,7 +154,7 @@ def test_long_report_is_supplied_in_full_to_one_model_call() -> None:
     report = _attachment(report_text, media_type=ReportMediaType.MARKDOWN)
     provider = _ScriptedProvider((AnalysisAnswerAction(markdown="Report reviewed."),))
 
-    result = _agent(provider).run(
+    result = await _agent(provider).run(
         AnalysisHandoffRequest(task="Find main results", attachments=(report,))
     )
 
@@ -170,13 +172,14 @@ def test_long_report_is_supplied_in_full_to_one_model_call() -> None:
     assert result.searches == 0
 
 
-def test_direct_answer_above_old_chunk_summary_limit_is_accepted() -> None:
+@pytest.mark.anyio
+async def test_direct_answer_above_old_chunk_summary_limit_is_accepted() -> None:
     """The removed map limit must not reject a valid direct answer."""
     report = _attachment("A longer report finding.")
     answer = "Finding. " * 160
     provider = _ScriptedProvider((AnalysisAnswerAction(markdown=answer),))
 
-    result = _agent(provider).run(
+    result = await _agent(provider).run(
         AnalysisHandoffRequest(task="Summarise", attachments=(report,))
     )
 
@@ -186,7 +189,8 @@ def test_direct_answer_above_old_chunk_summary_limit_is_accepted() -> None:
     assert result.model_calls == 1
 
 
-def test_long_answer_and_thirteen_references_fit_analysis_contract() -> None:
+@pytest.mark.anyio
+async def test_long_answer_and_thirteen_references_fit_analysis_contract() -> None:
     """A useful report answer must not fail the old 6,000/12 bounds."""
     report_id = uuid4()
     answer = "A" * 7_351
@@ -216,7 +220,7 @@ def test_long_answer_and_thirteen_references_fit_analysis_contract() -> None:
         client=client,
     )
 
-    action = provider.generate_action(
+    action = await provider.generate_action(
         AnalysisModelRequest(
             system_prompt="Analyse faithfully.",
             task="Summarise the main findings",
@@ -255,7 +259,8 @@ def test_analysis_answer_and_reference_bounds_remain_finite() -> None:
         AnalysisClarifyAction(question="Q" * 6_001)
 
 
-def test_invalid_reference_is_not_presented_as_valid_evidence(
+@pytest.mark.anyio
+async def test_invalid_reference_is_not_presented_as_valid_evidence(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Wrong file IDs and fabricated excerpts produce findings, not citations."""
@@ -279,7 +284,7 @@ def test_invalid_reference_is_not_presented_as_valid_evidence(
     )
 
     with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
-        result = _agent(provider).run(
+        result = await _agent(provider).run(
             AnalysisHandoffRequest(task="Analyse", attachments=(report,))
         )
 
@@ -297,7 +302,8 @@ def test_invalid_reference_is_not_presented_as_valid_evidence(
     assert "Revenue rose 18%" not in caplog.text
 
 
-def test_live_analysis_logs_invalid_schema_without_report_content(
+@pytest.mark.anyio
+async def test_live_analysis_logs_invalid_schema_without_report_content(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A malformed model action is reported without exposing source text."""
@@ -334,7 +340,7 @@ def test_live_analysis_logs_invalid_schema_without_report_content(
         caplog.at_level(logging.ERROR, logger="uvicorn.error"),
         pytest.raises(InvalidGenerationActionError),
     ):
-        provider.generate_action(request)
+        await provider.generate_action(request)
 
     assert len(caplog.records) == 1
     assert "agent=analysis" in caplog.text
@@ -344,13 +350,14 @@ def test_live_analysis_logs_invalid_schema_without_report_content(
     assert "private report" not in caplog.text
 
 
-def test_analysis_clarification_and_provider_failure() -> None:
+@pytest.mark.anyio
+async def test_analysis_clarification_and_provider_failure() -> None:
     """Each terminal path should have one honest call and a safe public reason."""
     report = _attachment("Finding.")
-    clarification = _agent(
+    clarification = await _agent(
         _ScriptedProvider((AnalysisClarifyAction(question="Which period?"),))
     ).run(AnalysisHandoffRequest(task="Compare periods", attachments=(report,)))
-    failure = _agent(_ScriptedProvider(())).run(
+    failure = await _agent(_ScriptedProvider(())).run(
         AnalysisHandoffRequest(task="Summarise", attachments=(report,))
     )
     assert clarification.status is AgentTurnStatus.CLARIFICATION_REQUIRED
@@ -361,7 +368,8 @@ def test_analysis_clarification_and_provider_failure() -> None:
     assert "private" not in failure.message
 
 
-def test_pdf_reference_requires_supplied_page_and_exact_excerpt() -> None:
+@pytest.mark.anyio
+async def test_pdf_reference_requires_supplied_page_and_exact_excerpt() -> None:
     """A page number outside the extracted report must not become evidence."""
     report = CoordinatorAttachment(
         file_id=uuid4(),
@@ -380,7 +388,7 @@ def test_pdf_reference_requires_supplied_page_and_exact_excerpt() -> None:
         (AnalysisAnswerAction(markdown="Risk is high.", references=(wrong_page,)),)
     )
 
-    result = _agent(provider).run(
+    result = await _agent(provider).run(
         AnalysisHandoffRequest(task="Summarise", attachments=(report,))
     )
 
@@ -391,7 +399,8 @@ def test_pdf_reference_requires_supplied_page_and_exact_excerpt() -> None:
     )
 
 
-def test_conflicting_sections_reach_one_direct_model_request() -> None:
+@pytest.mark.anyio
+async def test_conflicting_sections_reach_one_direct_model_request() -> None:
     """The planner must preserve contradictory report claims for model judgment."""
     report = _attachment(
         "# Operations\nRevenue rose 18%.\n# Finance\nRevenue fell 4%.",
@@ -401,7 +410,7 @@ def test_conflicting_sections_reach_one_direct_model_request() -> None:
         (AnalysisAnswerAction(markdown="The two sections conflict."),)
     )
 
-    result = _agent(provider).run(
+    result = await _agent(provider).run(
         AnalysisHandoffRequest(task="Identify contradictions", attachments=(report,))
     )
 
@@ -415,7 +424,8 @@ def test_conflicting_sections_reach_one_direct_model_request() -> None:
     assert "fell 4%" in provider.requests[0].blocks[1].text
 
 
-def test_blank_pdf_page_handoff_requests_usable_report_text() -> None:
+@pytest.mark.anyio
+async def test_blank_pdf_page_handoff_requests_usable_report_text() -> None:
     """An anomalous empty extraction must not trigger a model call."""
     report = CoordinatorAttachment(
         file_id=uuid4(),
@@ -427,7 +437,7 @@ def test_blank_pdf_page_handoff_requests_usable_report_text() -> None:
     )
     provider = _ScriptedProvider(())
 
-    result = _agent(provider).run(
+    result = await _agent(provider).run(
         AnalysisHandoffRequest(task="Summarise", attachments=(report,))
     )
 
@@ -447,7 +457,10 @@ def test_analysis_model_request_requires_source_content() -> None:
         )
 
 
-def test_openai_analysis_provider_uses_strict_schema_and_validates_action() -> None:
+@pytest.mark.anyio
+async def test_openai_analysis_provider_uses_strict_schema_and_validates_action() -> (
+    None
+):
     """The live adapter should send exact source spans and parse a typed reply."""
     report_id = uuid4()
     client = _RecordingClient(
@@ -474,7 +487,7 @@ def test_openai_analysis_provider_uses_strict_schema_and_validates_action() -> N
         client=client,
     )
 
-    action = provider.generate_action(
+    action = await provider.generate_action(
         AnalysisModelRequest(
             system_prompt="Analyse faithfully.",
             task="Find main result",

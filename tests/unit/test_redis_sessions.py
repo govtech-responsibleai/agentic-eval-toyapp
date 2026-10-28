@@ -1,5 +1,7 @@
 """Offline tests for persistent Redis-backed conversation sessions."""
 
+import asyncio
+import threading
 from collections.abc import Sequence
 from uuid import UUID, uuid4
 
@@ -27,7 +29,7 @@ class _RecordingAgent:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[ConversationMessage, ...]]] = []
 
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -48,7 +50,7 @@ class _RecordingAgent:
 
 
 class _FailingAgent:
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -108,21 +110,24 @@ class _FakeRedisClient:
         *,
         timeout: float,
         blocking_timeout: float,
+        thread_local: bool,
     ) -> _FakeLock:
         del name, timeout, blocking_timeout
+        assert thread_local is False, "lock is released from another worker thread"
         return _FakeLock(self)
 
 
-def test_redis_store_persists_sessions_across_store_instances() -> None:
+@pytest.mark.anyio
+async def test_redis_store_persists_sessions_across_store_instances() -> None:
     """A reconstructed app store should see sessions held by Redis."""
     client = _FakeRedisClient()
     first_store = RedisSessionStore(client)
     agent = _RecordingAgent()
-    session = first_store.create()
-    first_store.run_turn(session.session_id, "persistent question", agent=agent)
+    session = await first_store.create()
+    await first_store.run_turn(session.session_id, "persistent question", agent=agent)
 
     reconstructed_store = RedisSessionStore(client)
-    snapshot = reconstructed_store.get(session.session_id)
+    snapshot = await reconstructed_store.get(session.session_id)
 
     assert snapshot.retained_turns == 1
     assert [(message.role, message.content) for message in snapshot.messages] == [
@@ -131,16 +136,17 @@ def test_redis_store_persists_sessions_across_store_instances() -> None:
     ]
 
 
-def test_redis_store_passes_history_and_trims_complete_turns() -> None:
+@pytest.mark.anyio
+async def test_redis_store_passes_history_and_trims_complete_turns() -> None:
     """Redis retention should match the bounded in-memory contract."""
     store = RedisSessionStore(_FakeRedisClient(), max_turns=2)
     agent = _RecordingAgent()
-    session = store.create()
+    session = await store.create()
 
     for message in ("first", "second", "third"):
-        store.run_turn(session.session_id, message, agent=agent)
+        await store.run_turn(session.session_id, message, agent=agent)
 
-    snapshot = store.get(session.session_id)
+    snapshot = await store.get(session.session_id)
     assert snapshot.retained_turns == 2
     assert [message.content for message in snapshot.messages] == [
         "second",
@@ -156,45 +162,50 @@ def test_redis_store_passes_history_and_trims_complete_turns() -> None:
     ]
 
 
-def test_redis_store_rejects_missing_busy_and_unavailable_sessions() -> None:
+@pytest.mark.anyio
+async def test_redis_store_rejects_missing_busy_and_unavailable_sessions() -> None:
     """Storage failures should remain distinct from unknown and busy sessions."""
     client = _FakeRedisClient()
     store = RedisSessionStore(client)
     agent = _RecordingAgent()
 
     with pytest.raises(SessionNotFoundError):
-        store.get(uuid4())
+        await store.get(uuid4())
 
-    session = store.create()
+    session = await store.create()
     client.lock_available = False
     with pytest.raises(SessionBusyError):
-        store.run_turn(session.session_id, "question", agent=agent)
+        await store.run_turn(session.session_id, "question", agent=agent)
 
     client.available = False
     with pytest.raises(SessionStoreUnavailableError):
         store.check()
     with pytest.raises(SessionStoreUnavailableError):
-        store.get(session.session_id)
+        await store.get(session.session_id)
     assert agent.calls == []
 
 
-def test_redis_store_does_not_persist_partial_or_invalid_turns() -> None:
+@pytest.mark.anyio
+async def test_redis_store_does_not_persist_partial_or_invalid_turns() -> None:
     """Agent and payload failures must not produce partial conversation pairs."""
     client = _FakeRedisClient()
     store = RedisSessionStore(client)
-    session = store.create()
+    session = await store.create()
 
     with pytest.raises(RuntimeError, match="agent failed"):
-        store.run_turn(session.session_id, "question", agent=_FailingAgent())
-    assert store.get(session.session_id).messages == ()
+        await store.run_turn(session.session_id, "question", agent=_FailingAgent())
+    assert (await store.get(session.session_id)).messages == ()
 
     session_key = next(key for key in client.data if str(session.session_id) in key)
     client.data[session_key] = '{"version":1,"turns":[{"user":null}]}'
     with pytest.raises(SessionStoreUnavailableError, match="invalid session data"):
-        store.get(session.session_id)
+        await store.get(session.session_id)
 
 
-def test_redis_store_retries_uuid_collisions_and_validates_configuration() -> None:
+@pytest.mark.anyio
+async def test_redis_store_retries_uuid_collisions_and_validates_configuration() -> (
+    None
+):
     """Persistent session creation must not overwrite an existing Redis key."""
     first_id = UUID("00000000-0000-0000-0000-000000000001")
     second_id = UUID("00000000-0000-0000-0000-000000000002")
@@ -204,8 +215,8 @@ def test_redis_store_retries_uuid_collisions_and_validates_configuration() -> No
         id_factory=lambda: next(generated_ids),
     )
 
-    assert store.create().session_id == first_id
-    assert store.create().session_id == second_id
+    assert (await store.create()).session_id == first_id
+    assert (await store.create()).session_id == second_id
 
     with pytest.raises(ValueError, match="max_turns"):
         RedisSessionStore(_FakeRedisClient(), max_turns=0)
@@ -213,3 +224,56 @@ def test_redis_store_retries_uuid_collisions_and_validates_configuration() -> No
         RedisSessionStore(_FakeRedisClient(), key_prefix="  ")
     with pytest.raises(ValueError, match="lock_timeout_seconds"):
         RedisSessionStore(_FakeRedisClient(), lock_timeout_seconds=0)
+
+
+class _SlowLockClient(_FakeRedisClient):
+    """Block lock acquisition in the calling thread, as a real Redis wait would."""
+
+    def __init__(self, release: threading.Event) -> None:
+        super().__init__()
+        self.release = release
+        self.acquire_threads: list[int] = []
+
+    def lock(
+        self,
+        name: str,
+        *,
+        timeout: float,
+        blocking_timeout: float,
+        thread_local: bool,
+    ) -> _FakeLock:
+        del name, timeout, blocking_timeout, thread_local
+        client = self
+
+        class _BlockingLock(_FakeLock):
+            def acquire(self) -> bool:
+                client.acquire_threads.append(threading.get_ident())
+                client.release.wait(timeout=5.0)
+                return super().acquire()
+
+        return _BlockingLock(self)
+
+
+@pytest.mark.anyio
+async def test_redis_store_waiting_on_a_lock_does_not_block_the_event_loop() -> None:
+    """A second same-session turn waits in a worker thread, not on the loop."""
+    release = threading.Event()
+    client = _SlowLockClient(release)
+    store = RedisSessionStore(client)
+    session = await store.create()
+    turn = asyncio.create_task(
+        store.run_turn(session.session_id, "held", agent=_RecordingAgent())
+    )
+
+    ticks = 0
+    for _ in range(50):
+        await asyncio.sleep(0.001)
+        ticks += 1
+    assert client.acquire_threads
+    assert client.acquire_threads[0] != threading.get_ident()
+    assert ticks == 50
+
+    release.set()
+    result = await asyncio.wait_for(turn, 5.0)
+    assert result.message == "Please clarify: held"
+    assert (await store.get(session.session_id)).retained_turns == 1

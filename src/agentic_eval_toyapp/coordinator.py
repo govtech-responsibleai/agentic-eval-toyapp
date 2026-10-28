@@ -99,7 +99,7 @@ class CoordinatorGenerationProvider(Protocol):
         """Return the model or fixture revision."""
         ...
 
-    def generate_action(self, request: CoordinatorRequest) -> CoordinatorAction:
+    async def generate_action(self, request: CoordinatorRequest) -> CoordinatorAction:
         """Return exactly one coordinator action."""
         ...
 
@@ -107,7 +107,7 @@ class CoordinatorGenerationProvider(Protocol):
 class RagSpecialist(Protocol):
     """Future RAG delegation boundary implemented in Stage 13."""
 
-    def run(
+    async def run(
         self,
         request: RagHandoffRequest,
         *,
@@ -120,7 +120,7 @@ class RagSpecialist(Protocol):
 class AnalysisSpecialist(Protocol):
     """Report-analysis boundary receiving coordinator-selected content."""
 
-    def run(
+    async def run(
         self,
         request: AnalysisHandoffRequest,
         *,
@@ -230,7 +230,7 @@ class OpenAICoordinatorGenerationProvider:
     def revision(self) -> str:
         return self._revision
 
-    def generate_action(self, request: CoordinatorRequest) -> CoordinatorAction:
+    async def generate_action(self, request: CoordinatorRequest) -> CoordinatorAction:
         """Request and validate one structured coordinator decision."""
         response_schema = deepcopy(self._response_schema)
         definitions = cast(dict[str, Any], response_schema["$defs"])
@@ -273,7 +273,7 @@ class OpenAICoordinatorGenerationProvider:
         )
         started_at = perf_counter()
         try:
-            completion = self._client.create(
+            completion = await self._client.create(
                 model=self._model_id,
                 messages=messages,
                 response_schema=response_schema,
@@ -372,7 +372,7 @@ class ScriptedCoordinatorGenerationProvider:
         """Return immutable request history for assertions."""
         return tuple(self._requests)
 
-    def generate_action(self, request: CoordinatorRequest) -> CoordinatorAction:
+    async def generate_action(self, request: CoordinatorRequest) -> CoordinatorAction:
         self._requests.append(request)
         if self._position >= len(self._actions):
             raise GenerationProviderError("scripted action sequence is exhausted")
@@ -424,7 +424,7 @@ class DeterministicCoordinatorGenerationProvider:
     def revision(self) -> str:
         return "v1"
 
-    def generate_action(self, request: CoordinatorRequest) -> CoordinatorAction:
+    async def generate_action(self, request: CoordinatorRequest) -> CoordinatorAction:
         """Route using transparent fixtures rather than stochastic inference."""
         message = request.user_message.casefold()
         history = " ".join(item.content.casefold() for item in request.history)
@@ -501,7 +501,7 @@ class CoordinatorAgent:
                 specialist.shutdown()
         self._trace_recorder.shutdown()
 
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -513,12 +513,12 @@ class CoordinatorAgent:
         stripped_message = user_message.strip()
         if not stripped_message:
             raise ValueError("user_message must not be blank")
-        with self._trace_recorder.start_turn(
+        async with self._trace_recorder.start_turn(
             session_id=session_id,
             user_message=stripped_message,
             history_message_count=len(history),
         ) as trace:
-            result = self._execute_turn(
+            result = await self._execute_turn(
                 stripped_message,
                 history=history,
                 session_id=session_id,
@@ -528,7 +528,7 @@ class CoordinatorAgent:
             trace.complete(result)
             return result
 
-    def _execute_turn(
+    async def _execute_turn(
         self,
         user_message: str,
         *,
@@ -566,7 +566,7 @@ class CoordinatorAgent:
                 request, model=self._provider.model_id
             ) as model_trace:
                 try:
-                    action = self._provider.generate_action(request)
+                    action = await self._provider.generate_action(request)
                 except InvalidGenerationActionError as error:
                     model_trace.fail(error.code)
                     if repair_pending or model_call_number >= self._max_model_calls:
@@ -604,7 +604,7 @@ class CoordinatorAgent:
                         ),
                     )
                 )
-            return self._execute_action(
+            return await self._execute_action(
                 action,
                 history=tuple(history),
                 session_id=session_id,
@@ -617,7 +617,7 @@ class CoordinatorAgent:
 
         raise AssertionError("bounded coordinator loop exited without a result")
 
-    def _execute_action(
+    async def _execute_action(
         self,
         action: CoordinatorAction,
         *,
@@ -668,7 +668,7 @@ class CoordinatorAgent:
                 searches=0,
             )
         if isinstance(action, CoordinatorRouteRagAction):
-            return self._route_rag(
+            return await self._route_rag(
                 action,
                 history=history,
                 session_id=session_id,
@@ -677,7 +677,7 @@ class CoordinatorAgent:
                 controller_events=controller_events,
                 trace=trace,
             )
-        return self._route_analysis(
+        return await self._route_analysis(
             action,
             history=history,
             session_id=session_id,
@@ -688,7 +688,7 @@ class CoordinatorAgent:
             trace=trace,
         )
 
-    def _route_rag(
+    async def _route_rag(
         self,
         action: CoordinatorRouteRagAction,
         *,
@@ -725,7 +725,7 @@ class CoordinatorAgent:
             )
         )
         with trace.delegate_rag(action.task) as specialist_trace:
-            result = self._delegate(
+            result = await self._delegate(
                 lambda: specialist.run(request, session_id=session_id),
                 model_calls=model_calls,
                 steps=steps,
@@ -736,7 +736,7 @@ class CoordinatorAgent:
             trace.return_response(result)
         return result
 
-    def _route_analysis(
+    async def _route_analysis(
         self,
         action: CoordinatorRouteAnalysisAction,
         *,
@@ -800,7 +800,7 @@ class CoordinatorAgent:
             )
         )
         with trace.delegate_analysis(action.task, selected) as specialist_trace:
-            result = self._delegate(
+            result = await self._delegate(
                 lambda: specialist.run(request, session_id=session_id),
                 model_calls=model_calls,
                 steps=steps,
@@ -811,7 +811,7 @@ class CoordinatorAgent:
             trace.return_response(result)
         return result
 
-    def _delegate(
+    async def _delegate(
         self,
         operation: "ProtocolCall",
         *,
@@ -820,7 +820,7 @@ class CoordinatorAgent:
         controller_events: list[ControllerEvent],
     ) -> AgentTurnResult:
         try:
-            specialist_result = operation()
+            specialist_result = await operation()
         except Exception as error:
             log_failure(
                 event="delegation",
@@ -961,7 +961,7 @@ class CoordinatorAgent:
 class ProtocolCall(Protocol):
     """Zero-argument operation returning one typed specialist result."""
 
-    def __call__(self) -> AgentTurnResult: ...
+    async def __call__(self) -> AgentTurnResult: ...
 
 
 def build_openai_coordinator_provider(

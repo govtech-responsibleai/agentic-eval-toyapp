@@ -21,7 +21,7 @@ class _StaticCompletionClient:
         self._error = error
         self.calls = 0
 
-    def create(self, **values: object) -> str | StructuredCompletion:
+    async def create(self, **values: object) -> str | StructuredCompletion:
         del values
         self.calls += 1
         if self._error is not None:
@@ -55,8 +55,8 @@ class _RecordingTraceClient:
         yield observation
 
 
-def _create(client: ControlledStructuredCompletionClient) -> str:
-    return client.create(
+async def _create(client: ControlledStructuredCompletionClient) -> str:
+    return await client.create(
         model="example-model",
         messages=(
             {"role": "system", "content": "System prompt"},
@@ -68,7 +68,10 @@ def _create(client: ControlledStructuredCompletionClient) -> str:
     )
 
 
-def test_answer_is_substituted_before_the_effective_generation_is_traced() -> None:
+@pytest.mark.anyio
+async def test_answer_is_substituted_before_the_effective_generation_is_traced() -> (
+    None
+):
     """Only the effective answer should appear in observable generation output."""
     original = json.dumps(
         {
@@ -88,7 +91,7 @@ def test_answer_is_substituted_before_the_effective_generation_is_traced() -> No
         replacement_markdown="Controlled effective answer",
     )
 
-    effective = _create(client)
+    effective = await _create(client)
 
     assert json.loads(effective)["markdown"] == "Controlled effective answer"
     assert json.loads(effective)["citations"] == []
@@ -132,7 +135,8 @@ def test_answer_is_substituted_before_the_effective_generation_is_traced() -> No
         assert forbidden not in serialized_trace
 
 
-def test_controlled_client_accepts_metadata_bearing_live_response() -> None:
+@pytest.mark.anyio
+async def test_controlled_client_accepts_metadata_bearing_live_response() -> None:
     """The private capture stays textual after live transport gains metadata."""
     original = json.dumps(
         {
@@ -157,10 +161,11 @@ def test_controlled_client_accepts_metadata_bearing_live_response() -> None:
         replacement_markdown="Effective answer",
     )
 
-    assert json.loads(_create(client))["markdown"] == "Effective answer"
+    assert json.loads(await _create(client))["markdown"] == "Effective answer"
     assert client.captures[0].original_response == original
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "response",
     [
@@ -187,7 +192,7 @@ def test_controlled_client_accepts_metadata_bearing_live_response() -> None:
         ),
     ],
 )
-def test_non_answer_responses_pass_through_unchanged(response: str) -> None:
+async def test_non_answer_responses_pass_through_unchanged(response: str) -> None:
     """Search, clarification, and invalid responses must retain normal behavior."""
     client = ControlledStructuredCompletionClient(
         delegate=_StaticCompletionClient(response=response),
@@ -195,14 +200,15 @@ def test_non_answer_responses_pass_through_unchanged(response: str) -> None:
         replacement_markdown="Controlled effective answer",
     )
 
-    assert _create(client) == response
+    assert await _create(client) == response
     assert len(client.captures) == 1
     assert client.captures[0].original_response == response
     assert client.captures[0].effective_response == response
     assert client.captures[0].altered is False
 
 
-def test_provider_failure_is_recorded_without_private_error_text() -> None:
+@pytest.mark.anyio
+async def test_provider_failure_is_recorded_without_private_error_text() -> None:
     """A failed live call should retain only the normal safe trace category."""
     trace_client = _RecordingTraceClient()
     client = ControlledStructuredCompletionClient(
@@ -212,7 +218,7 @@ def test_provider_failure_is_recorded_without_private_error_text() -> None:
     )
 
     with pytest.raises(RuntimeError, match="private upstream detail"):
-        _create(client)
+        await _create(client)
 
     assert client.captures == ()
     assert trace_client.observations[0].updates == [

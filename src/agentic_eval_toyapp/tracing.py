@@ -1,12 +1,18 @@
-"""Langfuse-compatible tracing boundary for one synchronous agent turn."""
+"""Langfuse-compatible tracing boundary for one asynchronous agent turn."""
 
 from __future__ import annotations
 
-from collections.abc import Generator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import AsyncGenerator, Generator, Mapping
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 from typing import Any, Protocol
 
 from langfuse import Langfuse, propagate_attributes
+from starlette.concurrency import run_in_threadpool
 
 from agentic_eval_toyapp.diagnostics import log_failure
 from agentic_eval_toyapp.models import (
@@ -83,7 +89,7 @@ class TraceRecorder(Protocol):
         session_id: str | None,
         user_message: str,
         history_message_count: int,
-    ) -> AbstractContextManager[TurnTrace]:
+    ) -> AbstractAsyncContextManager[TurnTrace]:
         """Create the root observation for one user turn."""
         ...
 
@@ -104,7 +110,7 @@ class _NoOpModelActionObservation:
         del error_code
 
 
-class _NoOpTurnTrace:
+class NoOpTurnTrace:
     @contextmanager
     def model_action(self, request: ModelRequest) -> Generator[ModelActionObservation]:
         del request
@@ -143,16 +149,16 @@ class NoOpTraceRecorder:
     def enabled(self) -> bool:
         return False
 
-    @contextmanager
-    def start_turn(
+    @asynccontextmanager
+    async def start_turn(
         self,
         *,
         session_id: str | None,
         user_message: str,
         history_message_count: int,
-    ) -> Generator[TurnTrace]:
+    ) -> AsyncGenerator[TurnTrace]:
         del session_id, user_message, history_message_count
-        yield _NoOpTurnTrace()
+        yield NoOpTurnTrace()
 
     def flush(self) -> None:
         return None
@@ -316,14 +322,14 @@ class LangfuseTraceRecorder:
         """Expose the configured client for live compatibility verification."""
         return self._client
 
-    @contextmanager
-    def start_turn(
+    @asynccontextmanager
+    async def start_turn(
         self,
         *,
         session_id: str | None,
         user_message: str,
         history_message_count: int,
-    ) -> Generator[TurnTrace]:
+    ) -> AsyncGenerator[TurnTrace]:
         trace_session_id = session_id or "unscoped-direct-call"
         with (
             propagate_attributes(
@@ -353,7 +359,8 @@ class LangfuseTraceRecorder:
                 )
                 raise
         if self._flush_on_turn:
-            self.flush()
+            # The flush is a blocking network call, so keep it off the event loop.
+            await run_in_threadpool(self.flush)
 
     def flush(self) -> None:
         try:

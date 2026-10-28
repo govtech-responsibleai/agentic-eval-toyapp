@@ -6,6 +6,8 @@ from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
+from starlette.concurrency import run_in_threadpool
+
 from agentic_eval_toyapp.diagnostics import log_failure
 from agentic_eval_toyapp.models import (
     AgentAction,
@@ -102,7 +104,7 @@ class RagAgent:
         """Flush and close the process-level tracing dependency."""
         self._trace_recorder.shutdown()
 
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -116,12 +118,12 @@ class RagAgent:
         if not stripped_message:
             raise ValueError("user_message must not be blank")
 
-        with self._trace_recorder.start_turn(
+        async with self._trace_recorder.start_turn(
             session_id=session_id,
             user_message=stripped_message,
             history_message_count=len(history),
         ) as trace:
-            result = self._execute_turn(
+            result = await self._execute_turn(
                 stripped_message,
                 history=history,
                 trace=trace,
@@ -129,7 +131,7 @@ class RagAgent:
             trace.complete(result)
             return result
 
-    def run_delegated(
+    async def run_delegated(
         self,
         user_message: str,
         *,
@@ -142,25 +144,25 @@ class RagAgent:
 
         active_trace = delegated_rag_trace()
         if active_trace is not None:
-            return self._execute_turn(
+            return await self._execute_turn(
                 stripped_message,
                 history=history,
                 trace=active_trace,
             )
 
         no_op_recorder = NoOpTraceRecorder()
-        with no_op_recorder.start_turn(
+        async with no_op_recorder.start_turn(
             session_id=None,
             user_message=stripped_message,
             history_message_count=len(history),
         ) as trace:
-            return self._execute_turn(
+            return await self._execute_turn(
                 stripped_message,
                 history=history,
                 trace=trace,
             )
 
-    def _execute_turn(
+    async def _execute_turn(
         self,
         user_message: str,
         *,
@@ -208,7 +210,7 @@ class RagAgent:
             try:
                 with trace.model_action(request) as model_observation:
                     try:
-                        action = self._provider.generate_action(request)
+                        action = await self._provider.generate_action(request)
                     except InvalidGenerationActionError:
                         model_observation.fail("invalid_structured_action")
                         raise
@@ -304,7 +306,8 @@ class RagAgent:
                 seen_queries.add(normalised_query)
                 searches += 1
                 try:
-                    results = self._retriever.search(
+                    results = await run_in_threadpool(
+                        self._retriever.search,
                         action.query,
                         top_k=action.top_k,
                     )
@@ -525,7 +528,7 @@ class RagSpecialistAdapter:
     def __init__(self, agent: RagAgent) -> None:
         self._agent = agent
 
-    def run(
+    async def run(
         self,
         request: RagHandoffRequest,
         *,
@@ -533,7 +536,7 @@ class RagSpecialistAdapter:
     ) -> AgentTurnResult:
         """Execute only the focused task and return public RAG observations."""
         del session_id  # Stage 16 will attach this work to the coordinator trace.
-        result = self._agent.run_delegated(
+        result = await self._agent.run_delegated(
             request.task,
             history=request.history,
         )

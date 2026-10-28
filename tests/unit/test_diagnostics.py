@@ -2,12 +2,14 @@
 
 import logging
 import ssl
+import threading
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from httpx2 import Request, Response
 from openai import APIStatusError
+from starlette.concurrency import run_in_threadpool
 
 from agentic_eval_toyapp.diagnostics import (
     CompletionDiagnostics,
@@ -16,6 +18,7 @@ from agentic_eval_toyapp.diagnostics import (
     log_failure,
     log_trace_observation,
 )
+from agentic_eval_toyapp.models import RetrievedChunk
 
 
 def test_missing_or_malformed_provider_usage_remains_unknown() -> None:
@@ -178,3 +181,41 @@ def test_trace_correlation_log_contains_ids_but_no_report_text(
     assert "observation_id=" + "b" * 16 in message
     assert "name=inspect-input" in message
     assert "report_text" not in message
+
+
+class _LoggingRetriever:
+    """Emit a diagnostic from inside the retrieval worker thread."""
+
+    def __init__(self) -> None:
+        self.thread_id: int | None = None
+
+    def search(
+        self, query: str, *, top_k: int | None = None
+    ) -> tuple[RetrievedChunk, ...]:
+        del query, top_k
+        self.thread_id = threading.get_ident()
+        log_failure(
+            event="retrieval",
+            agent="rag",
+            operation="thread_probe",
+            code="thread_probe",
+        )
+        return ()
+
+
+@pytest.mark.anyio
+async def test_diagnostic_context_survives_the_retrieval_thread_hop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Logs written in the worker thread must keep the request's safe IDs."""
+    session_id = uuid4()
+    retriever = _LoggingRetriever()
+
+    with caplog.at_level(logging.DEBUG), diagnostic_context(session_id, turn=True):
+        await run_in_threadpool(retriever.search, "question", top_k=1)
+
+    assert retriever.thread_id != threading.get_ident()
+    probe = [r.getMessage() for r in caplog.records if "thread_probe" in r.getMessage()]
+    assert len(probe) == 1
+    assert f"session_id={session_id}" in probe[0]
+    assert "turn_id=-" not in probe[0]

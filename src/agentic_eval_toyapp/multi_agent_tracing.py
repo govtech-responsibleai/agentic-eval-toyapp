@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import AsyncGenerator, Generator, Mapping
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 from contextvars import ContextVar
 from typing import Any, Protocol, cast
 
 from langfuse import Langfuse, propagate_attributes
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from agentic_eval_toyapp.analysis_models import AnalysisModelRequest
 from agentic_eval_toyapp.diagnostics import (
@@ -25,7 +31,7 @@ from agentic_eval_toyapp.tracing import (
     LangfuseTraceRecorder,
     LangfuseTurnTrace,
     ModelActionObservation,
-    NoOpTraceRecorder,
+    NoOpTurnTrace,
     TurnTrace,
 )
 
@@ -85,7 +91,7 @@ class CoordinatorTraceRecorder(Protocol):
 
     def start_turn(
         self, *, session_id: str | None, user_message: str, history_message_count: int
-    ) -> AbstractContextManager[CoordinatorTrace]: ...
+    ) -> AbstractAsyncContextManager[CoordinatorTrace]: ...
 
     def shutdown(self) -> None: ...
 
@@ -131,10 +137,8 @@ class _NoOpCoordinatorTrace:
 
     @contextmanager
     def delegate_rag(self, task: str) -> Generator[TurnTrace]:
-        with NoOpTraceRecorder().start_turn(
-            session_id=None, user_message=task, history_message_count=0
-        ) as trace:
-            yield trace
+        del task
+        yield NoOpTurnTrace()
 
     @contextmanager
     def delegate_analysis(
@@ -155,10 +159,10 @@ class NoOpCoordinatorTraceRecorder:
     def enabled(self) -> bool:
         return False
 
-    @contextmanager
-    def start_turn(
+    @asynccontextmanager
+    async def start_turn(
         self, *, session_id: str | None, user_message: str, history_message_count: int
-    ) -> Generator[CoordinatorTrace]:
+    ) -> AsyncGenerator[CoordinatorTrace]:
         del session_id, user_message, history_message_count
         yield _NoOpCoordinatorTrace()
 
@@ -524,10 +528,10 @@ class LangfuseCoordinatorTraceRecorder:
     def shutdown(self) -> None:
         self._recorder.shutdown()
 
-    @contextmanager
-    def start_turn(
+    @asynccontextmanager
+    async def start_turn(
         self, *, session_id: str | None, user_message: str, history_message_count: int
-    ) -> Generator[CoordinatorTrace]:
+    ) -> AsyncGenerator[CoordinatorTrace]:
         with (
             propagate_attributes(
                 session_id=session_id or "unscoped-direct-call",
@@ -566,7 +570,8 @@ class LangfuseCoordinatorTraceRecorder:
                 root.update(level="ERROR", status_message="unhandled_agent_error")
                 raise
         if self._flush_on_turn:
-            self._recorder.flush()
+            # The flush is a blocking network call, so keep it off the event loop.
+            await run_in_threadpool(self._recorder.flush)
             log_trace_observation(
                 event="flush_attempted",
                 name="agent-turn",

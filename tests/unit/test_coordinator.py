@@ -91,7 +91,7 @@ class _RecordingRagSpecialist:
         self.session_ids: list[str | None] = []
         self.shutdown_calls = 0
 
-    def run(
+    async def run(
         self,
         request: RagHandoffRequest,
         *,
@@ -109,7 +109,7 @@ class _RecordingAnalysisSpecialist:
     def __init__(self) -> None:
         self.requests: list[AnalysisHandoffRequest] = []
 
-    def run(
+    async def run(
         self,
         request: AnalysisHandoffRequest,
         *,
@@ -129,7 +129,9 @@ class _RepairingProvider:
     def __init__(self) -> None:
         self.requests: list[CoordinatorRequest] = []
 
-    def generate_action(self, request: CoordinatorRequest) -> CoordinatorAnswerAction:
+    async def generate_action(
+        self, request: CoordinatorRequest
+    ) -> CoordinatorAnswerAction:
         self.requests.append(request)
         if len(self.requests) == 1:
             raise InvalidGenerationActionError("malformed fixture")
@@ -140,13 +142,15 @@ class _FailingProvider:
     model_id = "failure-fixture"
     revision = "v1"
 
-    def generate_action(self, request: CoordinatorRequest) -> CoordinatorAnswerAction:
+    async def generate_action(
+        self, request: CoordinatorRequest
+    ) -> CoordinatorAnswerAction:
         del request
         raise GenerationProviderError("private upstream error")
 
 
 class _FailingRagSpecialist:
-    def run(
+    async def run(
         self,
         request: RagHandoffRequest,
         *,
@@ -169,7 +173,7 @@ class _RecordingCompletionClient:
         self._diagnostics = diagnostics
         self.calls: list[dict[str, object]] = []
 
-    def create(
+    async def create(
         self,
         *,
         model: str,
@@ -195,7 +199,8 @@ class _RecordingCompletionClient:
         return content
 
 
-def test_coordinator_returns_direct_answers_and_clarification() -> None:
+@pytest.mark.anyio
+async def test_coordinator_returns_direct_answers_and_clarification() -> None:
     """Non-specialist actions should produce valid results and public steps."""
     answer_provider = ScriptedCoordinatorGenerationProvider(
         (CoordinatorAnswerAction(markdown="Hello from Northstar."),)
@@ -204,11 +209,11 @@ def test_coordinator_returns_direct_answers_and_clarification() -> None:
         (CoordinatorClarifyAction(question="Which policy do you mean?"),)
     )
 
-    answer = CoordinatorAgent(
+    answer = await CoordinatorAgent(
         provider=answer_provider,
         system_prompt="Coordinate requests.",
     ).run("Hello")
-    clarification = CoordinatorAgent(
+    clarification = await CoordinatorAgent(
         provider=clarification_provider,
         system_prompt="Coordinate requests.",
     ).run("Tell me more")
@@ -240,7 +245,8 @@ def test_coordinator_shutdown_releases_connected_specialist_resources() -> None:
     assert rag.shutdown_calls == 1
 
 
-def test_coordinator_passes_history_and_safe_attachment_context() -> None:
+@pytest.mark.anyio
+async def test_coordinator_passes_history_and_safe_attachment_context() -> None:
     """The model sees authorized content while public steps omit that content."""
     secret_text = "Confidential finding: supplier concentration is 78%."
     report = _report(secret_text)
@@ -252,7 +258,7 @@ def test_coordinator_passes_history_and_safe_attachment_context() -> None:
         ConversationMessage(role=ConversationRole.ASSISTANT, content="Earlier reply"),
     )
 
-    result = CoordinatorAgent(
+    result = await CoordinatorAgent(
         provider=provider,
         system_prompt="Coordinate requests.",
     ).run("Use my context", history=history, reports=(report,))
@@ -265,10 +271,13 @@ def test_coordinator_passes_history_and_safe_attachment_context() -> None:
     assert str(report.metadata.file_id) in result.execution_steps[0].summary
 
 
-def test_coordinator_delegates_each_valid_route_once_and_preserves_result() -> None:
+@pytest.mark.anyio
+async def test_coordinator_delegates_each_valid_route_once_and_preserves_result() -> (
+    None
+):
     """One model route should produce one typed handoff and unchanged claims."""
     rag = _RecordingRagSpecialist()
-    rag_result = CoordinatorAgent(
+    rag_result = await CoordinatorAgent(
         provider=ScriptedCoordinatorGenerationProvider(
             (CoordinatorRouteRagAction(task="Explain sick leave evidence"),)
         ),
@@ -278,7 +287,7 @@ def test_coordinator_delegates_each_valid_route_once_and_preserves_result() -> N
 
     report = _report()
     analysis = _RecordingAnalysisSpecialist()
-    analysis_result = CoordinatorAgent(
+    analysis_result = await CoordinatorAgent(
         provider=ScriptedCoordinatorGenerationProvider(
             (
                 CoordinatorRouteAnalysisAction(
@@ -306,13 +315,14 @@ def test_coordinator_delegates_each_valid_route_once_and_preserves_result() -> N
     assert analysis_result.message == "Analysis specialist answer"
 
 
-def test_coordinator_preserves_wrong_route_and_rejects_unknown_file_handoff(
+@pytest.mark.anyio
+async def test_coordinator_preserves_wrong_route_and_rejects_unknown_file_handoff(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The controller must expose model-quality errors instead of rerouting them."""
     report = _report("The annual leave policy allows 18 days.")
     analysis = _RecordingAnalysisSpecialist()
-    wrong_route = CoordinatorAgent(
+    wrong_route = await CoordinatorAgent(
         provider=ScriptedCoordinatorGenerationProvider(
             (
                 CoordinatorRouteAnalysisAction(
@@ -326,7 +336,7 @@ def test_coordinator_preserves_wrong_route_and_rejects_unknown_file_handoff(
     ).run("What is the annual leave policy?", reports=(report,))
 
     with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
-        unknown_file = CoordinatorAgent(
+        unknown_file = await CoordinatorAgent(
             provider=ScriptedCoordinatorGenerationProvider(
                 (
                     CoordinatorRouteAnalysisAction(
@@ -348,6 +358,7 @@ def test_coordinator_preserves_wrong_route_and_rejects_unknown_file_handoff(
     assert "code=invalid_handoff" in caplog.text
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("action", "expected_action"),
     [
@@ -361,7 +372,7 @@ def test_coordinator_preserves_wrong_route_and_rejects_unknown_file_handoff(
         ),
     ],
 )
-def test_unconnected_specialist_routes_fail_explicitly(
+async def test_unconnected_specialist_routes_fail_explicitly(
     action: CoordinatorRouteRagAction | CoordinatorRouteAnalysisAction,
     expected_action: ExecutionAction,
     caplog: pytest.LogCaptureFixture,
@@ -375,7 +386,7 @@ def test_unconnected_specialist_routes_fail_explicitly(
             file_ids=(reports[0].metadata.file_id,),
         )
     with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
-        result = CoordinatorAgent(
+        result = await CoordinatorAgent(
             provider=ScriptedCoordinatorGenerationProvider((action,)),
             system_prompt="Coordinate requests.",
         ).run("Request", reports=reports)
@@ -387,19 +398,20 @@ def test_unconnected_specialist_routes_fail_explicitly(
     assert "code=specialist_unavailable" in caplog.text
 
 
-def test_coordinator_repairs_once_and_bounds_provider_failures() -> None:
+@pytest.mark.anyio
+async def test_coordinator_repairs_once_and_bounds_provider_failures() -> None:
     """One schema repair is allowed; provider failures expose no private detail."""
     provider = _RepairingProvider()
-    repaired = CoordinatorAgent(
+    repaired = await CoordinatorAgent(
         provider=provider,
         system_prompt="Coordinate requests.",
         max_model_calls=2,
     ).run("Hello")
-    failed = CoordinatorAgent(
+    failed = await CoordinatorAgent(
         provider=_FailingProvider(),
         system_prompt="Coordinate requests.",
     ).run("Hello")
-    exhausted = CoordinatorAgent(
+    exhausted = await CoordinatorAgent(
         provider=_RepairingProvider(),
         system_prompt="Coordinate requests.",
         max_model_calls=1,
@@ -417,12 +429,13 @@ def test_coordinator_repairs_once_and_bounds_provider_failures() -> None:
     assert exhausted.model_calls == 1
 
 
-def test_specialist_exception_is_bounded_and_route_is_not_repeated(
+@pytest.mark.anyio
+async def test_specialist_exception_is_bounded_and_route_is_not_repeated(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A specialist exception should end the single allowed delegation."""
     with caplog.at_level(logging.ERROR, logger="uvicorn.error"):
-        result = CoordinatorAgent(
+        result = await CoordinatorAgent(
             provider=ScriptedCoordinatorGenerationProvider(
                 (CoordinatorRouteRagAction(task="Policy task"),)
             ),
@@ -441,7 +454,8 @@ def test_specialist_exception_is_bounded_and_route_is_not_repeated(
     assert "private specialist error" not in caplog.text
 
 
-def test_live_coordinator_logs_timeout_without_private_provider_text(
+@pytest.mark.anyio
+async def test_live_coordinator_logs_timeout_without_private_provider_text(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A gateway timeout is distinguishable from an invalid route decision."""
@@ -462,14 +476,15 @@ def test_live_coordinator_logs_timeout_without_private_provider_text(
         caplog.at_level(logging.ERROR, logger="uvicorn.error"),
         pytest.raises(GenerationProviderError, match="live coordinator request failed"),
     ):
-        provider.generate_action(request)
+        await provider.generate_action(request)
 
     assert len(caplog.records) == 1
     assert "agent=coordinator" in caplog.text
     assert "code=timeout" in caplog.text
 
 
-def test_live_coordinator_schema_error_logs_provider_usage(
+@pytest.mark.anyio
+async def test_live_coordinator_schema_error_logs_provider_usage(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A bad coordinator action retains safe completion metadata."""
@@ -490,7 +505,7 @@ def test_live_coordinator_schema_error_logs_provider_usage(
         caplog.at_level(logging.ERROR, logger="uvicorn.error"),
         pytest.raises(InvalidGenerationActionError),
     ):
-        provider.generate_action(
+        await provider.generate_action(
             CoordinatorRequest(
                 system_prompt="Coordinate",
                 user_message="Analyse the report",
@@ -505,7 +520,8 @@ def test_live_coordinator_schema_error_logs_provider_usage(
     assert "private token" not in caplog.text
 
 
-def test_deterministic_coordinator_routes_by_task_not_file_presence() -> None:
+@pytest.mark.anyio
+async def test_deterministic_coordinator_routes_by_task_not_file_presence() -> None:
     """Offline routing should distinguish policy content from report analysis."""
     provider = DeterministicCoordinatorGenerationProvider()
     policy_report = _report("What evidence is needed for sick leave?")
@@ -523,14 +539,17 @@ def test_deterministic_coordinator_routes_by_task_not_file_presence() -> None:
     )
 
     assert isinstance(
-        provider.generate_action(policy_request), CoordinatorRouteRagAction
+        await provider.generate_action(policy_request), CoordinatorRouteRagAction
     )
     assert isinstance(
-        provider.generate_action(analysis_request), CoordinatorRouteAnalysisAction
+        await provider.generate_action(analysis_request), CoordinatorRouteAnalysisAction
     )
 
 
-def test_openai_coordinator_provider_sends_context_and_validates_response() -> None:
+@pytest.mark.anyio
+async def test_openai_coordinator_provider_sends_context_and_validates_response() -> (
+    None
+):
     """The live adapter should use a strict schema and preserve the model route."""
     client = _RecordingCompletionClient(
         {
@@ -554,7 +573,7 @@ def test_openai_coordinator_provider_sends_context_and_validates_response() -> N
         model_call_number=1,
     )
 
-    action = provider.generate_action(request)
+    action = await provider.generate_action(request)
 
     assert isinstance(action, CoordinatorRouteRagAction)
     call = client.calls[0]

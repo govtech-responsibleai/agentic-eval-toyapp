@@ -1,16 +1,19 @@
-"""Bounded conversation sessions backed by memory or Redis."""
+"""Event-loop-safe conversation sessions backed by memory or Redis."""
 
+import asyncio
 import json
 from collections import deque
-from collections.abc import Callable, Generator, Iterable, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Protocol, cast
 from uuid import UUID, uuid4
 
+import anyio
 from redis import Redis
 from redis.exceptions import LockError, RedisError
+from starlette.concurrency import run_in_threadpool
 
 from agentic_eval_toyapp.models import (
     AgentTurnResult,
@@ -37,7 +40,7 @@ class SessionBusyError(RuntimeError):
 class AgentRunner(Protocol):
     """Narrow agent interface required by the session service."""
 
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -50,7 +53,7 @@ class AgentRunner(Protocol):
 
 
 class SessionStore(Protocol):
-    """Storage boundary required by the synchronous session API."""
+    """Storage boundary required by the session API."""
 
     @property
     def max_turns(self) -> int:
@@ -66,15 +69,15 @@ class SessionStore(Protocol):
         """Raise when the backing store cannot serve requests."""
         ...
 
-    def create(self) -> SessionResponse:
+    async def create(self) -> SessionResponse:
         """Create one empty session."""
         ...
 
-    def get(self, session_id: UUID) -> SessionResponse:
+    async def get(self, session_id: UUID) -> SessionResponse:
         """Return one safe public session snapshot."""
         ...
 
-    def run_turn(
+    async def run_turn(
         self,
         session_id: UUID,
         user_message: str,
@@ -95,7 +98,7 @@ class _StoredTurn:
 @dataclass(slots=True)
 class _SessionRecord:
     turns: deque[_StoredTurn]
-    lock: Lock = field(default_factory=Lock)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _flatten_turns(turns: Iterable[_StoredTurn]) -> tuple[ConversationMessage, ...]:
@@ -131,7 +134,7 @@ class InMemorySessionStore:
     def check(self) -> None:
         """The process-local store has no external dependency to check."""
 
-    def create(self) -> SessionResponse:
+    async def create(self) -> SessionResponse:
         """Create an isolated empty session with a unique UUID."""
         with self._records_lock:
             session_id: UUID | None = None
@@ -147,13 +150,13 @@ class InMemorySessionStore:
                 raise RuntimeError("could not allocate a unique session ID")
         return SessionResponse(session_id=session_id, retained_turns=0)
 
-    def get(self, session_id: UUID) -> SessionResponse:
+    async def get(self, session_id: UUID) -> SessionResponse:
         """Return a consistent public snapshot of one session."""
-        record = self._get_record(session_id)
-        with record.lock:
-            return self._snapshot(session_id, record)
+        # No await occurs here, so the snapshot is atomic on the event loop and
+        # needs no turn lock; callers must therefore run on the loop thread.
+        return self._snapshot(session_id, self._get_record(session_id))
 
-    def run_turn(
+    async def run_turn(
         self,
         session_id: UUID,
         user_message: str,
@@ -168,9 +171,9 @@ class InMemorySessionStore:
             content=validated_request.message,
         )
         record = self._get_record(session_id)
-        with record.lock:
+        async with record.lock:
             history = _flatten_turns(record.turns)
-            result = agent.run(
+            result = await agent.run(
                 user.content,
                 history=history,
                 session_id=str(session_id),
@@ -232,6 +235,7 @@ class _RedisClient(Protocol):
         *,
         timeout: float,
         blocking_timeout: float,
+        thread_local: bool,
     ) -> _RedisLock:
         """Return a distributed lock for one session."""
         ...
@@ -312,8 +316,11 @@ class RedisSessionStore:
         except RedisError as error:
             raise SessionStoreUnavailableError("Redis is unavailable") from error
 
-    def create(self) -> SessionResponse:
+    async def create(self) -> SessionResponse:
         """Create an empty persistent session using an atomic unique-key claim."""
+        return await run_in_threadpool(self._create)
+
+    def _create(self) -> SessionResponse:
         for _ in range(100):
             session_id = self._id_factory()
             try:
@@ -328,8 +335,11 @@ class RedisSessionStore:
                 return SessionResponse(session_id=session_id, retained_turns=0)
         raise RuntimeError("could not allocate a unique session ID")
 
-    def get(self, session_id: UUID) -> SessionResponse:
+    async def get(self, session_id: UUID) -> SessionResponse:
         """Return one atomically read persistent session snapshot."""
+        return await run_in_threadpool(self._get, session_id)
+
+    def _get(self, session_id: UUID) -> SessionResponse:
         turns = self._read_turns(session_id)
         return SessionResponse(
             session_id=session_id,
@@ -337,7 +347,7 @@ class RedisSessionStore:
             retained_turns=len(turns),
         )
 
-    def run_turn(
+    async def run_turn(
         self,
         session_id: UUID,
         user_message: str,
@@ -351,9 +361,9 @@ class RedisSessionStore:
             role=ConversationRole.USER,
             content=validated_request.message,
         )
-        with self._session_lock(session_id):
-            turns = self._read_turns(session_id)
-            result = agent.run(
+        async with self._session_lock(session_id):
+            turns = await run_in_threadpool(self._read_turns, session_id)
+            result = await agent.run(
                 user.content,
                 history=_flatten_turns(turns),
                 session_id=str(session_id),
@@ -364,7 +374,7 @@ class RedisSessionStore:
                 content=result.message,
             )
             turns.append(_StoredTurn(user=user, assistant=assistant))
-            self._write_turns(session_id, turns)
+            await run_in_threadpool(self._write_turns, session_id, turns)
             return result
 
     def _session_key(self, session_id: UUID) -> str:
@@ -395,15 +405,18 @@ class RedisSessionStore:
         if not stored:
             raise SessionStoreUnavailableError("Redis did not persist the session")
 
-    @contextmanager
-    def _session_lock(self, session_id: UUID) -> Generator[None, None, None]:
+    @asynccontextmanager
+    async def _session_lock(self, session_id: UUID) -> AsyncGenerator[None, None]:
+        # Acquire and release run on worker threads, possibly different ones, so
+        # the lock token must not live in thread-local storage.
         try:
             lock = self._client.lock(
                 self._lock_key(session_id),
                 timeout=self._lock_timeout_seconds,
                 blocking_timeout=self._lock_blocking_timeout_seconds,
+                thread_local=False,
             )
-            acquired = lock.acquire()
+            acquired = await run_in_threadpool(lock.acquire)
         except (LockError, RedisError) as error:
             raise SessionStoreUnavailableError(
                 "Redis locking is unavailable"
@@ -414,7 +427,9 @@ class RedisSessionStore:
             yield
         finally:
             try:
-                lock.release()
+                # Shielded so a cancelled turn still frees the distributed lock.
+                with anyio.CancelScope(shield=True):
+                    await run_in_threadpool(lock.release)
             except (LockError, RedisError) as error:
                 raise SessionStoreUnavailableError(
                     "Redis session lock could not be released"

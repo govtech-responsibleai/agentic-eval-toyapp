@@ -58,7 +58,7 @@ class ControlledStructuredCompletionClient:
         """Return private original/effective response pairs for the run manifest."""
         return tuple(self._captures)
 
-    def create(
+    async def create(
         self,
         *,
         model: str,
@@ -94,7 +94,7 @@ class ControlledStructuredCompletionClient:
             },
         ) as observation:
             try:
-                original_completion = self._delegate.create(
+                original_completion = await self._delegate.create(
                     model=model,
                     messages=messages,
                     response_schema=response_schema,

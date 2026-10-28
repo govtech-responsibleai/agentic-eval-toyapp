@@ -8,7 +8,7 @@ from importlib import import_module
 from time import perf_counter
 from typing import Any, Protocol, cast, runtime_checkable
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from agentic_eval_toyapp.diagnostics import CompletionDiagnostics, log_provider_failure
@@ -63,7 +63,7 @@ def unpack_completion(
 def _langfuse_openai_client_class() -> Any:
     """Load the globally instrumenting Langfuse wrapper only when requested."""
     langfuse_openai_module = cast(Any, import_module("langfuse.openai"))
-    return langfuse_openai_module.OpenAI
+    return langfuse_openai_module.AsyncOpenAI
 
 
 @runtime_checkable
@@ -80,7 +80,7 @@ class GenerationProvider(Protocol):
         """Return the generation model or fixture revision."""
         ...
 
-    def generate_action(self, request: ModelRequest) -> AgentAction:
+    async def generate_action(self, request: ModelRequest) -> AgentAction:
         """Return exactly one validated action for the current context."""
         ...
 
@@ -88,7 +88,7 @@ class GenerationProvider(Protocol):
 class StructuredCompletionClient(Protocol):
     """Transport boundary for one OpenAI-compatible structured completion."""
 
-    def create(
+    async def create(
         self,
         *,
         model: str,
@@ -102,7 +102,7 @@ class StructuredCompletionClient(Protocol):
 
 
 class OpenAICompatibleChatClient:
-    """Small synchronous client for an OpenAI-wire-compatible endpoint."""
+    """Small asynchronous client for an OpenAI-wire-compatible endpoint."""
 
     def __init__(
         self,
@@ -113,7 +113,7 @@ class OpenAICompatibleChatClient:
         instrument_with_langfuse: bool = False,
     ) -> None:
         client_class: Any = (
-            _langfuse_openai_client_class() if instrument_with_langfuse else OpenAI
+            _langfuse_openai_client_class() if instrument_with_langfuse else AsyncOpenAI
         )
         self._instrument_with_langfuse = instrument_with_langfuse
         self._client: Any = client_class(
@@ -123,7 +123,7 @@ class OpenAICompatibleChatClient:
             max_retries=0,
         )
 
-    def create(
+    async def create(
         self,
         *,
         model: str,
@@ -139,7 +139,7 @@ class OpenAICompatibleChatClient:
                 "name": "model-action",
                 "metadata": {"operation": "structured_action_selection"},
             }
-        response: Any = self._client.chat.completions.create(
+        response: Any = await self._client.chat.completions.create(
             model=model,
             messages=list(messages),
             response_format={
@@ -294,7 +294,7 @@ class OpenAIChatGenerationProvider:
     def revision(self) -> str:
         return self._revision
 
-    def generate_action(self, request: ModelRequest) -> AgentAction:
+    async def generate_action(self, request: ModelRequest) -> AgentAction:
         """Ask the model for one action and validate the structured response."""
         response_schema = deepcopy(self._response_schema)
         definitions = cast(dict[str, Any], response_schema["$defs"])
@@ -331,7 +331,7 @@ class OpenAIChatGenerationProvider:
         )
         started_at = perf_counter()
         try:
-            completion = self._client.create(
+            completion = await self._client.create(
                 model=self._model_id,
                 messages=messages,
                 response_schema=response_schema,
@@ -432,7 +432,7 @@ class ScriptedGenerationProvider:
         """Return the number of scripted actions not yet consumed."""
         return len(self._actions) - self._position
 
-    def generate_action(self, request: ModelRequest) -> AgentAction:
+    async def generate_action(self, request: ModelRequest) -> AgentAction:
         self._requests.append(request)
         if self._position >= len(self._actions):
             raise GenerationProviderError("scripted action sequence is exhausted")
@@ -452,7 +452,7 @@ class ExtractiveGenerationProvider:
     def revision(self) -> str:
         return "v1"
 
-    def generate_action(self, request: ModelRequest) -> AgentAction:
+    async def generate_action(self, request: ModelRequest) -> AgentAction:
         """Search once, then quote all retrieved chunks with exact citations."""
         if not request.retrieved_chunks:
             if request.retrieval_attempted:

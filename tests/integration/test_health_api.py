@@ -39,7 +39,7 @@ from agentic_eval_toyapp.sessions import (
 
 
 class _IntrospectionAgent:
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -55,7 +55,7 @@ class _UnavailableSessionStore(InMemorySessionStore):
     def check(self) -> None:
         raise SessionStoreUnavailableError("private Redis connection details")
 
-    def create(self) -> SessionResponse:
+    async def create(self) -> SessionResponse:
         raise SessionStoreUnavailableError("private Redis connection details")
 
 
@@ -157,10 +157,11 @@ def test_unavailable_persistent_store_fails_readiness_and_session_requests() -> 
     assert "private" not in response.text
 
 
-def test_unavailable_report_store_fails_readiness_and_report_requests() -> None:
+@pytest.mark.anyio
+async def test_unavailable_report_store_fails_readiness_and_report_requests() -> None:
     """Report-store outages should be public-safe and make the service not ready."""
     session_store = InMemorySessionStore()
-    session = session_store.create()
+    session = await session_store.create()
     application = create_app(
         AppSettings(app_name="Persistent Test Target"),
         session_store=session_store,
@@ -378,7 +379,7 @@ def test_capabilities_advertise_only_operational_chat_features() -> None:
     assert response.json() == {
         "api_version": "v1",
         "service_version": "0.1.0",
-        "lifecycle": "synchronous",
+        "lifecycle": "request_response",
         "features": {
             "session_chat": True,
             "semantic_retrieval": True,
