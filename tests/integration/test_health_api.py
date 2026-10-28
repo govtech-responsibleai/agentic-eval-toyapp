@@ -24,7 +24,7 @@ from agentic_eval_toyapp.sessions import AgentRunner
 
 
 class _IntrospectionAgent:
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -242,7 +242,7 @@ def test_capabilities_advertise_only_operational_chat_features() -> None:
     assert response.json() == {
         "api_version": "v1",
         "service_version": "0.1.0",
-        "lifecycle": "synchronous",
+        "lifecycle": "request_response",
         "features": {
             "session_chat": True,
             "semantic_retrieval": True,

@@ -656,7 +656,7 @@ def create_app(
         tags=["target"],
     )
     def capabilities() -> CapabilityResponse:
-        """Advertise the synchronous session and semantic-retrieval path."""
+        """Advertise the request/response session and semantic-retrieval path."""
         tracing_operational = resolved_settings.langfuse_enabled
         advertised_actions = (
             tuple(action.value for action in CoordinatorActionKind)
@@ -681,7 +681,7 @@ def create_app(
         responses={422: {"model": ErrorResponse}},
         tags=["chat"],
     )
-    def create_session() -> SessionResponse:
+    async def create_session() -> SessionResponse:
         """Create one empty process-local conversation session."""
         return resolved_store.create()
 
@@ -691,7 +691,7 @@ def create_app(
         responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
         tags=["chat"],
     )
-    def get_session(session_id: UUID) -> SessionResponse:
+    async def get_session(session_id: UUID) -> SessionResponse:
         """Return safe public messages for one existing session."""
         return resolved_store.get(session_id)
 
@@ -766,7 +766,7 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
         tags=["files"],
     )
-    def list_reports(session_id: UUID) -> ReportListResponse:
+    async def list_reports(session_id: UUID) -> ReportListResponse:
         """List safe metadata for reports retained by this session."""
         resolved_store.get(session_id)
         return ReportListResponse(
@@ -779,7 +779,7 @@ def create_app(
         responses={404: {"model": ErrorResponse}},
         tags=["files"],
     )
-    def delete_report(session_id: UUID, file_id: UUID) -> Response:
+    async def delete_report(session_id: UUID, file_id: UUID) -> Response:
         """Remove one owned report without changing past conversation turns."""
         resolved_store.get(session_id)
         resolved_report_store.delete(session_id, file_id)
@@ -795,11 +795,11 @@ def create_app(
         },
         tags=["chat"],
     )
-    def submit_message(
+    async def submit_message(
         session_id: UUID,
         request: SessionMessageRequest,
     ) -> SessionMessageResponse:
-        """Execute and retain one synchronous bounded agent turn."""
+        """Execute and retain one bounded agent turn."""
         with diagnostic_context(session_id, turn=True):
             resolved_store.get(session_id)
             if len(request.file_ids) > resolved_settings.upload_max_files_per_message:
@@ -824,7 +824,7 @@ def create_app(
                 )
                 raise
             resolved_agent = resolver.get()
-            result = resolved_store.run_turn(
+            result = await resolved_store.run_turn(
                 session_id,
                 request.message,
                 agent=resolved_agent,

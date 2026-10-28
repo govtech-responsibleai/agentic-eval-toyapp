@@ -34,7 +34,8 @@ from agentic_eval_toyapp.providers import (
 )
 
 
-def test_openai_client_enables_langfuse_generation_capture_only_when_requested(
+@pytest.mark.anyio
+async def test_openai_client_enables_langfuse_generation_capture_only_when_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Live tracing should capture model I/O, latency, tokens, and errors."""
@@ -42,7 +43,7 @@ def test_openai_client_enables_langfuse_generation_capture_only_when_requested(
     completion_arguments: list[dict[str, object]] = []
 
     class _FakeCompletions:
-        def create(self, **values: object) -> object:
+        async def create(self, **values: object) -> object:
             completion_arguments.append(values)
             return SimpleNamespace(
                 choices=[
@@ -67,7 +68,7 @@ def test_openai_client_enables_langfuse_generation_capture_only_when_requested(
         instrument_with_langfuse=True,
     )
 
-    content = client.create(
+    content = await client.create(
         model="platform-model",
         messages=({"role": "user", "content": "Question"},),
         response_schema={"type": "object"},
@@ -91,14 +92,15 @@ def test_openai_client_enables_langfuse_generation_capture_only_when_requested(
     }
 
 
-def test_openai_client_does_not_load_langfuse_wrapper_when_disabled(
+@pytest.mark.anyio
+async def test_openai_client_does_not_load_langfuse_wrapper_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An uninstrumented call must not create a duplicate OpenAI generation."""
     completion_arguments: list[dict[str, object]] = []
 
     class _FakeCompletions:
-        def create(self, **values: object) -> object:
+        async def create(self, **values: object) -> object:
             completion_arguments.append(values)
             return SimpleNamespace(
                 choices=[
@@ -114,7 +116,7 @@ def test_openai_client_does_not_load_langfuse_wrapper_when_disabled(
     def fail_if_loaded() -> None:
         raise AssertionError("Langfuse OpenAI wrapper should not be loaded")
 
-    monkeypatch.setattr(providers_module, "OpenAI", _FakeOpenAI)
+    monkeypatch.setattr(providers_module, "AsyncOpenAI", _FakeOpenAI)
     monkeypatch.setattr(
         providers_module,
         "_langfuse_openai_client_class",
@@ -127,28 +129,28 @@ def test_openai_client_does_not_load_langfuse_wrapper_when_disabled(
         instrument_with_langfuse=False,
     )
 
-    assert (
-        client.create(
-            model="platform-model",
-            messages=({"role": "user", "content": "Question"},),
-            response_schema={"type": "object"},
-            temperature=0.0,
-            max_tokens=100,
-        ).content
-        == '{"ok":true}'
+    completion = await client.create(
+        model="platform-model",
+        messages=({"role": "user", "content": "Question"},),
+        response_schema={"type": "object"},
+        temperature=0.0,
+        max_tokens=100,
     )
+
+    assert completion.content == '{"ok":true}'
     assert "name" not in completion_arguments[0]
     assert "metadata" not in completion_arguments[0]
 
 
-def test_empty_live_completion_logs_finish_reason_and_reported_usage(
+@pytest.mark.anyio
+async def test_empty_live_completion_logs_finish_reason_and_reported_usage(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An empty completion retains provider evidence without response text."""
 
     class _FakeCompletions:
-        def create(self, **values: object) -> object:
+        async def create(self, **values: object) -> object:
             del values
             return SimpleNamespace(
                 choices=[
@@ -170,7 +172,7 @@ def test_empty_live_completion_logs_finish_reason_and_reported_usage(
             del values
             self.chat = SimpleNamespace(completions=_FakeCompletions())
 
-    monkeypatch.setattr(providers_module, "OpenAI", _FakeOpenAI)
+    monkeypatch.setattr(providers_module, "AsyncOpenAI", _FakeOpenAI)
     provider = _live_provider(
         OpenAICompatibleChatClient(
             api_key="private-test-key",
@@ -183,7 +185,7 @@ def test_empty_live_completion_logs_finish_reason_and_reported_usage(
         caplog.at_level(logging.ERROR, logger="uvicorn.error"),
         pytest.raises(GenerationProviderError) as failure,
     ):
-        provider.generate_action(_request())
+        await provider.generate_action(_request())
 
     assert failure.value.code == "empty_content"
     assert len(caplog.records) == 1
@@ -202,26 +204,30 @@ def _request(call_number: int = 1) -> ModelRequest:
     )
 
 
-def test_scripted_provider_returns_actions_in_order_and_records_requests() -> None:
+@pytest.mark.anyio
+async def test_scripted_provider_returns_actions_in_order_and_records_requests() -> (
+    None
+):
     """The offline provider must be exact and auditable."""
     search = SearchAction(query="travel allowance")
     clarify = ClarifyAction(question="Domestic or international travel?")
     provider = ScriptedGenerationProvider((search, clarify))
 
     assert isinstance(provider, GenerationProvider)
-    assert provider.generate_action(_request()) is search
-    assert provider.generate_action(_request(2)) is clarify
+    assert await provider.generate_action(_request()) is search
+    assert await provider.generate_action(_request(2)) is clarify
     assert provider.actions_remaining == 0
     assert [request.model_call_number for request in provider.requests] == [1, 2]
 
 
-def test_scripted_provider_fails_explicitly_when_exhausted() -> None:
+@pytest.mark.anyio
+async def test_scripted_provider_fails_explicitly_when_exhausted() -> None:
     """A missing test fixture action must not become random behaviour."""
     provider = ScriptedGenerationProvider((SearchAction(query="policy"),))
-    provider.generate_action(_request())
+    await provider.generate_action(_request())
 
     with pytest.raises(GenerationProviderError, match="exhausted"):
-        provider.generate_action(_request(2))
+        await provider.generate_action(_request(2))
     assert len(provider.requests) == 2
 
 
@@ -252,11 +258,12 @@ def _retrieved_chunk(
     )
 
 
-def test_extractive_provider_searches_with_the_full_user_message() -> None:
+@pytest.mark.anyio
+async def test_extractive_provider_searches_with_the_full_user_message() -> None:
     """The deterministic API path should preserve arbitrary user search text."""
     provider = ExtractiveGenerationProvider()
 
-    action = provider.generate_action(
+    action = await provider.generate_action(
         ModelRequest(
             system_prompt="Use evidence.",
             user_message="休暇ポリシーは何ですか？",
@@ -272,7 +279,8 @@ def test_extractive_provider_searches_with_the_full_user_message() -> None:
     assert provider.revision == "v1"
 
 
-def test_extractive_provider_returns_verbatim_chunks_and_citations() -> None:
+@pytest.mark.anyio
+async def test_extractive_provider_returns_verbatim_chunks_and_citations() -> None:
     """The pre-model answer should add no factual content beyond evidence."""
     provider = ExtractiveGenerationProvider()
     travel = _retrieved_chunk()
@@ -282,7 +290,7 @@ def test_extractive_provider_returns_verbatim_chunks_and_citations() -> None:
         text="Employees receive 18 annual-leave days.",
     )
 
-    action = provider.generate_action(
+    action = await provider.generate_action(
         ModelRequest(
             system_prompt="Use evidence.",
             user_message="Summarise the policies.",
@@ -301,9 +309,12 @@ def test_extractive_provider_returns_verbatim_chunks_and_citations() -> None:
     assert "[LEAVE-001#1]" in action.markdown
 
 
-def test_extractive_provider_returns_zero_evidence_response_after_search() -> None:
+@pytest.mark.anyio
+async def test_extractive_provider_returns_zero_evidence_response_after_search() -> (
+    None
+):
     """Offline mode should model a response after an empty retrieval."""
-    action = ExtractiveGenerationProvider().generate_action(
+    action = await ExtractiveGenerationProvider().generate_action(
         ModelRequest(
             system_prompt="Use evidence.",
             user_message="Unknown policy",
@@ -318,7 +329,8 @@ def test_extractive_provider_returns_zero_evidence_response_after_search() -> No
     assert action.markdown == "No relevant evidence was found in the knowledge base."
 
 
-def test_extractive_provider_fails_when_no_search_remains() -> None:
+@pytest.mark.anyio
+async def test_extractive_provider_fails_when_no_search_remains() -> None:
     """The provider must not answer without evidence or an available search."""
     provider = ExtractiveGenerationProvider()
     request = ModelRequest(
@@ -330,7 +342,7 @@ def test_extractive_provider_fails_when_no_search_remains() -> None:
     )
 
     with pytest.raises(GenerationProviderError, match="no search"):
-        provider.generate_action(request)
+        await provider.generate_action(request)
 
 
 class _RecordingCompletionClient:
@@ -349,7 +361,7 @@ class _RecordingCompletionClient:
         self.diagnostics = diagnostics
         self.calls: list[dict[str, object]] = []
 
-    def create(
+    async def create(
         self,
         *,
         model: str,
@@ -389,7 +401,10 @@ def _live_provider(
     )
 
 
-def test_live_provider_sends_complete_context_and_parses_structured_action() -> None:
+@pytest.mark.anyio
+async def test_live_provider_sends_complete_context_and_parses_structured_action() -> (
+    None
+):
     """The live boundary should preserve public context and return one action."""
     client = _RecordingCompletionClient()
     provider = _live_provider(client)
@@ -398,7 +413,7 @@ def test_live_provider_sends_complete_context_and_parses_structured_action() -> 
         ConversationMessage(role=ConversationRole.ASSISTANT, content="Earlier answer"),
     )
 
-    action = provider.generate_action(
+    action = await provider.generate_action(
         ModelRequest(
             system_prompt="Search before answering.",
             user_message="休暇について教えてください",
@@ -448,7 +463,8 @@ def test_live_provider_sends_complete_context_and_parses_structured_action() -> 
     ]
 
 
-def test_live_provider_accepts_model_generated_zero_evidence_response() -> None:
+@pytest.mark.anyio
+async def test_live_provider_accepts_model_generated_zero_evidence_response() -> None:
     """Irrelevant candidates can lead to an uncited observable response."""
     client = _RecordingCompletionClient(
         '{"kind":"answer","query":null,"top_k":null,"question":null,'
@@ -456,7 +472,7 @@ def test_live_provider_accepts_model_generated_zero_evidence_response() -> None:
     )
     candidate = _retrieved_chunk("LEAVE-001#1", text="Annual leave is available.")
 
-    action = _live_provider(client).generate_action(
+    action = await _live_provider(client).generate_action(
         ModelRequest(
             system_prompt="Use evidence.",
             user_message="I need help with sick leave",
@@ -477,7 +493,10 @@ def test_live_provider_accepts_model_generated_zero_evidence_response() -> None:
     assert context["retrieval"]["allowed_citation_ids"] == ["LEAVE-001#1"]
 
 
-def test_live_provider_schema_excludes_actions_unavailable_after_search_limit() -> None:
+@pytest.mark.anyio
+async def test_live_provider_schema_excludes_actions_unavailable_after_search_limit() -> (
+    None
+):
     """Structured generation must not offer search after its budget is spent."""
     client = _RecordingCompletionClient(
         '{"kind":"answer","query":null,"top_k":null,"question":null,'
@@ -485,7 +504,7 @@ def test_live_provider_schema_excludes_actions_unavailable_after_search_limit() 
     )
     provider = _live_provider(client)
 
-    provider.generate_action(
+    await provider.generate_action(
         ModelRequest(
             system_prompt="Use evidence.",
             user_message="I need help with sick leave",
@@ -510,7 +529,8 @@ def test_live_provider_schema_excludes_actions_unavailable_after_search_limit() 
     )
 
 
-def test_live_provider_rejects_action_outside_current_allowed_set() -> None:
+@pytest.mark.anyio
+async def test_live_provider_rejects_action_outside_current_allowed_set() -> None:
     """Local validation must hold if an upstream ignores the narrowed schema."""
     client = _RecordingCompletionClient(
         '{"kind":"search","query":"policy","top_k":3,"question":null,'
@@ -519,7 +539,7 @@ def test_live_provider_rejects_action_outside_current_allowed_set() -> None:
     provider = _live_provider(client)
 
     with pytest.raises(InvalidGenerationActionError, match="unavailable"):
-        provider.generate_action(
+        await provider.generate_action(
             ModelRequest(
                 system_prompt="Answer or clarify.",
                 user_message="Question",
@@ -533,6 +553,7 @@ def test_live_provider_rejects_action_outside_current_allowed_set() -> None:
         )
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "response",
     [
@@ -545,7 +566,7 @@ def test_live_provider_rejects_action_outside_current_allowed_set() -> None:
         ),
     ],
 )
-def test_live_provider_rejects_malformed_structured_output(
+async def test_live_provider_rejects_malformed_structured_output(
     response: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Malformed live output must not enter the bounded agent loop."""
@@ -555,7 +576,7 @@ def test_live_provider_rejects_malformed_structured_output(
         caplog.at_level(logging.ERROR, logger="uvicorn.error"),
         pytest.raises(InvalidGenerationActionError, match="invalid structured action"),
     ):
-        provider.generate_action(_request())
+        await provider.generate_action(_request())
 
     assert len(caplog.records) == 1
     assert "agent=rag" in caplog.text
@@ -563,7 +584,8 @@ def test_live_provider_rejects_malformed_structured_output(
     assert response not in caplog.text
 
 
-def test_invalid_structured_output_retains_provider_usage(
+@pytest.mark.anyio
+async def test_invalid_structured_output_retains_provider_usage(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Post-response schema failures carry usage through the RAG adapter."""
@@ -580,13 +602,14 @@ def test_invalid_structured_output_retains_provider_usage(
         caplog.at_level(logging.ERROR, logger="uvicorn.error"),
         pytest.raises(InvalidGenerationActionError),
     ):
-        provider.generate_action(_request())
+        await provider.generate_action(_request())
 
     assert "code=invalid_schema" in caplog.text
     assert "finish_reason=stop input_tokens=200 output_tokens=9" in caplog.text
 
 
-def test_live_provider_converts_transport_errors_without_leaking_details(
+@pytest.mark.anyio
+async def test_live_provider_converts_transport_errors_without_leaking_details(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Provider errors should retain their cause but expose no credential detail."""
@@ -600,7 +623,7 @@ def test_live_provider_converts_transport_errors_without_leaking_details(
             GenerationProviderError, match="live model request failed"
         ) as exc,
     ):
-        provider.generate_action(_request())
+        await provider.generate_action(_request())
 
     assert "secret upstream detail" not in str(exc.value)
     assert len(caplog.records) == 1
@@ -609,7 +632,8 @@ def test_live_provider_converts_transport_errors_without_leaking_details(
     assert "secret upstream detail" not in caplog.text
 
 
-def test_live_provider_logs_empty_completion_category(
+@pytest.mark.anyio
+async def test_live_provider_logs_empty_completion_category(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An empty gateway response should not look like a transport failure."""
@@ -625,7 +649,7 @@ def test_live_provider_logs_empty_completion_category(
         caplog.at_level(logging.ERROR, logger="uvicorn.error"),
         pytest.raises(GenerationProviderError),
     ):
-        provider.generate_action(_request())
+        await provider.generate_action(_request())
 
     assert len(caplog.records) == 1
     assert "code=empty_content" in caplog.text

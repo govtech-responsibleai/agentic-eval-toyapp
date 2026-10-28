@@ -23,7 +23,7 @@ class _RecordingAgent:
         self.calls: list[tuple[str, tuple[ConversationMessage, ...]]] = []
         self.session_ids: list[str | None] = []
 
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -45,7 +45,7 @@ class _RecordingAgent:
 
 
 class _FailingAgent:
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -69,14 +69,15 @@ def test_store_creates_unique_empty_sessions() -> None:
     assert first.retained_turns == second.retained_turns == 0
 
 
-def test_store_passes_ordered_history_and_trims_complete_turns() -> None:
+@pytest.mark.anyio
+async def test_store_passes_ordered_history_and_trims_complete_turns() -> None:
     """Eviction must remove whole pairs while preserving recent chronology."""
     store = InMemorySessionStore(max_turns=2)
     agent = _RecordingAgent()
     session = store.create()
 
     for message in ("first", "second", "third"):
-        store.run_turn(session.session_id, message, agent=agent)
+        await store.run_turn(session.session_id, message, agent=agent)
 
     snapshot = store.get(session.session_id)
     assert snapshot.retained_turns == 2
@@ -95,15 +96,16 @@ def test_store_passes_ordered_history_and_trims_complete_turns() -> None:
     assert agent.session_ids == [str(session.session_id)] * 3
 
 
-def test_store_keeps_session_histories_isolated() -> None:
+@pytest.mark.anyio
+async def test_store_keeps_session_histories_isolated() -> None:
     """Messages from one session must never enter another agent context."""
     store = InMemorySessionStore()
     agent = _RecordingAgent()
     first = store.create()
     second = store.create()
 
-    store.run_turn(first.session_id, "private first-session text", agent=agent)
-    store.run_turn(second.session_id, "second-session text", agent=agent)
+    await store.run_turn(first.session_id, "private first-session text", agent=agent)
+    await store.run_turn(second.session_id, "second-session text", agent=agent)
 
     assert agent.calls[1][1] == ()
     assert store.get(first.session_id).messages[0].content == (
@@ -112,7 +114,8 @@ def test_store_keeps_session_histories_isolated() -> None:
     assert store.get(second.session_id).messages[0].content == "second-session text"
 
 
-def test_store_rejects_unknown_sessions_and_invalid_input() -> None:
+@pytest.mark.anyio
+async def test_store_rejects_unknown_sessions_and_invalid_input() -> None:
     """Unknown IDs and blank direct-call messages must not create state."""
     store = InMemorySessionStore()
     session = store.create()
@@ -121,21 +124,22 @@ def test_store_rejects_unknown_sessions_and_invalid_input() -> None:
     with pytest.raises(SessionNotFoundError):
         store.get(uuid4())
     with pytest.raises(SessionNotFoundError):
-        store.run_turn(uuid4(), "Question", agent=agent)
+        await store.run_turn(uuid4(), "Question", agent=agent)
     with pytest.raises(ValidationError):
-        store.run_turn(session.session_id, "   ", agent=agent)
+        await store.run_turn(session.session_id, "   ", agent=agent)
 
     assert agent.calls == []
     assert store.get(session.session_id).messages == ()
 
 
-def test_store_does_not_append_partial_turn_when_agent_raises() -> None:
+@pytest.mark.anyio
+async def test_store_does_not_append_partial_turn_when_agent_raises() -> None:
     """A failed call outside the typed agent boundary must not corrupt history."""
     store = InMemorySessionStore()
     session = store.create()
 
     with pytest.raises(RuntimeError, match="unexpected"):
-        store.run_turn(session.session_id, "Question", agent=_FailingAgent())
+        await store.run_turn(session.session_id, "Question", agent=_FailingAgent())
 
     assert store.get(session.session_id).messages == ()
 

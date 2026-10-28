@@ -86,26 +86,25 @@ def _chunk() -> RetrievedChunk:
     )
 
 
-def test_noop_recorder_preserves_the_agent_contract() -> None:
+@pytest.mark.anyio
+async def test_noop_recorder_preserves_the_agent_contract() -> None:
     """Offline execution should require no credentials and emit no side effects."""
     recorder = NoOpTraceRecorder()
 
-    with (
-        recorder.start_turn(
-            session_id=None,
-            user_message="Question",
-            history_message_count=0,
-        ) as turn,
-        turn.model_action(
+    async with recorder.start_turn(
+        session_id=None,
+        user_message="Question",
+        history_message_count=0,
+    ) as turn:
+        with turn.model_action(
             ModelRequest(
                 system_prompt="Choose an action.",
                 user_message="Question",
                 model_call_number=1,
                 remaining_searches=1,
             )
-        ) as observation,
-    ):
-        observation.fail("fixture_error")
+        ) as observation:
+            observation.fail("fixture_error")
 
     assert recorder.enabled is False
     recorder.flush()
@@ -174,7 +173,8 @@ def test_langfuse_shutdown_failure_logs_only_safe_category(
     assert "private Langfuse" not in "".join(traceback.format_exception(failure.value))
 
 
-def test_langfuse_recorder_emits_metis_compatible_turn_tree(
+@pytest.mark.anyio
+async def test_langfuse_recorder_emits_metis_compatible_turn_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One app turn must become one output-bearing, session-correlated trace."""
@@ -225,7 +225,7 @@ def test_langfuse_recorder_emits_metis_compatible_turn_tree(
         searches=1,
     )
 
-    with recorder.start_turn(
+    async with recorder.start_turn(
         session_id="session-123",
         user_message=request.user_message,
         history_message_count=2,
@@ -274,7 +274,8 @@ def test_langfuse_recorder_emits_metis_compatible_turn_tree(
     assert fake_client.shutdowns == 1
 
 
-def test_clarification_uses_the_metis_recognised_tool_name(
+@pytest.mark.anyio
+async def test_clarification_uses_the_metis_recognised_tool_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """METIS detects clarification from a request_user_input TOOL observation."""
@@ -297,7 +298,7 @@ def test_clarification_uses_the_metis_recognised_tool_name(
         flush_on_turn=False,
     )
 
-    with recorder.start_turn(
+    async with recorder.start_turn(
         session_id="session-clarify",
         user_message="Tell me about leave.",
         history_message_count=0,

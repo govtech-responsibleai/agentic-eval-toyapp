@@ -1,4 +1,4 @@
-"""Safe operational diagnostics for synchronous agent requests.
+"""Safe operational diagnostics for agent requests.
 
 Only fixed categories and bounded operational identifiers enter log messages.
 Exception messages, model prompts, completions, and report contents do not.

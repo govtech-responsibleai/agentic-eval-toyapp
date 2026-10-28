@@ -61,7 +61,7 @@ For component boundaries, data flows, and technical design, see
 
 The repository is maintained as a research and evaluation demonstration with
 a **best-effort community support tier**. It intentionally uses process-local
-sessions and report storage, exposes synchronous agent turns, and prioritises
+sessions and report storage, answers each agent turn on the request, and prioritises
 controlled evaluation behaviour over production scalability or durability.
 
 - For reproducible bugs and feature requests, open a
@@ -416,7 +416,7 @@ the user from submitting additional turns.
 | `POST /api/v1/sessions/{session_id}/files` | Validate and retain one session-scoped report without invoking an agent. |
 | `GET /api/v1/sessions/{session_id}/files` | List safe metadata for that session's retained reports. |
 | `DELETE /api/v1/sessions/{session_id}/files/{file_id}` | Remove one owned report without changing past turns. |
-| `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one synchronous agent turn. |
+| `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one agent turn; the client waits for the reply. |
 | `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |
 
 ## Generate controlled traces
@@ -546,7 +546,7 @@ agentic-eval-toyapp/
 │       ├── reports.py                        # Bounded report extraction and session-scoped storage
 │       ├── resources/
 │       │   └── documents.json                # Synthetic Northstar policy corpus
-│       ├── sessions.py                       # Thread-safe bounded in-memory conversation state
+│       ├── sessions.py                       # Event-loop-safe bounded in-memory conversation state
 │       ├── static/
 │       │   ├── app.js                        # Browser API client and sanitized Markdown rendering
 │       │   ├── style.css                     # Responsive panel layout and browser styling
@@ -612,7 +612,7 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 - The default coordinator can answer, clarify, delegate policy tasks to RAG, and
   analyse selected reports. When enabled, its turn and selected route are
   exported as one nested Langfuse trace.
-- Agent turns are synchronous; there is no cancellation or background job API.
+- Clients wait for each turn's reply; there is no streaming, cancellation, or background job API.
 - The runtime image contains the application only; controlled trace generation
   remains source-repository tooling.
 - METIS's current legacy Langfuse extractor still requires migration for

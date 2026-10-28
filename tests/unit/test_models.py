@@ -48,7 +48,7 @@ def test_capability_defaults_do_not_advertise_future_features() -> None:
     """Unimplemented target features must remain disabled."""
     response = CapabilityResponse(service_version="0.1.0")
 
-    assert response.lifecycle is LifecycleMode.SYNCHRONOUS
+    assert response.lifecycle is LifecycleMode.REQUEST_RESPONSE
     assert response.features == FeatureAvailability()
     assert response.actions == ()
     assert response.output_formats == ("application/json",)

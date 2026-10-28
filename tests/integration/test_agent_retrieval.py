@@ -2,6 +2,8 @@
 
 from datetime import date
 
+import pytest
+
 from agentic_eval_toyapp.agent import RagAgent, load_system_prompt
 from agentic_eval_toyapp.embeddings import DeterministicEmbeddingProvider
 from agentic_eval_toyapp.models import (
@@ -16,7 +18,8 @@ from agentic_eval_toyapp.providers import ScriptedGenerationProvider
 from agentic_eval_toyapp.retrieval import FaissRetriever
 
 
-def test_scripted_agent_uses_faiss_evidence_for_grounded_answer() -> None:
+@pytest.mark.anyio
+async def test_scripted_agent_uses_faiss_evidence_for_grounded_answer() -> None:
     """The provider, agent, and real FAISS index should compose offline."""
     travel = DocumentChunk(
         chunk_id="TRAVEL-001#1",
@@ -60,7 +63,7 @@ def test_scripted_agent_uses_faiss_evidence_for_grounded_answer() -> None:
         system_prompt=load_system_prompt(),
     )
 
-    result = agent.run("How much can I claim for domestic meals?")
+    result = await agent.run("How much can I claim for domestic meals?")
 
     assert result.status is AgentTurnStatus.ANSWERED
     assert result.citations == ("TRAVEL-001#1",)

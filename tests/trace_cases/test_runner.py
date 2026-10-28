@@ -33,7 +33,7 @@ class _EmptyRetriever:
 
 
 class _AnswerCompletionClient:
-    def create(self, **values: object) -> str:
+    async def create(self, **values: object) -> str:
         del values
         return json.dumps(
             {

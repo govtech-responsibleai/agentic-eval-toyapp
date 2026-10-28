@@ -19,7 +19,7 @@ from agentic_eval_toyapp.reports import StoredReport
 
 
 class _FrontendAgent:
-    def run(
+    async def run(
         self,
         user_message: str,
         *,

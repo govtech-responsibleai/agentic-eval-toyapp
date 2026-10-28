@@ -55,7 +55,7 @@ class CheckStatus(StrEnum):
 class LifecycleMode(StrEnum):
     """Supported request lifecycle modes."""
 
-    SYNCHRONOUS = "synchronous"
+    REQUEST_RESPONSE = "request_response"
 
 
 class HealthResponse(ApiModel):
@@ -96,7 +96,7 @@ class CapabilityResponse(ApiModel):
 
     api_version: str = "v1"
     service_version: str = Field(min_length=1)
-    lifecycle: LifecycleMode = LifecycleMode.SYNCHRONOUS
+    lifecycle: LifecycleMode = LifecycleMode.REQUEST_RESPONSE
     features: FeatureAvailability = Field(default_factory=FeatureAvailability)
     actions: tuple[str, ...] = ()
     output_formats: tuple[str, ...] = ("application/json",)

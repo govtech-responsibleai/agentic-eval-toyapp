@@ -1,4 +1,4 @@
-"""End-to-end tests for the synchronous versioned chat API."""
+"""End-to-end tests for the request/response versioned chat API."""
 
 import hashlib
 import logging
@@ -85,7 +85,7 @@ class _FailingGenerationProvider:
     model_id = "failing-provider-fixture"
     revision = "v1"
 
-    def generate_action(self, request: ModelRequest) -> AgentAction:
+    async def generate_action(self, request: ModelRequest) -> AgentAction:
         raise GenerationProviderError("private upstream transport detail")
 
 
@@ -96,7 +96,7 @@ class _CountingAgent:
         self.calls = 0
         self.report_ids: list[tuple[str, ...]] = []
 
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -154,7 +154,7 @@ def _build_client(
 
 
 def test_session_message_and_snapshot_flow_uses_the_rag_agent() -> None:
-    """METIS should be able to complete the full synchronous API workflow."""
+    """METIS should be able to complete the full request/response API workflow."""
     retriever = _PolicyRetriever()
     client = _build_client(agent=_build_agent(retriever))
 

@@ -8,7 +8,8 @@ For installation, configuration, and usage commands, see [README.md](README.md).
 
 ## Scope and design principles
 
-The application is a small, synchronous agentic target for METIS. Its default
+The application is a small agentic target for METIS whose turns are
+request/response for clients and asynchronous inside the server. Its default
 runtime is the coordinator. It selects typed direct-answer and clarification
 decisions, delegates policy tasks to the verified RAG workflow, and delegates
 selected uploaded reports to a bounded analysis specialist. Standalone RAG
@@ -32,9 +33,11 @@ The main design principles are:
 - controlled metric cases isolated from the normal application package;
 - a non-root runtime image with the pinned embedding model available offline.
 
-The current runtime is synchronous and process-local. Persistent storage,
-asynchronous jobs, cancellation, and lifecycle-failure scenarios are not part
-of the implemented architecture.
+The current runtime is process-local. Each message request waits for its reply,
+but the turn path runs on the event loop, so one process holds many in-flight
+turns without dedicating a thread to each. Persistent storage, background
+jobs, cancellation, streaming, and lifecycle-failure scenarios are not part of
+the implemented architecture.
 
 ## System overview
 
@@ -83,7 +86,7 @@ flowchart LR
 
 The browser and programmatic clients use the same FastAPI routes. Programmatic
 clients may upload a report independently of message submission. A message is
-executed synchronously inside its session lock. The session store supplies
+executed on the event loop while holding its session's `asyncio.Lock`. The session store supplies
 bounded public history and authorized report records to the selected top-level
 agent. In standalone RAG mode, the agent may call retrieval before returning
 an answer or clarification and ignores report content. In default coordinator
@@ -235,13 +238,19 @@ both use this same application factory.
 | `GET /session/{session_id}` | Serve the same browser shell for a UUID session URL. |
 | `GET /health` | Report process liveness and service version. |
 | `GET /ready` | Report validated configuration, session store, tracing state, and initialised agent. |
-| `GET /api/v1/capabilities` | Advertise the synchronous chat, semantic retrieval, tracing state, and available actions. |
+| `GET /api/v1/capabilities` | Advertise the request/response chat lifecycle, semantic retrieval, tracing state, and available actions. |
 | `POST /api/v1/sessions` | Create an empty process-local session. |
 | `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |
 | `POST /api/v1/sessions/{session_id}/files` | Validate and retain one report without creating a conversation turn. |
 | `GET /api/v1/sessions/{session_id}/files` | List safe metadata for this session's retained reports in upload order. |
 | `DELETE /api/v1/sessions/{session_id}/files/{file_id}` | Remove one owned report's metadata and extracted content. |
-| `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one synchronous agent turn. |
+| `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one agent turn; the client waits for the reply. |
+
+The `lifecycle` field of the capabilities response is `request_response`: the
+client sends a message and receives the reply on the same request, with no job
+ID, streaming, or polling. It was `synchronous` before turns moved onto the
+event loop, and the value was renamed because it described the server's old
+threading model rather than what a client observes.
 
 The public API uses stable error bodies for missing sessions, invalid requests,
 and unavailable agent dependencies. Internal exceptions and credentials are
@@ -414,9 +423,17 @@ or ignored constraints.
 
 ## 5. Session store
 
-`InMemorySessionStore` maps random UUIDs to process-local records. A global lock
-protects session creation and lookup, while each session has its own lock so a
-complete turn is atomic without blocking unrelated sessions.
+`InMemorySessionStore` maps random UUIDs to process-local records. A short
+`threading.Lock` protects the record dictionary during creation and lookup; it
+is never held across an `await`. Each session has its own `asyncio.Lock`, held
+for the whole turn, so a complete turn is atomic and later turns on the same
+session queue without occupying a thread, while other sessions proceed.
+
+`get()` takes no turn lock. It only snapshots a bounded deque with no `await`
+inside, so it is atomic on the event loop and returns the last committed
+history even while a turn is in flight. Every endpoint that touches the store
+is `async def`, so no worker thread ever iterates that deque while the loop
+appends to it. Uploads therefore never wait on a running turn.
 
 The configured `session_max_turns` value is a retention bound, not a lifetime
 message limit. Users can continue beyond ten turns by default; the oldest
@@ -1155,8 +1172,10 @@ excluded from `make ci`.
 
 ## Current limitations
 
-- Request execution is synchronous; there is no job polling, cancellation, or
-  recovery lifecycle.
+- A client waits for each turn's reply; there is no job polling, streaming,
+  cancellation, or recovery lifecycle. Server-side concurrency is not yet
+  bounded: retrieval runs through the shared worker-thread pool, and rate
+  limiting and backpressure are deferred.
 - Session history is process-local, bounded, and lost on restart.
 - Multiple server workers would not share session state.
 - Uploaded reports are process-local and disappear on restart. Their delete

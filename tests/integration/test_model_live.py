@@ -37,8 +37,9 @@ from agentic_eval_toyapp.providers import (
 from agentic_eval_toyapp.report_sources import SourceBlock
 
 
+@pytest.mark.anyio
 @pytest.mark.model_live
-def test_configured_model_returns_a_valid_agent_action() -> None:
+async def test_configured_model_returns_a_valid_agent_action() -> None:
     """Platform credentials and structured-output support should work together."""
     settings = AppSettings()
     if settings.generation_provider is not GenerationProviderKind.OPENAI:
@@ -54,7 +55,7 @@ def test_configured_model_returns_a_valid_agent_action() -> None:
         timeout_seconds=settings.generation_timeout_seconds,
     )
 
-    action = provider.generate_action(
+    action = await provider.generate_action(
         ModelRequest(
             system_prompt=(
                 "Return exactly one structured search action for a policy question."
@@ -68,8 +69,9 @@ def test_configured_model_returns_a_valid_agent_action() -> None:
     assert isinstance(action, SearchAction | ClarifyAction | AnswerAction)
 
 
+@pytest.mark.anyio
 @pytest.mark.model_live
-def test_configured_model_returns_a_valid_coordinator_route() -> None:
+async def test_configured_model_returns_a_valid_coordinator_route() -> None:
     """The gateway should accept the coordinator's strict structured schema."""
     settings = AppSettings()
     if settings.generation_provider is not GenerationProviderKind.OPENAI:
@@ -85,7 +87,7 @@ def test_configured_model_returns_a_valid_coordinator_route() -> None:
         timeout_seconds=settings.generation_timeout_seconds,
     )
 
-    action = provider.generate_action(
+    action = await provider.generate_action(
         CoordinatorRequest(
             system_prompt=load_coordinator_prompt(),
             user_message="How many annual leave days do employees receive?",
@@ -97,8 +99,9 @@ def test_configured_model_returns_a_valid_coordinator_route() -> None:
     assert isinstance(action, CoordinatorRouteRagAction)
 
 
+@pytest.mark.anyio
 @pytest.mark.model_live
-def test_configured_model_returns_a_valid_report_analysis_action() -> None:
+async def test_configured_model_returns_a_valid_report_analysis_action() -> None:
     """The gateway should accept the report specialist's strict action schema."""
     settings = AppSettings()
     if settings.generation_provider is not GenerationProviderKind.OPENAI:
@@ -116,7 +119,7 @@ def test_configured_model_returns_a_valid_report_analysis_action() -> None:
             instrument_with_langfuse=False,
         ),
     )
-    action = provider.generate_action(
+    action = await provider.generate_action(
         AnalysisModelRequest(
             system_prompt=load_analysis_prompt(),
             task="Summarise the revenue finding.",

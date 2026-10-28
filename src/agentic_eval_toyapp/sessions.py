@@ -1,5 +1,6 @@
-"""Thread-safe, process-local conversation sessions for the MVP."""
+"""Event-loop-safe, process-local conversation sessions for the MVP."""
 
+import asyncio
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -24,7 +25,7 @@ class SessionNotFoundError(LookupError):
 class AgentRunner(Protocol):
     """Narrow agent interface required by the session service."""
 
-    def run(
+    async def run(
         self,
         user_message: str,
         *,
@@ -45,7 +46,7 @@ class _StoredTurn:
 @dataclass(slots=True)
 class _SessionRecord:
     turns: deque[_StoredTurn]
-    lock: Lock = field(default_factory=Lock)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class InMemorySessionStore:
@@ -87,11 +88,11 @@ class InMemorySessionStore:
 
     def get(self, session_id: UUID) -> SessionResponse:
         """Return a consistent public snapshot of one session."""
-        record = self._get_record(session_id)
-        with record.lock:
-            return self._snapshot(session_id, record)
+        # No await occurs here, so the snapshot is atomic on the event loop and
+        # needs no turn lock; callers must therefore run on the loop thread.
+        return self._snapshot(session_id, self._get_record(session_id))
 
-    def run_turn(
+    async def run_turn(
         self,
         session_id: UUID,
         user_message: str,
@@ -106,9 +107,9 @@ class InMemorySessionStore:
             content=validated_request.message,
         )
         record = self._get_record(session_id)
-        with record.lock:
+        async with record.lock:
             history = self._flatten(record.turns)
-            result = agent.run(
+            result = await agent.run(
                 user.content,
                 history=history,
                 session_id=str(session_id),
