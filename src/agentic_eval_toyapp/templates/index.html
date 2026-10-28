@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A controlled RAG application for METIS evaluation demos.">
     <title>{{ app_name }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v={{ browser_asset_version }}">
-    <script src="{{ url_for('static', path='/vendor/markdown-it.umd.min.js') }}" defer></script>
-    <script src="{{ url_for('static', path='/vendor/purify.min.js') }}" defer></script>
-    <script src="{{ url_for('static', path='/app.js') }}?v={{ browser_asset_version }}" defer></script>
+    <link rel="stylesheet" href="/static/style.css?v={{ browser_asset_version }}">
+    <script src="/static/vendor/markdown-it.umd.min.js" defer></script>
+    <script src="/static/vendor/purify.min.js" defer></script>
+    <script src="/static/app.js?v={{ browser_asset_version }}" defer></script>
   </head>
   <body>
     <header class="site-header">

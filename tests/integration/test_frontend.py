@@ -77,8 +77,11 @@ def test_root_page_loads_with_accessible_controls() -> None:
     assert "Provider calls" not in response.text
     assert "Enter sends." not in response.text
     assert 'data-api-base="/api/v1"' in response.text
-    assert "/static/app.js" in response.text
-    assert "/static/style.css" in response.text
+    assert 'href="/static/style.css?v=' in response.text
+    assert 'src="/static/vendor/markdown-it.umd.min.js"' in response.text
+    assert 'src="/static/vendor/purify.min.js"' in response.text
+    assert 'src="/static/app.js?v=' in response.text
+    assert "://testserver/static/" not in response.text
     assert (
         response.text.index("/static/vendor/markdown-it.umd.min.js")
         < response.text.index("/static/vendor/purify.min.js")
