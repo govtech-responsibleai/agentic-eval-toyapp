@@ -1,5 +1,6 @@
 """Static contracts for reproducible and secret-safe container packaging."""
 
+import json
 from pathlib import Path
 
 from agentic_eval_toyapp.config import AppSettings
@@ -23,8 +24,28 @@ def test_dockerfile_pins_and_caches_the_configured_embedding_model() -> None:
     assert "--mount=type=secret,id=toyapp_ca_bundle" in dockerfile
     assert "chmod 0644 /opt/toyapp-ca-bundle.pem" in dockerfile
     assert "UV_COMPILE_BYTECODE" not in dockerfile
-    assert "USER toyapp" in dockerfile
+    assert "groupadd --gid 999 app" in dockerfile
+    assert "useradd --uid 999 --gid app" in dockerfile
+    assert "--chown=app:app" in dockerfile
+    assert "USER app" in dockerfile
+    assert "PORT=8000" in dockerfile
+    assert "os.environ.get('PORT', '8000')" in dockerfile
+    assert "${PORT:-8000}" in dockerfile
     assert "HEALTHCHECK" in dockerfile
+
+
+def test_airbase_configuration_targets_the_expected_project() -> None:
+    """Airbase must deploy the image with enough memory and the matching port."""
+    configuration = json.loads(
+        (REPOSITORY_ROOT / "airbase.json").read_text(encoding="utf-8")
+    )
+
+    assert configuration == {
+        "framework": "container",
+        "handle": "rai-poc/metis-agentic-eval-toyapp",
+        "port": 8000,
+        "instanceType": "b.small",
+    }
 
 
 def test_docker_context_excludes_secrets_tests_and_private_runs() -> None:

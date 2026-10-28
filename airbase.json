@@ -1,0 +1,6 @@
+{
+  "framework": "container",
+  "handle": "rai-poc/metis-agentic-eval-toyapp",
+  "port": 8000,
+  "instanceType": "b.small"
+}

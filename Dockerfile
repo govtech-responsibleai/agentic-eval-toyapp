@@ -61,6 +61,7 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     TRANSFORMERS_OFFLINE=1 \
     SSL_CERT_FILE=/opt/toyapp-ca-bundle.pem \
     REQUESTS_CA_BUNDLE=/opt/toyapp-ca-bundle.pem \
+    PORT=8000 \
     TOYAPP_HOST=0.0.0.0 \
     TOYAPP_PORT=8000 \
     TOYAPP_EMBEDDING_CACHE_DIR=/opt/models \
@@ -68,18 +69,18 @@ ENV PATH="/app/.venv/bin:${PATH}" \
 
 WORKDIR /app
 
-RUN groupadd --system toyapp \
-    && useradd --system --gid toyapp --home-dir /nonexistent --shell /usr/sbin/nologin toyapp
+RUN groupadd --gid 999 app \
+    && useradd --uid 999 --gid app --home-dir /nonexistent --shell /usr/sbin/nologin app
 
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /opt/models /opt/models
-COPY --from=builder /opt/toyapp-ca-bundle.pem /opt/toyapp-ca-bundle.pem
+COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder --chown=app:app /opt/models /opt/models
+COPY --from=builder --chown=app:app /opt/toyapp-ca-bundle.pem /opt/toyapp-ca-bundle.pem
 
-USER toyapp
+USER app
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=90s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
+    CMD ["python", "-c", "import os, urllib.request; port = os.environ.get('PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=2).read()"]
 
-CMD ["uvicorn", "agentic_eval_toyapp.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "exec uvicorn agentic_eval_toyapp.app:app --host 0.0.0.0 --port \"${PORT:-8000}\""]
