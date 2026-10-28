@@ -45,7 +45,8 @@ The application currently provides:
   text-based PDFs with validated page or section references;
 - semantic retrieval using a pinned SentenceTransformer and in-memory FAISS;
 - live OpenAI-compatible generation or an explicit deterministic provider;
-- process-local multi-turn sessions;
+- bounded multi-turn sessions and reports with selectable in-memory or Redis
+  storage;
 - session-scoped upload and validation for UTF-8 text, Markdown, and text-based
   PDF reports;
 - browser and programmatic API access;
@@ -60,9 +61,9 @@ For component boundaries, data flows, and technical design, see
 ## Project status and support
 
 The repository is maintained as a research and evaluation demonstration with
-a **best-effort community support tier**. It intentionally uses process-local
-sessions and report storage, answers each agent turn on the request, and prioritises
-controlled evaluation behaviour over production scalability or durability.
+a **best-effort community support tier**. It supports Redis-backed conversation
+sessions and uploaded reports, answers each agent turn on the request, and
+prioritises controlled evaluation behaviour over production scalability.
 
 - For reproducible bugs and feature requests, open a
   [GitHub issue](https://github.com/govtech-responsibleai/agentic-eval-toyapp/issues).
@@ -76,6 +77,7 @@ controlled evaluation behaviour over production scalability or durability.
 - Python 3.11 or later
 - [uv](https://docs.astral.sh/uv/)
 - Make
+- Redis when persistent sessions are enabled outside Docker Compose
 
 Alternatively, Docker with Compose can build and run the packaged service
 without installing Python or uv on the host.
@@ -155,6 +157,31 @@ before using the session as METIS input.
 See [.env.example](.env.example) for model, retrieval, agent, session, report
 upload, and service settings.
 
+### Session and report persistence
+
+`make run` uses in-memory conversation and report stores by default. To retain
+conversation history, original uploaded files, report metadata, and extracted
+text outside the application process, provide a Redis service and configure:
+
+```dotenv
+TOYAPP_SESSION_STORE_BACKEND=redis
+TOYAPP_REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+Use `rediss://` when the Redis connection crosses an untrusted network, and do
+not commit credentials embedded in the URL. `TOYAPP_SESSION_MAX_TURNS` and
+`TOYAPP_UPLOAD_MAX_REPORTS_PER_SESSION` remain the per-session retention bounds
+for both backends. Redis availability is included in `/ready`; requests that
+need an unavailable store return safe `503` storage errors.
+
+Docker Compose configures the app to use its Redis service automatically. The
+Redis service enables append-only persistence in the named `redis-data` volume,
+so `make docker-down` followed by `make docker-up` retains conversations and
+reports. Running `docker compose down --volumes` intentionally removes that
+local data. Redis contains full original uploads in persistent mode; use only
+synthetic, non-sensitive reports unless the deployment's access control,
+encryption, retention, and backup policy is appropriate for the data.
+
 ## Run the application
 
 Start the default live-model coordinator application:
@@ -229,8 +256,9 @@ TOYAPP_LANGFUSE_ENABLED=false \
 make docker-up
 ```
 
-The same endpoints are available at `http://127.0.0.1:8000`. Inspect or stop
-the service with:
+The same endpoints are available at `http://127.0.0.1:8000`. Compose also starts
+Redis for persistent conversation and report storage. Inspect or stop the
+services with:
 
 ```bash
 make docker-logs
@@ -286,11 +314,13 @@ modify it. Supply public CA certificates only; do not include private keys.
 
 The page creates a session automatically and puts its UUID in the browser URL
 as `/session/{session_id}`.
-Reloading or opening that URL restores the retained public conversation while
-the same server process still holds it. **New session** starts an independent
-conversation and updates the URL. If a shared session has expired, the page
-states that it is unavailable and creates a replacement. Sessions are
-process-local and are not persistent bookmarks across restarts or workers.
+Reloading or opening that URL restores the retained public conversation.
+**New session** starts an independent conversation and updates the URL. If a
+shared session is unavailable, the page states that it is unavailable and
+creates a replacement. With Redis selected, session URLs remain usable across
+application restarts while the Redis data remains available. Their uploaded
+reports also remain available. With the default in-memory stores, both remain
+process-local.
 Enter submits a message and Shift+Enter inserts a newline. Refreshing or
 starting a new session returns the page and panel scroll positions to the top.
 Assistant replies render sanitized Markdown; your messages remain literal
@@ -298,8 +328,9 @@ text.
 
 In the default coordinator mode, use the paperclip beside **Send message** to
 upload a `.txt`, `.md`, or text-based `.pdf` report. The **Session file(s)** panel lists
-uploaded reports; its `?` icon explains selection. Uploading stores a file
-but does not contact an agent or send a message. Select one stored report to
+uploaded reports; its `?` icon explains selection. Uploading stores the original
+bytes, metadata, and extracted text but does not contact an agent or send a
+message. Select one stored report to
 include it in messages. The selection remains active across turns until you
 deselect, delete, select another file, or start a new session. After a page
 reload, choose the file again from the restored list. The list and selected
@@ -412,7 +443,7 @@ the user from submitting additional turns.
 | `GET /health` | Report process liveness and application version. |
 | `GET /ready` | Report initialised chat dependencies. |
 | `GET /api/v1/capabilities` | Advertise the available target features and actions. |
-| `POST /api/v1/sessions` | Create an empty process-local conversation session. |
+| `POST /api/v1/sessions` | Create an empty conversation session in the configured store. |
 | `POST /api/v1/sessions/{session_id}/files` | Validate and retain one session-scoped report without invoking an agent. |
 | `GET /api/v1/sessions/{session_id}/files` | List safe metadata for that session's retained reports. |
 | `DELETE /api/v1/sessions/{session_id}/files/{file_id}` | Remove one owned report without changing past turns. |
@@ -499,7 +530,7 @@ agentic-eval-toyapp/
 ├── README.md                                 # Project introduction and user guide
 ├── SECURITY.md                               # Private vulnerability disclosure process
 ├── architecture.md                           # Technical component architecture and data flows
-├── compose.yaml                              # Local single-service container configuration
+├── compose.yaml                              # Local application and persistent Redis services
 ├── docs/
 │   └── github-workflow.md                    # Internal and external collaboration playbook
 ├── pyproject.toml                            # Package metadata, dependencies, and tool configuration
@@ -543,10 +574,10 @@ agentic-eval-toyapp/
 │       │   └── system.md                     # RAG role and action instructions
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
 │       ├── report_sources.py                 # Complete report text with stable page and section locators
-│       ├── reports.py                        # Bounded report extraction and session-scoped storage
+│       ├── reports.py                        # Bounded in-memory and Redis report storage
 │       ├── resources/
 │       │   └── documents.json                # Synthetic Northstar policy corpus
-│       ├── sessions.py                       # Event-loop-safe bounded in-memory conversation state
+│       ├── sessions.py                       # Event-loop-safe in-memory and Redis conversation stores
 │       ├── static/
 │       │   ├── app.js                        # Browser API client and sanitized Markdown rendering
 │       │   ├── style.css                     # Responsive panel layout and browser styling
@@ -561,7 +592,7 @@ agentic-eval-toyapp/
 │           └── index.html                    # Accessible server-rendered chat page
 └── tests/
     ├── fixtures/
-    │   └── stage14_report.md                 # Synthetic longer report for manual analysis verification
+    │   └── test_report.md                    # Synthetic report for analysis verification
     ├── integration/
     │   ├── test_agent_retrieval.py           # Offline agent-to-FAISS composition test
     │   ├── test_api.py                       # Session/message API contract and failure tests
@@ -594,6 +625,8 @@ agentic-eval-toyapp/
         ├── test_report_sources.py            # Complete report source and locator edge cases
         ├── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
         ├── test_reports.py                   # Report extraction, limits, hashing, and isolation tests
+        ├── test_redis_reports.py             # Offline Redis report persistence and integrity tests
+        ├── test_redis_sessions.py            # Offline Redis persistence and failure-boundary tests
         ├── test_sessions.py                  # Session isolation, history, and truncation tests
         ├── test_multi_agent_tracing.py       # Coordinator trace hierarchy, privacy, and usage tests
         └── test_tracing.py                   # Offline standalone trace shape and session-correlation tests
@@ -604,9 +637,11 @@ The local `design.md`, `.env`, embedding caches, FAISS artefacts, and generated
 
 ## Current runtime constraints
 
-- Sessions are stored in one process and are lost on restart.
-- Extracted reports are process-local, bounded, and lost on restart; raw upload
-  bytes are not retained after processing.
+- Conversation sessions and complete report records are persistent and shared
+  across app workers when Redis is selected; the default source-based `make
+  run` configuration remains process-local.
+- Report storage is bounded per session. In Redis mode it includes original
+  upload bytes, metadata, extracted text, and PDF page boundaries.
 - Text-based PDFs are supported, but scanned PDFs and OCR are not.
 - Standalone RAG mode does not consume report contents.
 - The default coordinator can answer, clarify, delegate policy tasks to RAG, and
