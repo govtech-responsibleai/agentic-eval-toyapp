@@ -138,7 +138,18 @@ The application session UUID is also used as the Langfuse session ID. Use the
 service base URL, including a reverse-proxy prefix such as `/langfuse`; do not
 append the OTLP API path. Keep `TOYAPP_LANGFUSE_FLUSH_ON_TURN=true` for evaluation
 runs so the SDK attempts export before the HTTP turn completes. A returned
-flush is not proof of successful ingestion. Set `TOYAPP_LANGFUSE_ENABLED=false`
+flush is not proof of successful ingestion.
+
+`TOYAPP_LANGFUSE_FLUSH_ON_TURN=false` is a supported deferred mode for load
+tests. No flush is made per turn, so the HTTP response no longer waits for
+Langfuse. The SDK exports in the background, and one final flush runs when the
+application shuts down. Any run that reads traces right after a turn, including
+METIS evaluations and trace cases, must keep the default `true`: in deferred
+mode a trace may not exist yet when you fetch it, and a crash or kill signal
+can lose whatever has not been exported. There is no interval or hybrid
+flushing; the SDK's own batching sets the export cadence.
+
+Set `TOYAPP_LANGFUSE_ENABLED=false`
 for a run that should not export traces. After changing `.env`, fully restart
 `make run` or recreate the Docker container; an already running process keeps
 its initial Langfuse client and URL.

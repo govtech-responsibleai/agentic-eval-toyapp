@@ -896,10 +896,16 @@ Coordinator mode uses `LangfuseCoordinatorTraceRecorder` in
 `multi_agent_tracing.py`: one output-bearing `agent-turn` root per submitted
 message, with only the selected specialist nested beneath it. The delegated
 RAG loop reuses its execution code but not its standalone root. Uploading or
-selecting a report without message submission creates no turn root. The SDK
-attempts to flush after each submitted turn by default, but asynchronous
-Langfuse ingestion means the trace may take a few minutes to appear in the
-Langfuse page.
+selecting a report without message submission creates no turn root. With
+`TOYAPP_LANGFUSE_FLUSH_ON_TURN=true` (the default) the recorder flushes after
+each submitted turn, on a worker thread so the event loop stays free, before
+the HTTP response is sent. With `false` there is no per-turn flush: the SDK
+exports in the background and the lifespan shutdown makes one final flush
+through the agent's recorder `shutdown()`. Deferred mode weakens trace
+completeness, since a trace may not exist yet when read right after a turn and
+a crash can lose unexported data, so evaluation runs keep the default. Even
+after a flush, asynchronous Langfuse ingestion means the trace may take a few
+minutes to appear in the Langfuse page.
 
 The application session UUID is propagated as the Langfuse `session_id`.
 Therefore multiple user turns produce separate `agent-turn` roots that can be
@@ -907,7 +913,7 @@ retrieved and grouped as one conversation.
 
 The coordinator logs the Langfuse trace and observation IDs when it starts
 `agent-turn` and `inspect-input`, and emits `flush_attempted` when the per-turn
-SDK flush returns. These logs contain correlation IDs only. The Langfuse SDK
+SDK flush returns (never in deferred mode). These logs contain correlation IDs only. The Langfuse SDK
 does not expose the OTLP batch result through `flush()`: the exporter may log
 an HTTP error even when that call returns. Neither `flush_attempted` nor a
 successful read-API request proves that every observation was ingested. The

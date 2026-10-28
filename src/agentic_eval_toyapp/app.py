@@ -195,7 +195,15 @@ class _AgentResolver:
             return candidate
 
     def shutdown(self) -> None:
-        """Release resources owned by the default agent, if initialised."""
+        """Release the agent's tracing resources, if it has been initialised.
+
+        This is the one place the final Langfuse flush happens when
+        `TOYAPP_LANGFUSE_FLUSH_ON_TURN=false`: the recorder's `shutdown()` drains
+        the SDK's background queue.
+        """
+        # Intentional: `AgentRunner` has no `shutdown()`, so only the two agent
+        # types known to own a trace recorder are closed. An injected custom
+        # runner owns its own resources and its caller must close them.
         if isinstance(self._agent, (RagAgent, CoordinatorAgent)):
             self._agent.shutdown()
 
