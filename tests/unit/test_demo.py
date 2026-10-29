@@ -28,7 +28,7 @@ from agentic_eval_toyapp.sessions import InMemorySessionStore
 # Helpers
 # ---------------------------------------------------------------------------
 
-DEMO_SESSION_ID = "00000000-0000-0000-0000-000000000064"
+DEMO_SESSION_ID = "00000000-0000-0000-0000-000000000000"
 
 
 def _minimal_json(
