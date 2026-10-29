@@ -3,6 +3,8 @@ design.md
 
 # Local configuration and Python build/test output.
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.py[cod]

@@ -1,12 +1,17 @@
-.PHONY: help install run trace-cases-list trace-case docker-build docker-up docker-down docker-logs docker-smoke docker-smoke-run lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live test-model-live test-langfuse-live ci clean
+.PHONY: help install run trace-cases-list trace-case docker-build docker-up docker-down docker-logs docker-smoke docker-smoke-run load-test lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live test-model-live test-langfuse-live ci clean
 
 PYTHON_SOURCES := src tests trace_cases scripts
 DOCKER_IMAGE ?= agentic-eval-toyapp:local
 DOCKER_CA_CERT ?= $(SSL_CERT_FILE)
+DOCKER_PLATFORM ?=
 DOCKER_SMOKE_PORT ?= 18000
 DOCKER_SMOKE_TIMEOUT ?= 180
+LOAD_TEST_URL ?=
+LOAD_TEST_USERS ?= 60
+LOAD_TEST_TIMEOUT ?= 60
 COMMA := ,
 DOCKER_CA_SECRET_ARGUMENT = $(if $(strip $(DOCKER_CA_CERT)),--secret id=toyapp_ca_bundle$(COMMA)src="$(DOCKER_CA_CERT)",)
+DOCKER_PLATFORM_ARGUMENT = $(if $(strip $(DOCKER_PLATFORM)),--platform "$(DOCKER_PLATFORM)",)
 TRACE_METRIC_ARGUMENT = $(if $(strip $(METRIC)),--metric "$(METRIC)",)
 TRACE_VARIANT_ARGUMENT = $(if $(strip $(VARIANT)),--variant "$(VARIANT)",)
 
@@ -21,6 +26,7 @@ help:
 	@printf "  make docker-down   Stop and remove the Compose service\n"
 	@printf "  make docker-logs   Follow Compose service logs\n"
 	@printf "  make docker-smoke  Build and verify RAG, coordinator, browser assets, and restart\n"
+	@printf "  make load-test LOAD_TEST_URL=https://... [LOAD_TEST_USERS=60]  Run concurrent session/message flows\n"
 	@printf "  make lock-check    Check that the uv lockfile is current\n"
 	@printf "  make lint          Run Ruff lint checks\n"
 	@printf "  make lint-fix      Apply safe Ruff lint fixes\n"
@@ -53,7 +59,7 @@ trace-case:
 	uv run python -m trace_cases generate $(TRACE_METRIC_ARGUMENT) $(TRACE_VARIANT_ARGUMENT)
 
 docker-build:
-	docker build $(DOCKER_CA_SECRET_ARGUMENT) --tag "$(DOCKER_IMAGE)" .
+	docker build $(DOCKER_PLATFORM_ARGUMENT) $(DOCKER_CA_SECRET_ARGUMENT) --tag "$(DOCKER_IMAGE)" .
 
 docker-up: docker-build
 	docker compose up --detach --no-build
@@ -71,6 +77,13 @@ docker-smoke-run:
 		--image "$(DOCKER_IMAGE)" \
 		--host-port "$(DOCKER_SMOKE_PORT)" \
 		--timeout-seconds "$(DOCKER_SMOKE_TIMEOUT)"
+
+load-test:
+	@test -n "$(LOAD_TEST_URL)" || (printf "LOAD_TEST_URL is required\n" >&2; exit 2)
+	uv run python -m scripts.load_test \
+		--base-url "$(LOAD_TEST_URL)" \
+		--users "$(LOAD_TEST_USERS)" \
+		--timeout-seconds "$(LOAD_TEST_TIMEOUT)"
 
 lock-check:
 	uv lock --check
