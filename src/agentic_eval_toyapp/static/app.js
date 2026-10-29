@@ -8,6 +8,8 @@ const form = document.querySelector("#chat-form");
 const messageInput = document.querySelector("#message-input");
 const sendButton = document.querySelector("#send-message");
 const newSessionButton = document.querySelector("#new-session");
+const demoButton = document.querySelector("#demo-session");
+const demoSessionId = app.dataset.demoSessionId || null;
 const exportButton = document.querySelector("#export-session");
 const sessionIdElement = document.querySelector("#session-id");
 const copySessionIdButton = document.querySelector("#copy-session-id");
@@ -86,6 +88,7 @@ function updateControls() {
   messageInput.disabled = unavailable;
   sendButton.disabled = unavailable || fileOperationInProgress || !messageInput.value.trim();
   newSessionButton.disabled = requestInProgress || fileOperationInProgress;
+  demoButton.disabled = !demoSessionId || requestInProgress || fileOperationInProgress;
   exportButton.disabled = sessionId === null || requestInProgress || fileOperationInProgress;
   const uploadUnavailable = unavailable || fileOperationInProgress || filesPanel.hidden;
   uploadControl.hidden = filesPanel.hidden;
@@ -685,6 +688,11 @@ function exportSession() {
 form.addEventListener("submit", submitMessage);
 newSessionButton.addEventListener("click", () => createSession());
 copySessionIdButton.addEventListener("click", copySessionId);
+demoButton.addEventListener("click", () => {
+  if (demoSessionId) {
+    createSession(demoSessionId);
+  }
+});
 exportButton.addEventListener("click", exportSession);
 uploadButton.addEventListener("click", () => reportUpload.click());
 reportUpload.addEventListener("change", uploadFile);

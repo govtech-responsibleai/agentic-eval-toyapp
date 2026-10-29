@@ -394,6 +394,29 @@ class InMemoryReportStore:
                 resolved.append(self._records[file_id])
             return tuple(resolved)
 
+    def seed(
+        self,
+        session_id: UUID,
+        reports: Sequence[StoredReport],
+    ) -> None:
+        """Insert reports with predetermined IDs; fail on any collision.
+
+        Intended for deterministic startup seeding.  Not part of the
+        ``ReportStore`` protocol.
+        """
+        with self._lock:
+            for report in reports:
+                if report.metadata.file_id in self._records:
+                    raise ReportCapacityError(
+                        f"file_id collision: {report.metadata.file_id} "
+                        f"already exists in the report store"
+                    )
+            for report in reports:
+                fid = report.metadata.file_id
+                self._records[fid] = report
+                self._owners[fid] = session_id
+                self._session_file_ids[session_id].append(fid)
+
 
 class _RedisReportLock(Protocol):
     """Subset of the redis.asyncio distributed lock used by the report store."""
@@ -626,6 +649,23 @@ class RedisReportStore:
             return tuple(reports_by_id[file_id] for file_id in file_ids)
         except KeyError:
             raise ReportNotFoundError from None
+
+    async def seed(
+        self,
+        session_id: UUID,
+        reports: Sequence[StoredReport],
+    ) -> None:
+        """Write predetermined reports if no data exists for this session.
+
+        Intended for deterministic startup seeding.  Not part of the
+        ``ReportStore`` protocol.
+        """
+        existing = await self._read_reports(session_id)
+        if existing:
+            raise ReportStoreUnavailableError(
+                "report store already contains data for the demo session"
+            )
+        await self._write_reports(session_id, list(reports))
 
     def _session_key(self, session_id: UUID) -> str:
         return f"{self._key_prefix}:reports:{session_id}"
