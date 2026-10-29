@@ -99,6 +99,7 @@ from agentic_eval_toyapp.retrieval import (
     corpus_sha256,
     load_corpus,
 )
+from agentic_eval_toyapp.session_export import export_session
 from agentic_eval_toyapp.sessions import (
     AgentRunner,
     InMemorySessionStore,
@@ -1089,6 +1090,28 @@ def create_app(
             finally:
                 admission.release()
             return SessionMessageResponse(session_id=session_id, result=result)
+
+    @application.get(
+        f"{API_PREFIX}/sessions/{{session_id}}/export",
+        responses={
+            404: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["chat"],
+    )
+    async def export_session_endpoint(session_id: UUID) -> Response:
+        """Export one session as a portable JSON or ZIP file."""
+        content, content_type, filename = await export_session(
+            session_id, resolved_store, resolved_report_store
+        )
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     return application
 

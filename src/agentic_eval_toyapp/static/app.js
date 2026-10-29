@@ -8,6 +8,7 @@ const form = document.querySelector("#chat-form");
 const messageInput = document.querySelector("#message-input");
 const sendButton = document.querySelector("#send-message");
 const newSessionButton = document.querySelector("#new-session");
+const exportButton = document.querySelector("#export-session");
 const sessionIdElement = document.querySelector("#session-id");
 const copySessionIdButton = document.querySelector("#copy-session-id");
 const appStatus = document.querySelector("#app-status");
@@ -85,6 +86,7 @@ function updateControls() {
   messageInput.disabled = unavailable;
   sendButton.disabled = unavailable || fileOperationInProgress || !messageInput.value.trim();
   newSessionButton.disabled = requestInProgress || fileOperationInProgress;
+  exportButton.disabled = sessionId === null || requestInProgress || fileOperationInProgress;
   const uploadUnavailable = unavailable || fileOperationInProgress || filesPanel.hidden;
   uploadControl.hidden = filesPanel.hidden;
   uploadButton.disabled = uploadUnavailable;
@@ -673,9 +675,17 @@ async function copySessionId() {
   }, 2000);
 }
 
+function exportSession() {
+  if (sessionId === null || requestInProgress || fileOperationInProgress) {
+    return;
+  }
+  window.location.href = `${apiBase}/sessions/${encodeURIComponent(sessionId)}/export`;
+}
+
 form.addEventListener("submit", submitMessage);
 newSessionButton.addEventListener("click", () => createSession());
 copySessionIdButton.addEventListener("click", copySessionId);
+exportButton.addEventListener("click", exportSession);
 uploadButton.addEventListener("click", () => reportUpload.click());
 reportUpload.addEventListener("change", uploadFile);
 messageInput.addEventListener("input", updateControls);

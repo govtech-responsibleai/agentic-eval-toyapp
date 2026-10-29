@@ -436,6 +436,7 @@ def test_openapi_contains_only_the_intended_application_routes() -> None:
         "/api/v1/capabilities",
         "/api/v1/sessions",
         "/api/v1/sessions/{session_id}",
+        "/api/v1/sessions/{session_id}/export",
         "/api/v1/sessions/{session_id}/files",
         "/api/v1/sessions/{session_id}/files/{file_id}",
         "/api/v1/sessions/{session_id}/messages",
