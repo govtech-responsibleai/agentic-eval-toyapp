@@ -34,7 +34,12 @@
         <div class="session-bar">
           <div class="session-context">
             <p class="label">Current session</p>
-            <code id="session-id">Creating session…</code>
+            <div class="session-id-row">
+              <code id="session-id">Creating session…</code>
+              <button id="copy-session-id" class="copy-button" type="button" aria-label="Copy session ID" disabled>
+                Copy
+              </button>
+            </div>
           </div>
           <button id="new-session" class="secondary-button" type="button">
             New session

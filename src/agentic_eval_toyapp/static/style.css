@@ -236,15 +236,71 @@ h3 {
   min-width: 0;
 }
 
+.session-id-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
 .session-bar code {
   display: block;
   overflow: hidden;
   max-width: min(52vw, 500px);
-  color: var(--muted);
+  color: var(--text);
   font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-  font-size: 0.76rem;
+  font-size: 0.88rem;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.copy-button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0.22rem 0.62rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--surface-solid);
+  font-size: 0.73rem;
+  font-weight: 650;
+  transition:
+    color 180ms ease,
+    background-color 180ms ease,
+    border-color 180ms ease,
+    transform 120ms ease;
+}
+
+.copy-button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+.copy-button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.copy-button-copied {
+  border-color: var(--success);
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.copy-button-copied:hover:not(:disabled) {
+  border-color: var(--success);
+  background: var(--success-soft);
+}
+
+.copy-button-failed {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.copy-button-failed:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .primary-button,

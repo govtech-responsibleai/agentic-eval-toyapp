@@ -9,6 +9,7 @@ const messageInput = document.querySelector("#message-input");
 const sendButton = document.querySelector("#send-message");
 const newSessionButton = document.querySelector("#new-session");
 const sessionIdElement = document.querySelector("#session-id");
+const copySessionIdButton = document.querySelector("#copy-session-id");
 const appStatus = document.querySelector("#app-status");
 const detailsEmpty = document.querySelector("#details-empty");
 const turnDetails = document.querySelector("#turn-details");
@@ -91,6 +92,7 @@ function updateControls() {
   for (const button of uploadedFiles.querySelectorAll("button")) {
     button.disabled = unavailable || fileOperationInProgress;
   }
+  copySessionIdButton.disabled = sessionId === null;
   app.setAttribute("aria-busy", String(requestInProgress || fileOperationInProgress));
 }
 
@@ -653,8 +655,27 @@ async function submitMessage(event) {
   }
 }
 
+async function copySessionId() {
+  if (sessionId === null) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(sessionId);
+    copySessionIdButton.textContent = "Copied";
+    copySessionIdButton.classList.add("copy-button-copied");
+  } catch (_error) {
+    copySessionIdButton.textContent = "Failed";
+    copySessionIdButton.classList.add("copy-button-failed");
+  }
+  setTimeout(() => {
+    copySessionIdButton.textContent = "Copy";
+    copySessionIdButton.classList.remove("copy-button-copied", "copy-button-failed");
+  }, 2000);
+}
+
 form.addEventListener("submit", submitMessage);
 newSessionButton.addEventListener("click", () => createSession());
+copySessionIdButton.addEventListener("click", copySessionId);
 uploadButton.addEventListener("click", () => reportUpload.click());
 reportUpload.addEventListener("change", uploadFile);
 messageInput.addEventListener("input", updateControls);
