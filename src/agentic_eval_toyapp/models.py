@@ -516,6 +516,7 @@ class SessionResponse(ApiModel):
     session_id: UUID
     messages: tuple[ConversationMessage, ...] = ()
     retained_turns: int = Field(ge=0)
+    read_only: bool = False
 
     @model_validator(mode="after")
     def validate_complete_turn_history(self) -> Self:

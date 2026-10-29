@@ -436,3 +436,55 @@ def test_redis_store_requires_exactly_one_of_client_or_factory() -> None:
         RedisSessionStore()
     with pytest.raises(ValueError, match="exactly one"):
         RedisSessionStore(_FakeRedisClient(), client_factory=_FakeRedisClient)
+
+
+@pytest.mark.anyio
+async def test_redis_seed_read_only_returns_read_only_true() -> None:
+    """A session seeded with read_only=True reports read_only in its snapshot."""
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client)
+    session_id = UUID("00000000-0000-0000-0000-000000000001")
+    user = ConversationMessage(role=ConversationRole.USER, content="hi")
+    assistant = ConversationMessage(role=ConversationRole.ASSISTANT, content="hello")
+    created = await store.seed(session_id, ((user, assistant),), read_only=True)
+    assert created is True
+
+    snapshot = await store.get(session_id)
+    assert snapshot.read_only is True
+
+
+@pytest.mark.anyio
+async def test_redis_created_session_is_mutable() -> None:
+    """A session created through create() is mutable."""
+    store = RedisSessionStore(_FakeRedisClient())
+    session = await store.create()
+    assert session.read_only is False
+
+
+@pytest.mark.anyio
+async def test_redis_v1_payload_loads_as_mutable() -> None:
+    """A version-1 payload (no read_only field) loads as read_only=False."""
+    import json
+
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client)
+    session_id = UUID("00000000-0000-0000-0000-000000000002")
+
+    # Write a v1 payload directly into the fake client
+    v1_payload = json.dumps(
+        {
+            "version": 1,
+            "turns": [
+                {
+                    "user": {"role": "user", "content": "hi"},
+                    "assistant": {"role": "assistant", "content": "hello"},
+                }
+            ],
+        }
+    )
+    key = f"agentic-eval-toyapp:session:{session_id}"
+    await client.set(key, v1_payload)
+
+    snapshot = await store.get(session_id)
+    assert snapshot.read_only is False
+    assert snapshot.retained_turns == 1

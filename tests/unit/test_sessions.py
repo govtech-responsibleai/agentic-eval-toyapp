@@ -162,3 +162,37 @@ async def test_store_retries_a_colliding_id_and_rejects_invalid_bounds() -> None
     assert second.session_id == second_id
     with pytest.raises(ValueError, match="max_turns"):
         InMemorySessionStore(max_turns=0)
+
+
+@pytest.mark.anyio
+async def test_seed_read_only_returns_read_only_true() -> None:
+    """A session seeded with read_only=True reports read_only in its snapshot."""
+    store = InMemorySessionStore()
+    session_id = UUID("00000000-0000-0000-0000-000000000001")
+    user = ConversationMessage(role=ConversationRole.USER, content="hi")
+    assistant = ConversationMessage(role=ConversationRole.ASSISTANT, content="hello")
+    store.seed(session_id, ((user, assistant),), read_only=True)
+
+    snapshot = await store.get(session_id)
+    assert snapshot.read_only is True
+
+
+@pytest.mark.anyio
+async def test_seed_default_is_mutable() -> None:
+    """A session seeded without read_only flag is mutable."""
+    store = InMemorySessionStore()
+    session_id = UUID("00000000-0000-0000-0000-000000000002")
+    user = ConversationMessage(role=ConversationRole.USER, content="hi")
+    assistant = ConversationMessage(role=ConversationRole.ASSISTANT, content="hello")
+    store.seed(session_id, ((user, assistant),))
+
+    snapshot = await store.get(session_id)
+    assert snapshot.read_only is False
+
+
+@pytest.mark.anyio
+async def test_created_session_is_mutable() -> None:
+    """A session created through create() is mutable."""
+    store = InMemorySessionStore()
+    session = await store.create()
+    assert session.read_only is False

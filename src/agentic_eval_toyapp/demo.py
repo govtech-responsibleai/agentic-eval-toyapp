@@ -379,9 +379,9 @@ async def _seed_session(
 ) -> bool:
     """Insert the demo session; return False if it already exists."""
     if isinstance(store, InMemorySessionStore):
-        return store.seed(demo.session_id, demo.turns)
+        return store.seed(demo.session_id, demo.turns, read_only=True)
     if isinstance(store, RedisSessionStore):
-        return await store.seed(demo.session_id, demo.turns)
+        return await store.seed(demo.session_id, demo.turns, read_only=True)
     raise DemoLoadError(f"unsupported session store type: {type(store).__name__}")
 
 
