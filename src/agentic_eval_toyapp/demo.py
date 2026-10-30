@@ -34,7 +34,7 @@ from agentic_eval_toyapp.sessions import (
 
 LOGGER = logging.getLogger("uvicorn.error")
 
-DEMO_RESOURCE = Path(__file__).parent / "resources" / "demo-session.json"
+DEMO_DIRECTORY = Path(__file__).parent / "resources" / "demos"
 
 _ZIP_SIGNATURE = b"PK\x03\x04"
 
@@ -50,11 +50,39 @@ class LoadedDemo:
     session_id: UUID
     turns: tuple[tuple[ConversationMessage, ConversationMessage], ...]
     reports: tuple[StoredReport, ...]
+    title: str = "Demo"
     langfuse_project_url: str | None = None
 
 
-def load_demo(path: Path = DEMO_RESOURCE) -> LoadedDemo:
-    """Load and validate the demo session resource.
+def load_demos(directory: Path = DEMO_DIRECTORY) -> tuple[LoadedDemo, ...]:
+    """Load every ``*.json`` and ``*.zip`` demo in ``directory``.
+
+    Demos are ordered by file name so the picker order is stable.  Raises
+    ``DemoLoadError`` when the directory holds no demos or two demos share a
+    session ID.
+    """
+    try:
+        paths = sorted(
+            path
+            for path in directory.iterdir()
+            if path.is_file() and path.suffix in {".json", ".zip"}
+        )
+    except OSError as error:
+        raise DemoLoadError(f"cannot read demo directory: {error}") from error
+    if not paths:
+        raise DemoLoadError(f"no demo sessions found in {directory}")
+
+    demos = tuple(load_demo(path) for path in paths)
+    seen: set[UUID] = set()
+    for demo in demos:
+        if demo.session_id in seen:
+            raise DemoLoadError(f"duplicate demo session_id {demo.session_id}")
+        seen.add(demo.session_id)
+    return demos
+
+
+def load_demo(path: Path) -> LoadedDemo:
+    """Load and validate one demo session resource.
 
     Detects ZIP by checking the first four bytes for the PK\\x03\\x04
     signature; otherwise treats the content as JSON.
@@ -72,8 +100,8 @@ def load_demo(path: Path = DEMO_RESOURCE) -> LoadedDemo:
     is_zip = raw[:4] == _ZIP_SIGNATURE
 
     if is_zip:
-        return _load_from_zip(raw)
-    return _load_from_json(raw, allow_files=False)
+        return _load_from_zip(raw, fallback_title=path.stem)
+    return _load_from_json(raw, allow_files=False, fallback_title=path.stem)
 
 
 def _parse_session_json(data: bytes) -> dict[str, object]:
@@ -139,14 +167,29 @@ def _validate_common(payload: dict[str, object]) -> tuple[UUID, list[dict[str, s
     return session_id, turns
 
 
-def _optional_langfuse_project_url(payload: dict[str, object]) -> str | None:
-    """Read the optional ``metadata.langfuse_project_url`` override."""
+def _metadata(payload: dict[str, object]) -> dict[str, object]:
+    """Return the optional top-level ``metadata`` object (empty when absent)."""
     metadata = payload.get("metadata")
     if metadata is None:
-        return None
+        return {}
     if not isinstance(metadata, dict):
         raise DemoLoadError("metadata must be an object")
-    raw_url = cast(dict[str, object], metadata).get("langfuse_project_url")
+    return cast(dict[str, object], metadata)
+
+
+def _title(payload: dict[str, object], fallback: str) -> str:
+    """Read the optional ``metadata.title``, defaulting to the file name."""
+    raw_title = _metadata(payload).get("title")
+    if raw_title is None:
+        return fallback
+    if not isinstance(raw_title, str) or not raw_title.strip():
+        raise DemoLoadError("metadata.title must be a non-empty string")
+    return raw_title.strip()
+
+
+def _optional_langfuse_project_url(payload: dict[str, object]) -> str | None:
+    """Read the optional ``metadata.langfuse_project_url`` override."""
+    raw_url = _metadata(payload).get("langfuse_project_url")
     if raw_url is None:
         return None
     if not isinstance(raw_url, str):
@@ -177,7 +220,9 @@ def _build_turn_pairs(
     return tuple(pairs)
 
 
-def _load_from_json(data: bytes, *, allow_files: bool) -> LoadedDemo:
+def _load_from_json(
+    data: bytes, *, allow_files: bool, fallback_title: str
+) -> LoadedDemo:
     """Load a demo from a plain JSON payload."""
     payload = _parse_session_json(data)
     session_id, turns = _validate_common(payload)
@@ -196,11 +241,12 @@ def _load_from_json(data: bytes, *, allow_files: bool) -> LoadedDemo:
         session_id=session_id,
         turns=_build_turn_pairs(turns),
         reports=(),
+        title=_title(payload, fallback_title),
         langfuse_project_url=_optional_langfuse_project_url(payload),
     )
 
 
-def _load_from_zip(data: bytes) -> LoadedDemo:
+def _load_from_zip(data: bytes, *, fallback_title: str) -> LoadedDemo:
     """Load a demo from a ZIP archive with session.json and uploaded/ entries."""
     try:
         zf = zipfile.ZipFile(BytesIO(data))
@@ -255,6 +301,7 @@ def _load_from_zip(data: bytes) -> LoadedDemo:
         session_id=session_id,
         turns=_build_turn_pairs(turns),
         reports=tuple(reports),
+        title=_title(payload, fallback_title),
         langfuse_project_url=_optional_langfuse_project_url(payload),
     )
 

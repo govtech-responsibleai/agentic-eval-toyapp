@@ -372,10 +372,8 @@ def test_langfuse_button_is_hidden_by_default_and_wired_to_both_urls() -> None:
 
     assert 'id="langfuse-session"' in html
     assert 'data-langfuse-project-url=""' in html
-    assert (
-        'data-demo-langfuse-project-url="https://gcapdev.aip.gov.sg/langfuse/'
-        'project/cmvp7ubyb0001021vboemw2i3"'
-    ) in html
+    assert "data-demos=" in html
+    assert "gcapdev.aip.gov.sg/langfuse/project/cmvp7ubyb0001021vboemw2i3" in html
 
 
 def test_configured_project_url_reaches_the_browser_shell() -> None:
@@ -391,7 +389,7 @@ def test_configured_project_url_reaches_the_browser_shell() -> None:
 def test_javascript_builds_the_langfuse_session_link_safely() -> None:
     js = _build_client().get("/static/app.js").text
 
-    assert "sessionId === demoSessionId && demoLangfuseProjectUrl" in js
+    assert "demo.langfuse_project_url" in js
     assert "/sessions/${encodeURIComponent(sessionId)}" in js
     assert "langfuseButton.hidden = langfuseSessionUrl() === null" in js
     assert 'window.open(url, "_blank", "noopener,noreferrer")' in js

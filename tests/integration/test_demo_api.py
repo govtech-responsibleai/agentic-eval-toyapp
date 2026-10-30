@@ -9,7 +9,7 @@ from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.app import create_app
 from agentic_eval_toyapp.config import AppSettings
-from agentic_eval_toyapp.demo import load_demo
+from agentic_eval_toyapp.demo import load_demos
 from agentic_eval_toyapp.models import (
     AgentTurnResult,
     AgentTurnStatus,
@@ -60,7 +60,7 @@ def demo_client() -> Generator[Client, None, None]:
 
 def test_demo_session_is_accessible_via_api(demo_client: Client) -> None:
     """The seeded demo session can be retrieved through the REST API."""
-    demo = load_demo()
+    demo = load_demos()[0]
 
     response: Response = demo_client.get(f"/api/v1/sessions/{demo.session_id}")
     assert response.status_code == 200
@@ -73,7 +73,7 @@ def test_demo_session_is_accessible_via_api(demo_client: Client) -> None:
 
 def test_demo_session_url_renders_html(demo_client: Client) -> None:
     """The stable demo URL /session/<id> renders the HTML shell."""
-    demo = load_demo()
+    demo = load_demos()[0]
 
     response: Response = demo_client.get(f"/session/{demo.session_id}")
     assert response.status_code == 200
@@ -83,16 +83,17 @@ def test_demo_session_url_renders_html(demo_client: Client) -> None:
 
 def test_demo_button_data_attribute_present(demo_client: Client) -> None:
     """The index page includes the demo session ID as a data attribute."""
-    demo = load_demo()
+    demo = load_demos()[0]
 
     response: Response = demo_client.get("/")
     assert response.status_code == 200
-    assert f'data-demo-session-id="{demo.session_id}"' in response.text
+    assert str(demo.session_id) in response.text
+    assert "data-demos=" in response.text
 
 
 def test_demo_session_messages_match_resource(demo_client: Client) -> None:
     """The seeded session messages match the bundled resource exactly."""
-    demo = load_demo()
+    demo = load_demos()[0]
 
     response: Response = demo_client.get(f"/api/v1/sessions/{demo.session_id}")
     payload = response.json()
@@ -104,7 +105,7 @@ def test_demo_session_messages_match_resource(demo_client: Client) -> None:
 
 def test_demo_session_export_works(demo_client: Client) -> None:
     """The demo session can be exported through the export endpoint."""
-    demo = load_demo()
+    demo = load_demos()[0]
 
     response: Response = demo_client.get(f"/api/v1/sessions/{demo.session_id}/export")
     assert response.status_code == 200

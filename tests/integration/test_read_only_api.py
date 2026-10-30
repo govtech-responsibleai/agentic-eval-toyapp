@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 
 from agentic_eval_toyapp.app import create_app
 from agentic_eval_toyapp.config import AppSettings
-from agentic_eval_toyapp.demo import load_demo
+from agentic_eval_toyapp.demo import load_demos
 from agentic_eval_toyapp.models import (
     AgentTurnResult,
     AgentTurnStatus,
@@ -61,7 +61,7 @@ def demo_client() -> Generator[Client, None, None]:
 
 def test_demo_session_is_read_only(demo_client: Client) -> None:
     """The seeded demo session reports read_only=True in the API response."""
-    demo = load_demo()
+    demo = load_demos()[0]
     response: Response = demo_client.get(f"/api/v1/sessions/{demo.session_id}")
     assert response.status_code == 200
     assert response.json()["read_only"] is True
@@ -76,7 +76,7 @@ def test_new_session_is_mutable(demo_client: Client) -> None:
 
 def test_message_rejected_on_read_only_session(demo_client: Client) -> None:
     """Sending a message to a read-only session returns 409."""
-    demo = load_demo()
+    demo = load_demos()[0]
     response: Response = demo_client.post(
         f"/api/v1/sessions/{demo.session_id}/messages",
         json={"message": "test message"},
@@ -87,7 +87,7 @@ def test_message_rejected_on_read_only_session(demo_client: Client) -> None:
 
 def test_upload_rejected_on_read_only_session(demo_client: Client) -> None:
     """Uploading a file to a read-only session returns 409."""
-    demo = load_demo()
+    demo = load_demos()[0]
     response: Response = demo_client.post(
         f"/api/v1/sessions/{demo.session_id}/files",
         files={"file": ("test.txt", BytesIO(b"hello"), "text/plain")},
@@ -98,7 +98,7 @@ def test_upload_rejected_on_read_only_session(demo_client: Client) -> None:
 
 def test_delete_rejected_on_read_only_session(demo_client: Client) -> None:
     """Deleting a file from a read-only session returns 409."""
-    demo = load_demo()
+    demo = load_demos()[0]
     fake_file_id = "00000000-0000-0000-0000-000000000099"
     response: Response = demo_client.delete(
         f"/api/v1/sessions/{demo.session_id}/files/{fake_file_id}",
@@ -109,14 +109,14 @@ def test_delete_rejected_on_read_only_session(demo_client: Client) -> None:
 
 def test_get_still_works_on_read_only_session(demo_client: Client) -> None:
     """GET on a read-only session still succeeds."""
-    demo = load_demo()
+    demo = load_demos()[0]
     response: Response = demo_client.get(f"/api/v1/sessions/{demo.session_id}")
     assert response.status_code == 200
 
 
 def test_export_still_works_on_read_only_session(demo_client: Client) -> None:
     """Export on a read-only session still succeeds and excludes read_only."""
-    demo = load_demo()
+    demo = load_demos()[0]
     response: Response = demo_client.get(f"/api/v1/sessions/{demo.session_id}/export")
     assert response.status_code == 200
     payload = response.json()
