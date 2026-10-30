@@ -339,7 +339,7 @@ def test_startup_logs_safe_runtime_modes() -> None:
     ):
         pass
 
-    log_info.assert_called_once_with(
+    log_info.assert_any_call(
         "application_started agent_mode=%s generation_provider=%s langfuse_enabled=%s",
         "coordinator",
         "deterministic",

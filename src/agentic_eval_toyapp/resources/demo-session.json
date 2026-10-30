@@ -1,0 +1,31 @@
+{
+  "format_version": 1,
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "turns": [
+    {
+      "role": "user",
+      "content": "What is the Northstar annual leave policy for permanent employees?"
+    },
+    {
+      "role": "assistant",
+      "content": "Permanent employees at Northstar receive **18 days** of paid annual leave per calendar year, pro-rated for mid-year joiners. Unused leave can be carried forward up to a maximum of **5 days** into the next calendar year, subject to manager approval. Leave that is not utilised or carried forward by 31 March of the following year will be forfeited.\n\nKey points:\n\n- **Eligibility**: All confirmed permanent staff.\n- **Accrual**: 1.5 days per completed month of service.\n- **Carry-forward cap**: 5 days, to be consumed by 31 March.\n- **Encashment**: Not permitted except upon resignation or termination, limited to the balance at the date of departure.\n\nRefer to *POL-HR-003 Annual Leave* for the full policy text."
+    },
+    {
+      "role": "user",
+      "content": "How does the remote work policy interact with leave? Can I work remotely instead of taking leave?"
+    },
+    {
+      "role": "assistant",
+      "content": "Remote work and annual leave serve different purposes under Northstar's policies and **cannot be used interchangeably**.\n\n**Remote work** (covered in *POL-HR-012 Flexible Work Arrangements*) allows employees to perform their regular duties from an approved location outside the office. You must remain contactable during core hours (10:00–16:00) and meet all deliverables as usual.\n\n**Annual leave** (covered in *POL-HR-003 Annual Leave*) is a period of authorised absence where you are **not expected to work**.\n\nPractical scenarios:\n\n1. **Feeling unwell but able to work**: You may request to work from home rather than take medical leave, with manager approval.\n2. **Personal errands during the day**: If the errands prevent you from fulfilling core-hours duties, you should apply for half-day or full-day leave.\n3. **Extended travel**: If you wish to work from a different city or country, you need prior approval under the remote-work policy. Simply being away from the office does not convert a working day into leave.\n\nIn short, remote work assumes you are productive and available; leave assumes you are not working. Substituting one for the other is not permitted without explicit manager and HR approval."
+    },
+    {
+      "role": "user",
+      "content": "What happens if I exceed the carry-forward limit?"
+    },
+    {
+      "role": "assistant",
+      "content": "If your carried-forward leave exceeds the **5-day cap** or is not consumed by **31 March** of the following calendar year, the excess days are **forfeited without compensation**.\n\nThe policy does not provide for exceptions, but in practice:\n\n- **HR will send a reminder** in January to employees with balances approaching the cap.\n- **Managers are expected** to encourage their teams to plan leave usage before the deadline.\n- **Exceptional circumstances** (e.g., a project-critical freeze that prevented leave) may be escalated to the Head of HR for a one-time extension, but approval is discretionary and not guaranteed.\n\nTo avoid forfeiture, it is advisable to schedule your remaining leave well before the March deadline. You can check your current balance in the Northstar self-service portal under *My Leave > Balance Summary*.\n\nRefer to *POL-HR-003 Annual Leave, Section 4.3 – Forfeiture* for the authoritative text."
+    }
+  ],
+  "files": []
+}

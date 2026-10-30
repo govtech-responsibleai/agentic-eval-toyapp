@@ -206,6 +206,31 @@ class InMemorySessionStore:
             except KeyError as error:
                 raise SessionNotFoundError from error
 
+    def seed(
+        self,
+        session_id: UUID,
+        messages: tuple[tuple[ConversationMessage, ConversationMessage], ...],
+    ) -> bool:
+        """Insert a session with a predetermined ID; return False if it exists.
+
+        This method is intended for deterministic startup seeding (e.g. a
+        bundled demo session).  It is *not* part of the ``SessionStore``
+        protocol because only startup-time code should call it.
+        """
+        with self._records_lock:
+            if session_id in self._records:
+                return False
+            turns: deque[_StoredTurn] = deque(maxlen=self._max_turns)
+            for user_msg, assistant_msg in messages:
+                turns.append(_StoredTurn(user=user_msg, assistant=assistant_msg))
+            self._records[session_id] = _SessionRecord(turns=turns)
+        return True
+
+    def unseed(self, session_id: UUID) -> None:
+        """Remove a session inserted by ``seed``; no-op if absent."""
+        with self._records_lock:
+            self._records.pop(session_id, None)
+
     @classmethod
     def _snapshot(cls, session_id: UUID, record: _SessionRecord) -> SessionResponse:
         return SessionResponse(
@@ -390,6 +415,36 @@ class RedisSessionStore:
             if created:
                 return SessionResponse(session_id=session_id, retained_turns=0)
         raise RuntimeError("could not allocate a unique session ID")
+
+    async def seed(
+        self,
+        session_id: UUID,
+        messages: tuple[tuple[ConversationMessage, ConversationMessage], ...],
+    ) -> bool:
+        """Atomically insert a session with a predetermined ID via SET NX.
+
+        Returns ``False`` when the key already exists in Redis (another
+        worker seeded it first).  Intended for deterministic startup
+        seeding; not part of the ``SessionStore`` protocol.
+        """
+        client = self._require_client()
+        stored: list[_StoredTurn] = [
+            _StoredTurn(user=user_msg, assistant=assistant_msg)
+            for user_msg, assistant_msg in messages
+        ]
+        try:
+            created = await client.set(
+                self._session_key(session_id),
+                self._serialize(stored),
+                nx=True,
+            )
+        except RedisError as error:
+            raise SessionStoreUnavailableError("Redis is unavailable") from error
+        return bool(created)
+
+    async def unseed(self, session_id: UUID) -> None:
+        """Overwrite a seeded session with an empty payload for rollback."""
+        await self._write_turns(session_id, [])
 
     async def get(self, session_id: UUID) -> SessionResponse:
         """Return one atomically read persistent session snapshot."""

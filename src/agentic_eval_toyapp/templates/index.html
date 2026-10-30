@@ -29,7 +29,7 @@
       </a>
     </header>
 
-    <main id="app" class="app-shell" data-api-base="/api/v1">
+    <main id="app" class="app-shell" data-api-base="/api/v1" data-demo-session-id="{{ demo_session_id }}">
       <section class="chat-card" aria-labelledby="chat-heading">
         <div class="session-bar">
           <div class="session-context">
@@ -42,6 +42,9 @@
             </div>
           </div>
           <div class="session-actions">
+            <button id="demo-session" class="secondary-button" type="button">
+              Demo
+            </button>
             <button id="export-session" class="secondary-button" type="button" disabled>
               Export
             </button>
