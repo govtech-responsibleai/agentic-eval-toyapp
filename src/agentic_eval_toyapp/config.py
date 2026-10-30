@@ -108,6 +108,7 @@ class AppSettings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("LANGFUSE_BASE_URL", "TOYAPP_LANGFUSE_BASE_URL"),
     )
+    langfuse_project_url: str | None = None
     langfuse_environment: str = "development"
     langfuse_flush_on_turn: bool = True
     langfuse_include_report_text: bool = False
@@ -165,6 +166,19 @@ class AppSettings(BaseSettings):
             return None
         stripped = value.strip().rstrip("/")
         return stripped or None
+
+    @field_validator("langfuse_project_url")
+    @classmethod
+    def normalise_langfuse_project_url(cls, value: str | None) -> str | None:
+        """Normalise the browsable Langfuse project URL used for session links."""
+        if value is None:
+            return None
+        stripped = value.strip().rstrip("/")
+        if not stripped:
+            return None
+        if not stripped.startswith(("http://", "https://")):
+            raise ValueError("must start with http:// or https://")
+        return stripped
 
     def require_openai_configuration(self) -> tuple[str, str]:
         """Return live credentials or raise a non-secret configuration error."""

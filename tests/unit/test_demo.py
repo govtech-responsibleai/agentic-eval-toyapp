@@ -37,6 +37,7 @@ def _minimal_json(
     format_version: int = FORMAT_VERSION,
     turns: list[dict[str, str]] | None = None,
     files: Sequence[object] | None = None,
+    metadata: object | None = None,
 ) -> bytes:
     if turns is None:
         turns = [
@@ -49,6 +50,8 @@ def _minimal_json(
         "turns": turns,
         "files": list(files) if files is not None else [],
     }
+    if metadata is not None:
+        payload["metadata"] = metadata
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
@@ -307,6 +310,46 @@ def test_load_bundled_demo() -> None:
     for user_msg, assistant_msg in demo.turns:
         assert user_msg.role is ConversationRole.USER
         assert assistant_msg.role is ConversationRole.ASSISTANT
+
+
+def test_bundled_demo_carries_its_langfuse_project_url() -> None:
+    assert load_demo().langfuse_project_url == (
+        "https://gcapdev.aip.gov.sg/langfuse/project/cmvp7ubyb0001021vboemw2i3"
+    )
+
+
+def test_langfuse_project_url_is_none_without_metadata(tmp_path: Path) -> None:
+    path = _write_tmp_json(tmp_path, _minimal_json())
+    assert load_demo(path).langfuse_project_url is None
+
+
+def test_langfuse_project_url_is_none_when_metadata_omits_it(tmp_path: Path) -> None:
+    path = _write_tmp_json(tmp_path, _minimal_json(metadata={"persona": {}}))
+    assert load_demo(path).langfuse_project_url is None
+
+
+def test_langfuse_project_url_is_read_and_trimmed(tmp_path: Path) -> None:
+    path = _write_tmp_json(
+        tmp_path,
+        _minimal_json(metadata={"langfuse_project_url": "https://lf.example/p/1/"}),
+    )
+    assert load_demo(path).langfuse_project_url == "https://lf.example/p/1"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "not-an-object",
+        {"langfuse_project_url": 5},
+        {"langfuse_project_url": "javascript:alert(1)"},
+    ],
+)
+def test_invalid_langfuse_project_url_metadata_is_rejected(
+    tmp_path: Path, metadata: object
+) -> None:
+    path = _write_tmp_json(tmp_path, _minimal_json(metadata=metadata))
+    with pytest.raises(DemoLoadError):
+        load_demo(path)
 
 
 # ---------------------------------------------------------------------------

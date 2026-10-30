@@ -29,15 +29,24 @@
       </a>
     </header>
 
-    <main id="app" class="app-shell" data-api-base="/api/v1" data-demo-session-id="{{ demo_session_id }}">
+    <main id="app" class="app-shell" data-api-base="/api/v1" data-demo-session-id="{{ demo_session_id }}" data-langfuse-project-url="{{ langfuse_project_url }}" data-demo-langfuse-project-url="{{ demo_langfuse_project_url }}">
       <section class="chat-card" aria-labelledby="chat-heading">
         <div class="session-bar">
           <div class="session-context">
             <p class="label">Current session</p>
             <div class="session-id-row">
               <code id="session-id">Creating session…</code>
-              <button id="copy-session-id" class="copy-button" type="button" aria-label="Copy session ID" disabled>
-                Copy
+              <button id="copy-session-id" class="copy-button" type="button" aria-label="Copy session ID" title="Copy session ID" disabled>
+                <svg class="copy-icon copy-icon-idle" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="9" width="11" height="11" rx="2.5"></rect>
+                  <path d="M5 15V6.5A2.5 2.5 0 0 1 7.5 4H15"></path>
+                </svg>
+                <svg class="copy-icon copy-icon-done" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M5 12.5l4.5 4.5L19 7.5"></path>
+                </svg>
+                <svg class="copy-icon copy-icon-error" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 6l12 12M18 6L6 18"></path>
+                </svg>
               </button>
             </div>
           </div>
@@ -47,6 +56,9 @@
             </button>
             <button id="export-session" class="secondary-button" type="button" disabled>
               Export
+            </button>
+            <button id="langfuse-session" class="secondary-button" type="button" hidden>
+              Open in Langfuse
             </button>
             <button id="new-session" class="secondary-button" type="button">
               New session
