@@ -4,7 +4,7 @@ This document describes the implemented architecture of the toy app. It is
 intended for contributors who need to understand how requests, retrieval,
 model actions, sessions, traces, and controlled evaluation cases fit together.
 
-For installation, configuration, and usage commands, see [README.md](README.md).
+For installation, configuration, and usage commands, see [README.md](README.md) and the guides in [docs/](docs/).
 
 ## Scope and design principles
 

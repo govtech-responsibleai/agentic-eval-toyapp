@@ -86,6 +86,30 @@ make ci             # lock check + static checks + offline tests
 Run `make ci` before requesting review. Required CI must remain deterministic,
 network-free and independent of model, embedding and tracing services.
 
+### Make targets
+
+| Command | Purpose | Network or external service |
+|---|---|---|
+| `make ci` | Run the lock check, lint, format check, strict type check, and all offline tests. | No |
+| `make test` | Run all offline tests without the static checks. | No |
+| `make test-unit` | Run unit tests only. | No |
+| `make test-live` | Exercise natural-language retrieval through standalone RAG and the default coordinator API with the pinned embedding model. | May download the embedding model |
+| `make test-model-live` | Verify live provider connectivity and structured-action support. | Live model request |
+| `make test-langfuse-live` | Export scripted RAG and multi-turn coordinator traces, then verify complete v4 observations by session ID. | Live Langfuse requests |
+| `make docker-build` | Build the non-root runtime image and cache the pinned embedding model in it. | Base images, packages, and embedding model during build |
+| `make docker-up` | Build and start the Compose service using runtime values from `.env`. | Depends on selected provider and tracing settings |
+| `make docker-down` | Stop and remove the Compose service. | No |
+| `make docker-logs` | Follow logs from the Compose service. | No |
+| `make docker-smoke` | Build the image and validate readiness plus one deterministic real-retrieval turn. | Build-time downloads only |
+| `make load-test LOAD_TEST_URL=https://...` | Run isolated session/message flows for 60 simultaneous users by default. | Calls the selected deployment |
+| `make check` | Run Ruff and strict Pyright checks. | No |
+| `make fix` | Apply safe Ruff fixes and formatting. | No |
+| `make lock-check` | Confirm `pyproject.toml` and `uv.lock` agree. | No |
+| `make clean` | Remove generated Python and test caches. | No |
+
+The offline CI path uses deterministic embeddings, providers, and trace fakes.
+Live tests are excluded unless their target is selected explicitly.
+
 ### Commit Messages
 
 Use Conventional Commits in this format:
@@ -198,9 +222,21 @@ Pull requests require code-owner review and passing CI. Squash-merge is
 preferred for focused branches; merge commits are acceptable when meaningful
 intermediate history must be retained.
 
+## Project status and support
+
+The repository is maintained as a research and evaluation demonstration with a
+**best-effort community support tier**. It prioritises controlled evaluation
+behaviour over production scalability.
+
+- Open reproducible bugs and feature requests as a
+  [GitHub issue](https://github.com/govtech-responsibleai/agentic-eval-toyapp/issues).
+- Do not report suspected vulnerabilities in a public issue. Follow
+  [SECURITY.md](SECURITY.md) instead.
+
 ## Getting Help
 
-- Application setup and usage -> [README.md](README.md)
+- Quick start -> [README.md](README.md)
+- Configuration, running, API, and deployment -> [docs/](docs/)
 - Architecture and trust boundaries -> [architecture.md](architecture.md)
 - Build commands -> `make help`
 - Bugs and feature requests -> GitHub issues
