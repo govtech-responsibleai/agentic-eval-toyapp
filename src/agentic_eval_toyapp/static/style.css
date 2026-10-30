@@ -250,6 +250,45 @@ h3 {
   gap: 0.5rem;
 }
 
+.demo-menu {
+  position: relative;
+}
+
+.demo-list {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  min-width: 16rem;
+  margin: 0;
+  padding: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--surface-solid);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  list-style: none;
+}
+
+.demo-list[hidden] {
+  display: none;
+}
+
+.demo-choice {
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border: 0;
+  border-radius: var(--radius-small);
+  color: var(--text);
+  background: transparent;
+  font-size: 0.88rem;
+  text-align: left;
+}
+
+.demo-choice:hover,
+.demo-choice:focus-visible {
+  background: var(--surface-subtle);
+}
+
 .session-bar code {
   display: block;
   overflow: hidden;

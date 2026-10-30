@@ -29,7 +29,7 @@
       </a>
     </header>
 
-    <main id="app" class="app-shell" data-api-base="/api/v1" data-demo-session-id="{{ demo_session_id }}" data-langfuse-project-url="{{ langfuse_project_url }}" data-demo-langfuse-project-url="{{ demo_langfuse_project_url }}">
+    <main id="app" class="app-shell" data-api-base="/api/v1" data-demos='{{ demos | tojson }}' data-langfuse-project-url="{{ langfuse_project_url }}">
       <section class="chat-card" aria-labelledby="chat-heading">
         <div class="session-bar">
           <div class="session-context">
@@ -51,9 +51,12 @@
             </div>
           </div>
           <div class="session-actions">
-            <button id="demo-session" class="secondary-button" type="button">
-              Demo
-            </button>
+            <div class="demo-menu">
+              <button id="demo-session" class="secondary-button" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="demo-list">
+                Demo <span aria-hidden="true">▾</span>
+              </button>
+              <ul id="demo-list" class="demo-list" role="menu" aria-label="Demo sessions" hidden></ul>
+            </div>
             <button id="export-session" class="secondary-button" type="button" disabled>
               Export
             </button>

@@ -13,6 +13,7 @@ import pytest
 from agentic_eval_toyapp.demo import (
     DemoLoadError,
     load_demo,
+    load_demos,
     seed_demo,
 )
 from agentic_eval_toyapp.models import (
@@ -304,7 +305,7 @@ def test_load_zip_missing_uploaded_entry(tmp_path: Path) -> None:
 
 def test_load_bundled_demo() -> None:
     """The committed demo-session.json resource loads without error."""
-    demo = load_demo()
+    demo = load_demos()[0]
     assert demo.session_id == UUID(DEMO_SESSION_ID)
     assert len(demo.turns) >= 1
     for user_msg, assistant_msg in demo.turns:
@@ -313,7 +314,7 @@ def test_load_bundled_demo() -> None:
 
 
 def test_bundled_demo_carries_its_langfuse_project_url() -> None:
-    assert load_demo().langfuse_project_url == (
+    assert load_demos()[0].langfuse_project_url == (
         "https://gcapdev.aip.gov.sg/langfuse/project/cmvp7ubyb0001021vboemw2i3"
     )
 
@@ -360,7 +361,7 @@ def test_invalid_langfuse_project_url_metadata_is_rejected(
 @pytest.mark.anyio
 async def test_seed_demo_fresh_inmemory() -> None:
     """Seeding into fresh in-memory stores succeeds."""
-    demo = load_demo()
+    demo = load_demos()[0]
     session_store = InMemorySessionStore()
     report_store = InMemoryReportStore(max_reports_per_session=10)
 
@@ -376,7 +377,7 @@ async def test_seed_demo_fresh_inmemory() -> None:
 @pytest.mark.anyio
 async def test_seed_demo_idempotent_inmemory() -> None:
     """Seeding the same demo twice returns False the second time."""
-    demo = load_demo()
+    demo = load_demos()[0]
     session_store = InMemorySessionStore()
     report_store = InMemoryReportStore(max_reports_per_session=10)
 
@@ -389,7 +390,7 @@ async def test_seed_demo_idempotent_inmemory() -> None:
 @pytest.mark.anyio
 async def test_seed_demo_preserves_messages() -> None:
     """Seeded session contains the expected conversation messages."""
-    demo = load_demo()
+    demo = load_demos()[0]
     session_store = InMemorySessionStore()
     report_store = InMemoryReportStore(max_reports_per_session=10)
 
@@ -472,3 +473,48 @@ async def test_seed_demo_file_id_collision(tmp_path: Path) -> None:
     # Atomicity: the session should have been rolled back
     with pytest.raises(SessionNotFoundError):
         await session_store.get(demo.session_id)
+
+
+# ---------------------------------------------------------------------------
+# load_demos — directory of demos and titles
+# ---------------------------------------------------------------------------
+
+OTHER_SESSION_ID = "11111111-2222-4333-8444-555555555555"
+
+
+def test_bundled_demos_have_titles_and_unique_ids() -> None:
+    demos = load_demos()
+    assert demos
+    assert all(demo.title.strip() for demo in demos)
+    assert len({demo.session_id for demo in demos}) == len(demos)
+
+
+def test_load_demos_orders_by_file_name(tmp_path: Path) -> None:
+    (tmp_path / "b.json").write_bytes(_minimal_json(session_id=OTHER_SESSION_ID))
+    (tmp_path / "a.json").write_bytes(_minimal_json())
+    (tmp_path / "notes.txt").write_text("ignored")
+    assert [demo.title for demo in load_demos(tmp_path)] == ["a", "b"]
+
+
+def test_load_demos_rejects_empty_directory(tmp_path: Path) -> None:
+    with pytest.raises(DemoLoadError, match="no demo sessions"):
+        load_demos(tmp_path)
+
+
+def test_load_demos_rejects_duplicate_session_ids(tmp_path: Path) -> None:
+    (tmp_path / "a.json").write_bytes(_minimal_json())
+    (tmp_path / "b.json").write_bytes(_minimal_json())
+    with pytest.raises(DemoLoadError, match="duplicate demo session_id"):
+        load_demos(tmp_path)
+
+
+def test_title_comes_from_metadata(tmp_path: Path) -> None:
+    path = _write_tmp_json(tmp_path, _minimal_json(metadata={"title": "  My demo "}))
+    assert load_demo(path).title == "My demo"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 3])
+def test_invalid_title_is_rejected(tmp_path: Path, bad: object) -> None:
+    path = _write_tmp_json(tmp_path, _minimal_json(metadata={"title": bad}))
+    with pytest.raises(DemoLoadError, match="title"):
+        load_demo(path)

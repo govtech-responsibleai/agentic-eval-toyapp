@@ -9,11 +9,11 @@ const messageInput = document.querySelector("#message-input");
 const sendButton = document.querySelector("#send-message");
 const newSessionButton = document.querySelector("#new-session");
 const demoButton = document.querySelector("#demo-session");
-const demoSessionId = app.dataset.demoSessionId || null;
+const demoList = document.querySelector("#demo-list");
+const demos = JSON.parse(app.dataset.demos || "[]");
 const exportButton = document.querySelector("#export-session");
 const langfuseButton = document.querySelector("#langfuse-session");
 const langfuseProjectUrl = app.dataset.langfuseProjectUrl || null;
-const demoLangfuseProjectUrl = app.dataset.demoLangfuseProjectUrl || null;
 const sessionIdElement = document.querySelector("#session-id");
 const copySessionIdButton = document.querySelector("#copy-session-id");
 const appStatus = document.querySelector("#app-status");
@@ -93,10 +93,9 @@ function langfuseSessionUrl() {
   if (sessionId === null) {
     return null;
   }
+  const demo = demos.find((candidate) => candidate.session_id === sessionId);
   const projectUrl =
-    sessionId === demoSessionId && demoLangfuseProjectUrl
-      ? demoLangfuseProjectUrl
-      : langfuseProjectUrl;
+    demo && demo.langfuse_project_url ? demo.langfuse_project_url : langfuseProjectUrl;
   if (!projectUrl) {
     return null;
   }
@@ -108,7 +107,10 @@ function updateControls() {
   messageInput.disabled = unavailable;
   sendButton.disabled = unavailable || fileOperationInProgress || !messageInput.value.trim();
   newSessionButton.disabled = requestInProgress || fileOperationInProgress;
-  demoButton.disabled = !demoSessionId || requestInProgress || fileOperationInProgress;
+  demoButton.disabled = demos.length === 0 || requestInProgress || fileOperationInProgress;
+  if (demoButton.disabled) {
+    closeDemoMenu();
+  }
   exportButton.disabled = sessionId === null || requestInProgress || fileOperationInProgress;
   langfuseButton.hidden = langfuseSessionUrl() === null;
   const uploadUnavailable = unavailable || fileOperationInProgress || filesPanel.hidden;
@@ -725,9 +727,40 @@ function openInLangfuse() {
 form.addEventListener("submit", submitMessage);
 newSessionButton.addEventListener("click", () => createSession());
 copySessionIdButton.addEventListener("click", copySessionId);
+function closeDemoMenu() {
+  demoList.hidden = true;
+  demoButton.setAttribute("aria-expanded", "false");
+}
+
+for (const demo of demos) {
+  const item = document.createElement("li");
+  item.setAttribute("role", "none");
+  const choice = document.createElement("button");
+  choice.type = "button";
+  choice.className = "demo-choice";
+  choice.setAttribute("role", "menuitem");
+  choice.textContent = demo.title;
+  choice.addEventListener("click", () => {
+    closeDemoMenu();
+    createSession(demo.session_id);
+  });
+  item.append(choice);
+  demoList.append(item);
+}
+
 demoButton.addEventListener("click", () => {
-  if (demoSessionId) {
-    createSession(demoSessionId);
+  const opening = demoList.hidden;
+  demoList.hidden = !opening;
+  demoButton.setAttribute("aria-expanded", String(opening));
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".demo-menu")) {
+    closeDemoMenu();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeDemoMenu();
   }
 });
 exportButton.addEventListener("click", exportSession);

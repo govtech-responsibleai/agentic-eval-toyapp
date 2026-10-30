@@ -44,7 +44,7 @@ from agentic_eval_toyapp.coordinator import (
     build_openai_coordinator_provider,
     load_coordinator_prompt,
 )
-from agentic_eval_toyapp.demo import load_demo, seed_demo
+from agentic_eval_toyapp.demo import load_demos, seed_demo
 from agentic_eval_toyapp.diagnostics import (
     classify_external_error,
     diagnostic_context,
@@ -667,7 +667,7 @@ def create_app(
         max_extracted_characters=(resolved_settings.upload_max_extracted_characters),
     )
     resolved_report_store = report_store or _build_report_store(resolved_settings)
-    demo = load_demo()
+    demos = load_demos()
     admission = TurnAdmission(resolved_settings.max_pending_turns)
     resolver: _AgentResolver
 
@@ -690,11 +690,14 @@ def create_app(
             stack.push_async_callback(resolved_store.aclose)
             await resolved_report_store.open()
             stack.push_async_callback(resolved_report_store.aclose)
-            # Seed the bundled demonstration session before the agent
-            # initialises so it is available from the first request.
-            demo_seeded = await seed_demo(demo, resolved_store, resolved_report_store)
-            if demo_seeded:
-                LOGGER.info("demo_session_seeded session_id=%s", demo.session_id)
+            # Seed the bundled demonstration sessions before the agent
+            # initialises so they are available from the first request.
+            for demo in demos:
+                demo_seeded = await seed_demo(
+                    demo, resolved_store, resolved_report_store
+                )
+                if demo_seeded:
+                    LOGGER.info("demo_session_seeded session_id=%s", demo.session_id)
             # One slot for the whole process, created on the running loop and
             # shared by every agent built from the default factory.
             resolver.bind_retrieval_limiter(CapacityLimiter(1))
@@ -774,9 +777,15 @@ def create_app(
             context={
                 "app_name": resolved_settings.app_name,
                 "browser_asset_version": BROWSER_ASSET_VERSION,
-                "demo_session_id": str(demo.session_id),
+                "demos": [
+                    {
+                        "session_id": str(demo.session_id),
+                        "title": demo.title,
+                        "langfuse_project_url": demo.langfuse_project_url or "",
+                    }
+                    for demo in demos
+                ],
                 "langfuse_project_url": resolved_settings.langfuse_project_url or "",
-                "demo_langfuse_project_url": demo.langfuse_project_url or "",
             },
             headers={
                 "Cache-Control": "no-store",
