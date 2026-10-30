@@ -50,6 +50,7 @@ class LoadedDemo:
     session_id: UUID
     turns: tuple[tuple[ConversationMessage, ConversationMessage], ...]
     reports: tuple[StoredReport, ...]
+    langfuse_project_url: str | None = None
 
 
 def load_demo(path: Path = DEMO_RESOURCE) -> LoadedDemo:
@@ -138,6 +139,26 @@ def _validate_common(payload: dict[str, object]) -> tuple[UUID, list[dict[str, s
     return session_id, turns
 
 
+def _optional_langfuse_project_url(payload: dict[str, object]) -> str | None:
+    """Read the optional ``metadata.langfuse_project_url`` override."""
+    metadata = payload.get("metadata")
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise DemoLoadError("metadata must be an object")
+    raw_url = cast(dict[str, object], metadata).get("langfuse_project_url")
+    if raw_url is None:
+        return None
+    if not isinstance(raw_url, str):
+        raise DemoLoadError("metadata.langfuse_project_url must be a string")
+    url = raw_url.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        raise DemoLoadError(
+            "metadata.langfuse_project_url must start with http:// or https://"
+        )
+    return url
+
+
 def _build_turn_pairs(
     turns: list[dict[str, str]],
 ) -> tuple[tuple[ConversationMessage, ConversationMessage], ...]:
@@ -175,6 +196,7 @@ def _load_from_json(data: bytes, *, allow_files: bool) -> LoadedDemo:
         session_id=session_id,
         turns=_build_turn_pairs(turns),
         reports=(),
+        langfuse_project_url=_optional_langfuse_project_url(payload),
     )
 
 
@@ -233,6 +255,7 @@ def _load_from_zip(data: bytes) -> LoadedDemo:
         session_id=session_id,
         turns=_build_turn_pairs(turns),
         reports=tuple(reports),
+        langfuse_project_url=_optional_langfuse_project_url(payload),
     )
 
 

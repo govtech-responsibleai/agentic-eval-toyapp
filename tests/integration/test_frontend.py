@@ -165,7 +165,10 @@ def test_root_page_escapes_configuration_and_sets_browser_guards() -> None:
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["cache-control"] == "no-store"
-    assert "https://" not in response.text
+    # Langfuse project URLs travel in data- attributes, so only loaded or linked
+    # remote resources are forbidden.
+    assert 'src="https://' not in response.text
+    assert 'href="https://' not in response.text
 
 
 def test_browser_assets_use_one_content_derived_cache_version() -> None:
@@ -353,3 +356,42 @@ process.stdout.write(markdown.render('**Bold**\\n\\n- item\\n\\n<script>alert(1)
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in output
     assert "<script>" not in output
     assert 'href="javascript:' not in output
+
+
+def _build_client_with_project_url(project_url: str | None) -> Client:
+    application = create_app(
+        AppSettings(app_name="Frontend Test Target", langfuse_project_url=project_url),
+        agent=_FrontendAgent(),
+    )
+    return cast(Client, TestClient(application))
+
+
+def test_langfuse_button_is_hidden_by_default_and_wired_to_both_urls() -> None:
+    """The shell ships the button hidden and carries the default and demo URLs."""
+    html = _build_client_with_project_url(None).get("/").text
+
+    assert 'id="langfuse-session"' in html
+    assert 'data-langfuse-project-url=""' in html
+    assert (
+        'data-demo-langfuse-project-url="https://gcapdev.aip.gov.sg/langfuse/'
+        'project/cmvp7ubyb0001021vboemw2i3"'
+    ) in html
+
+
+def test_configured_project_url_reaches_the_browser_shell() -> None:
+    html = (
+        _build_client_with_project_url("https://langfuse.example/project/abc/")
+        .get("/")
+        .text
+    )
+
+    assert 'data-langfuse-project-url="https://langfuse.example/project/abc"' in html
+
+
+def test_javascript_builds_the_langfuse_session_link_safely() -> None:
+    js = _build_client().get("/static/app.js").text
+
+    assert "sessionId === demoSessionId && demoLangfuseProjectUrl" in js
+    assert "/sessions/${encodeURIComponent(sessionId)}" in js
+    assert "langfuseButton.hidden = langfuseSessionUrl() === null" in js
+    assert 'window.open(url, "_blank", "noopener,noreferrer")' in js

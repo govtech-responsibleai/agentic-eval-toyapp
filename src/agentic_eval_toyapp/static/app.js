@@ -11,6 +11,9 @@ const newSessionButton = document.querySelector("#new-session");
 const demoButton = document.querySelector("#demo-session");
 const demoSessionId = app.dataset.demoSessionId || null;
 const exportButton = document.querySelector("#export-session");
+const langfuseButton = document.querySelector("#langfuse-session");
+const langfuseProjectUrl = app.dataset.langfuseProjectUrl || null;
+const demoLangfuseProjectUrl = app.dataset.demoLangfuseProjectUrl || null;
 const sessionIdElement = document.querySelector("#session-id");
 const copySessionIdButton = document.querySelector("#copy-session-id");
 const appStatus = document.querySelector("#app-status");
@@ -86,6 +89,20 @@ function setBusy(isBusy) {
   sendButton.textContent = isBusy ? "Working…" : "Send message";
 }
 
+function langfuseSessionUrl() {
+  if (sessionId === null) {
+    return null;
+  }
+  const projectUrl =
+    sessionId === demoSessionId && demoLangfuseProjectUrl
+      ? demoLangfuseProjectUrl
+      : langfuseProjectUrl;
+  if (!projectUrl) {
+    return null;
+  }
+  return `${projectUrl.replace(/\/+$/, "")}/sessions/${encodeURIComponent(sessionId)}`;
+}
+
 function updateControls() {
   const unavailable = sessionId === null || requestInProgress || isReadOnly;
   messageInput.disabled = unavailable;
@@ -93,6 +110,7 @@ function updateControls() {
   newSessionButton.disabled = requestInProgress || fileOperationInProgress;
   demoButton.disabled = !demoSessionId || requestInProgress || fileOperationInProgress;
   exportButton.disabled = sessionId === null || requestInProgress || fileOperationInProgress;
+  langfuseButton.hidden = langfuseSessionUrl() === null;
   const uploadUnavailable = unavailable || fileOperationInProgress || filesPanel.hidden;
   uploadControl.hidden = filesPanel.hidden;
   uploadButton.disabled = uploadUnavailable;
@@ -668,22 +686,26 @@ async function submitMessage(event) {
   }
 }
 
+function setCopyButtonState(label, stateClass = null) {
+  copySessionIdButton.setAttribute("aria-label", label);
+  copySessionIdButton.title = label;
+  copySessionIdButton.classList.remove("copy-button-copied", "copy-button-failed");
+  if (stateClass !== null) {
+    copySessionIdButton.classList.add(stateClass);
+  }
+}
+
 async function copySessionId() {
   if (sessionId === null) {
     return;
   }
   try {
     await navigator.clipboard.writeText(sessionId);
-    copySessionIdButton.textContent = "Copied";
-    copySessionIdButton.classList.add("copy-button-copied");
+    setCopyButtonState("Session ID copied", "copy-button-copied");
   } catch (_error) {
-    copySessionIdButton.textContent = "Failed";
-    copySessionIdButton.classList.add("copy-button-failed");
+    setCopyButtonState("Copy failed", "copy-button-failed");
   }
-  setTimeout(() => {
-    copySessionIdButton.textContent = "Copy";
-    copySessionIdButton.classList.remove("copy-button-copied", "copy-button-failed");
-  }, 2000);
+  setTimeout(() => setCopyButtonState("Copy session ID"), 2000);
 }
 
 function exportSession() {
@@ -691,6 +713,13 @@ function exportSession() {
     return;
   }
   window.location.href = `${apiBase}/sessions/${encodeURIComponent(sessionId)}/export`;
+}
+
+function openInLangfuse() {
+  const url = langfuseSessionUrl();
+  if (url !== null) {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
 }
 
 form.addEventListener("submit", submitMessage);
@@ -702,6 +731,7 @@ demoButton.addEventListener("click", () => {
   }
 });
 exportButton.addEventListener("click", exportSession);
+langfuseButton.addEventListener("click", openInLangfuse);
 uploadButton.addEventListener("click", () => reportUpload.click());
 reportUpload.addEventListener("change", uploadFile);
 messageInput.addEventListener("input", updateControls);

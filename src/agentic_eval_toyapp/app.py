@@ -775,6 +775,8 @@ def create_app(
                 "app_name": resolved_settings.app_name,
                 "browser_asset_version": BROWSER_ASSET_VERSION,
                 "demo_session_id": str(demo.session_id),
+                "langfuse_project_url": resolved_settings.langfuse_project_url or "",
+                "demo_langfuse_project_url": demo.langfuse_project_url or "",
             },
             headers={
                 "Cache-Control": "no-store",
