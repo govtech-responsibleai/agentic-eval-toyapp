@@ -243,6 +243,13 @@ h3 {
   min-width: 0;
 }
 
+.session-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .session-bar code {
   display: block;
   overflow: hidden;
