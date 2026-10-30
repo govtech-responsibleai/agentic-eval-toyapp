@@ -167,6 +167,7 @@ def test_session_message_and_snapshot_flow_uses_the_rag_agent() -> None:
         "session_id": session_id,
         "messages": [],
         "retained_turns": 0,
+        "read_only": False,
     }
 
     answered: Response = client.post(
@@ -259,6 +260,7 @@ def test_report_upload_is_separate_from_message_submission() -> None:
         "session_id": session_id,
         "messages": [],
         "retained_turns": 0,
+        "read_only": False,
     }
 
     answered = client.post(

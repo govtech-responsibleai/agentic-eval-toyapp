@@ -36,6 +36,10 @@ class SessionBusyError(RuntimeError):
     """Raised when another worker holds a session turn lock too long."""
 
 
+class SessionReadOnlyError(RuntimeError):
+    """Raised when a mutation is attempted on a read-only session."""
+
+
 class AgentRunner(Protocol):
     """Narrow agent interface required by the session service."""
 
@@ -105,6 +109,7 @@ class _StoredTurn:
 @dataclass(slots=True)
 class _SessionRecord:
     turns: deque[_StoredTurn]
+    read_only: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -210,6 +215,8 @@ class InMemorySessionStore:
         self,
         session_id: UUID,
         messages: tuple[tuple[ConversationMessage, ConversationMessage], ...],
+        *,
+        read_only: bool = False,
     ) -> bool:
         """Insert a session with a predetermined ID; return False if it exists.
 
@@ -223,7 +230,7 @@ class InMemorySessionStore:
             turns: deque[_StoredTurn] = deque(maxlen=self._max_turns)
             for user_msg, assistant_msg in messages:
                 turns.append(_StoredTurn(user=user_msg, assistant=assistant_msg))
-            self._records[session_id] = _SessionRecord(turns=turns)
+            self._records[session_id] = _SessionRecord(turns=turns, read_only=read_only)
         return True
 
     def unseed(self, session_id: UUID) -> None:
@@ -237,6 +244,7 @@ class InMemorySessionStore:
             session_id=session_id,
             messages=_flatten_turns(record.turns),
             retained_turns=len(record.turns),
+            read_only=record.read_only,
         )
 
 
@@ -292,7 +300,7 @@ class RedisSessionStore:
     A client passed to the constructor is owned by the caller and never closed.
     """
 
-    _PAYLOAD_VERSION = 1
+    _PAYLOAD_VERSION = 2
 
     def __init__(
         self,
@@ -420,6 +428,8 @@ class RedisSessionStore:
         self,
         session_id: UUID,
         messages: tuple[tuple[ConversationMessage, ConversationMessage], ...],
+        *,
+        read_only: bool = False,
     ) -> bool:
         """Atomically insert a session with a predetermined ID via SET NX.
 
@@ -435,7 +445,7 @@ class RedisSessionStore:
         try:
             created = await client.set(
                 self._session_key(session_id),
-                self._serialize(stored),
+                self._serialize(stored, read_only=read_only),
                 nx=True,
             )
         except RedisError as error:
@@ -448,11 +458,12 @@ class RedisSessionStore:
 
     async def get(self, session_id: UUID) -> SessionResponse:
         """Return one atomically read persistent session snapshot."""
-        turns = await self._read_turns(session_id)
+        turns, read_only = await self._read_session(session_id)
         return SessionResponse(
             session_id=session_id,
             messages=_flatten_turns(turns),
             retained_turns=len(turns),
+            read_only=read_only,
         )
 
     async def run_turn(
@@ -470,7 +481,7 @@ class RedisSessionStore:
             content=validated_request.message,
         )
         async with self._session_lock(session_id):
-            turns = await self._read_turns(session_id)
+            turns, _read_only = await self._read_session(session_id)
             result = await agent.run(
                 user.content,
                 history=_flatten_turns(turns),
@@ -491,7 +502,8 @@ class RedisSessionStore:
     def _lock_key(self, session_id: UUID) -> str:
         return f"{self._session_key(session_id)}:turn-lock"
 
-    async def _read_turns(self, session_id: UUID) -> deque[_StoredTurn]:
+    async def _read_session(self, session_id: UUID) -> tuple[deque[_StoredTurn], bool]:
+        """Read turns and read_only flag for one session."""
         client = self._require_client()
         try:
             raw = await client.get(self._session_key(session_id))
@@ -545,11 +557,14 @@ class RedisSessionStore:
                     "Redis session lock could not be released"
                 ) from error
 
-    def _serialize(self, turns: Iterable[_StoredTurn]) -> str:
+    def _serialize(
+        self, turns: Iterable[_StoredTurn], *, read_only: bool = False
+    ) -> str:
         retained = tuple(turns)[-self.max_turns :]
         return json.dumps(
             {
                 "version": self._PAYLOAD_VERSION,
+                "read_only": read_only,
                 "turns": [
                     {
                         "user": turn.user.model_dump(mode="json"),
@@ -561,14 +576,16 @@ class RedisSessionStore:
             separators=(",", ":"),
         )
 
-    def _deserialize(self, raw: str) -> deque[_StoredTurn]:
+    def _deserialize(self, raw: str) -> tuple[deque[_StoredTurn], bool]:
         try:
             decoded = cast(object, json.loads(raw))
             if not isinstance(decoded, dict):
                 raise ValueError("session payload must be an object")
             payload = cast(dict[str, object], decoded)
-            if payload.get("version") != self._PAYLOAD_VERSION:
+            version = payload.get("version")
+            if version not in (1, self._PAYLOAD_VERSION):
                 raise ValueError("unsupported session payload version")
+            read_only = bool(payload.get("read_only", False)) if version >= 2 else False
             decoded_turns = payload.get("turns")
             if not isinstance(decoded_turns, list):
                 raise ValueError("session turns must be a list")
@@ -587,7 +604,7 @@ class RedisSessionStore:
                 if assistant.role is not ConversationRole.ASSISTANT:
                     raise ValueError("session assistant message has the wrong role")
                 turns.append(_StoredTurn(user=user, assistant=assistant))
-            return turns
+            return turns, read_only
         except (TypeError, ValueError) as error:
             raise SessionStoreUnavailableError(
                 "Redis contains invalid session data"

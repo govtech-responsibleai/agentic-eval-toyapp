@@ -107,6 +107,7 @@ from agentic_eval_toyapp.sessions import (
     RedisSessionStore,
     SessionBusyError,
     SessionNotFoundError,
+    SessionReadOnlyError,
     SessionStore,
     SessionStoreUnavailableError,
 )
@@ -516,6 +517,16 @@ async def _handle_session_busy(_request: Request, _error: Exception) -> JSONResp
     )
 
 
+async def _handle_session_read_only(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    return _public_error(
+        status_code=409,
+        code="session_read_only",
+        message="This session is read-only and cannot be modified.",
+    )
+
+
 async def _handle_report_store_unavailable(
     _request: Request, _error: Exception
 ) -> JSONResponse:
@@ -720,6 +731,7 @@ def create_app(
         _handle_session_store_unavailable,
     )
     application.add_exception_handler(SessionBusyError, _handle_session_busy)
+    application.add_exception_handler(SessionReadOnlyError, _handle_session_read_only)
     application.add_exception_handler(
         AgentInitialisationError,
         _handle_agent_initialisation_error,
@@ -955,7 +967,9 @@ def create_app(
     ) -> ReportUploadResponse:
         """Validate and retain one report without invoking an agent turn."""
         with diagnostic_context(session_id):
-            await resolved_store.get(session_id)
+            session = await resolved_store.get(session_id)
+            if session.read_only:
+                raise SessionReadOnlyError
             try:
                 try:
                     content = await file.read(resolved_report_processor.max_bytes + 1)
@@ -1031,7 +1045,9 @@ def create_app(
     )
     async def delete_report(session_id: UUID, file_id: UUID) -> Response:
         """Remove one owned report without changing past conversation turns."""
-        await resolved_store.get(session_id)
+        session = await resolved_store.get(session_id)
+        if session.read_only:
+            raise SessionReadOnlyError
         await resolved_report_store.delete(session_id, file_id)
         return Response(status_code=204)
 
@@ -1052,7 +1068,9 @@ def create_app(
     ) -> SessionMessageResponse:
         """Execute and retain one bounded agent turn."""
         with diagnostic_context(session_id, turn=True):
-            await resolved_store.get(session_id)
+            session = await resolved_store.get(session_id)
+            if session.read_only:
+                raise SessionReadOnlyError
             if len(request.file_ids) > resolved_settings.upload_max_files_per_message:
                 log_failure(
                     event="message",

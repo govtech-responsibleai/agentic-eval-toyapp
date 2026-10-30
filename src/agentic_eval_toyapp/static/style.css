@@ -310,6 +310,21 @@ h3 {
   background: var(--danger-soft);
 }
 
+.read-only-banner {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-radius: var(--radius-small);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.read-only-banner[hidden] {
+  display: none;
+}
+
 .primary-button,
 .secondary-button {
   min-height: 42px;

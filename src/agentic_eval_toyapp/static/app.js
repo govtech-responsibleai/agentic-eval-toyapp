@@ -45,11 +45,14 @@ const markdownTags = [
   "hr", "li", "ol", "p", "pre", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul",
 ];
 
+const readOnlyBanner = document.querySelector("#read-only-banner");
+
 let sessionId = null;
 let requestInProgress = false;
 let fileOperationInProgress = false;
 let selectedFileId = null;
 let sessionFiles = [];
+let isReadOnly = false;
 
 class ApiRequestError extends Error {
   constructor(message, status) {
@@ -84,7 +87,7 @@ function setBusy(isBusy) {
 }
 
 function updateControls() {
-  const unavailable = sessionId === null || requestInProgress;
+  const unavailable = sessionId === null || requestInProgress || isReadOnly;
   messageInput.disabled = unavailable;
   sendButton.disabled = unavailable || fileOperationInProgress || !messageInput.value.trim();
   newSessionButton.disabled = requestInProgress || fileOperationInProgress;
@@ -98,6 +101,9 @@ function updateControls() {
     button.disabled = unavailable || fileOperationInProgress;
   }
   copySessionIdButton.disabled = sessionId === null;
+  if (readOnlyBanner) {
+    readOnlyBanner.hidden = !isReadOnly;
+  }
   app.setAttribute("aria-busy", String(requestInProgress || fileOperationInProgress));
 }
 
@@ -570,6 +576,7 @@ async function createSession(resumeId = null, replaceUrl = false) {
   setBusy(true);
   setStatus(resumeId === null ? "Creating a new session…" : "Loading session…");
   sessionId = null;
+  isReadOnly = false;
   selectedFileId = null;
   sessionFiles = [];
   filesPanel.hidden = true;
@@ -597,6 +604,7 @@ async function createSession(resumeId = null, replaceUrl = false) {
       session = await apiRequest("/sessions", { method: "POST" });
     }
     sessionId = session.session_id;
+    isReadOnly = session.read_only === true;
     updateSessionUrl(sessionId, replaceUrl || fallbackMessage !== "");
     sessionIdElement.textContent = sessionId;
     for (const message of session.messages) {
