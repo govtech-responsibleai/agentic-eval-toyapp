@@ -47,6 +47,7 @@ _SETTING_ENV_VARS = (
     "LANGFUSE_PUBLIC_KEY",
     "LANGFUSE_SECRET_KEY",
     "LANGFUSE_BASE_URL",
+    "TOYAPP_LANGFUSE_PROJECT_URL",
     "TOYAPP_LANGFUSE_ENVIRONMENT",
     "TOYAPP_LANGFUSE_FLUSH_ON_TURN",
     "TOYAPP_SESSION_MAX_TURNS",
@@ -393,3 +394,27 @@ def test_backpressure_settings_accept_one_and_read_the_environment(
     assert settings.max_pending_turns == 1
     assert settings.llm_max_requests_per_minute == 450
     assert settings.llm_max_concurrent_calls == 1
+
+
+def test_langfuse_project_url_defaults_to_unset() -> None:
+    assert AppSettings().langfuse_project_url is None
+
+
+def test_langfuse_project_url_is_trimmed_and_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "TOYAPP_LANGFUSE_PROJECT_URL", " https://langfuse.example/project/abc/ "
+    )
+
+    assert AppSettings().langfuse_project_url == "https://langfuse.example/project/abc"
+
+
+def test_blank_langfuse_project_url_is_treated_as_unset() -> None:
+    assert AppSettings(langfuse_project_url="   ").langfuse_project_url is None
+
+
+@pytest.mark.parametrize("value", ["javascript:alert(1)", "langfuse.example/project"])
+def test_langfuse_project_url_rejects_non_http_values(value: str) -> None:
+    with pytest.raises(ValueError, match="http"):
+        AppSettings(langfuse_project_url=value)

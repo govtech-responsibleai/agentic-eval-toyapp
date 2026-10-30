@@ -263,20 +263,39 @@ h3 {
 }
 
 .copy-button {
+  display: inline-grid;
   flex: 0 0 auto;
-  min-height: 28px;
-  padding: 0.22rem 0.62rem;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--text);
   background: var(--surface-solid);
-  font-size: 0.73rem;
-  font-weight: 650;
   transition:
     color 180ms ease,
     background-color 180ms ease,
     border-color 180ms ease,
     transform 120ms ease;
+}
+
+.copy-icon {
+  grid-area: 1 / 1;
+  width: 14px;
+  height: 14px;
+}
+
+.copy-icon-done,
+.copy-icon-error,
+.copy-button-copied .copy-icon-idle,
+.copy-button-failed .copy-icon-idle {
+  display: none;
+}
+
+.copy-button-copied .copy-icon-done,
+.copy-button-failed .copy-icon-error {
+  display: block;
 }
 
 .copy-button:hover:not(:disabled) {
