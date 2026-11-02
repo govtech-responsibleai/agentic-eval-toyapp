@@ -14,6 +14,8 @@ from agentic_eval_toyapp.analysis import (
     DeterministicAnalysisGenerationProvider,
     OpenAIAnalysisGenerationProvider,
     ReportAnalysisAgent,
+    _FlatAnalysisAction,  # pyright: ignore[reportPrivateUsage]
+    _FlatReportReference,  # pyright: ignore[reportPrivateUsage]
     load_analysis_prompt,
 )
 from agentic_eval_toyapp.analysis_models import (
@@ -41,6 +43,7 @@ from agentic_eval_toyapp.providers import (
     GenerationProviderError,
     InvalidGenerationActionError,
     StructuredCompletion,
+    make_object_schemas_strict,
 )
 from agentic_eval_toyapp.report_sources import SourceBlock
 
@@ -514,3 +517,107 @@ def test_analysis_prompt_explains_untrusted_input_and_grounding() -> None:
     prompt = load_analysis_prompt()
     assert "untrusted data" in prompt
     assert "exact" in prompt
+
+
+_REFERENCE_ID = "00000000-0000-4000-8000-000000000001"
+_REFERENCE_SECTION: dict[str, object] = {
+    "file_id": _REFERENCE_ID,
+    "locator_kind": "section",
+    "section": "Findings",
+    "excerpt": "Revenue rose 18%.",
+}
+_REFERENCE_FULL: dict[str, object] = {**_REFERENCE_SECTION, "page_number": None}
+_ANALYSIS_FULL: dict[str, object] = {
+    "kind": "answer",
+    "markdown": "Revenue rose.",
+    "question": None,
+    "references": [_REFERENCE_FULL],
+}
+
+
+def test_flat_report_reference_omitted_nullables_equal_explicit_nulls() -> None:
+    omitted = _FlatReportReference.model_validate(_REFERENCE_SECTION)
+    page = _FlatReportReference.model_validate(
+        {
+            "file_id": _REFERENCE_ID,
+            "locator_kind": "page",
+            "page_number": 2,
+            "excerpt": "Revenue rose 18%.",
+        }
+    )
+
+    assert omitted == _FlatReportReference.model_validate(_REFERENCE_FULL)
+    assert omitted.page_number is None
+    assert page.section is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {**_REFERENCE_SECTION, "page_number": 3},
+        {"file_id": _REFERENCE_ID, "locator_kind": "page", "excerpt": "x"},
+        {**_REFERENCE_FULL, "unexpected": 1},
+        {"locator_kind": "section", "section": "Findings", "excerpt": "x"},
+    ],
+    ids=["section-with-page", "page-without-number", "extra-key", "omitted-file-id"],
+)
+def test_flat_report_reference_still_rejects_invalid_replies(
+    reply: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        _FlatReportReference.model_validate(reply)
+
+
+def test_flat_analysis_action_omitted_nullables_equal_explicit_nulls() -> None:
+    omitted = _FlatAnalysisAction.model_validate(
+        {
+            "kind": "answer",
+            "markdown": "Revenue rose.",
+            "references": [_REFERENCE_SECTION],
+        }
+    )
+    clarify = _FlatAnalysisAction.model_validate(
+        {"kind": "clarify", "question": "Which quarter?", "references": []}
+    )
+
+    assert omitted == _FlatAnalysisAction.model_validate(_ANALYSIS_FULL)
+    assert omitted.question is None
+    assert clarify.markdown is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"kind": "answer", "markdown": "Hi", "question": "Which?", "references": []},
+        {"kind": "clarify", "question": "Which?", "markdown": "Hi", "references": []},
+        {"kind": "clarify", "question": "Which?", "references": [_REFERENCE_FULL]},
+        {**_ANALYSIS_FULL, "unexpected": 1},
+        {"kind": "answer", "markdown": "Hi"},
+    ],
+    ids=[
+        "answer-with-question",
+        "clarify-with-markdown",
+        "clarify-with-references",
+        "extra-key",
+        "omitted-list",
+    ],
+)
+def test_flat_analysis_action_still_rejects_invalid_replies(
+    reply: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        _FlatAnalysisAction.model_validate(reply)
+
+
+def test_flat_analysis_schema_required_lists_are_unchanged() -> None:
+    schema = _FlatAnalysisAction.model_json_schema()
+    make_object_schemas_strict(schema)
+
+    assert schema["required"] == ["kind", "markdown", "question", "references"]
+    assert schema["$defs"]["_FlatReportReference"]["required"] == [
+        "file_id",
+        "locator_kind",
+        "page_number",
+        "section",
+        "excerpt",
+    ]

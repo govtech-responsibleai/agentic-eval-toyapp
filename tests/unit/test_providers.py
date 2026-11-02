@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
 import agentic_eval_toyapp.providers as providers_module
 from agentic_eval_toyapp.diagnostics import CompletionDiagnostics
@@ -31,6 +32,8 @@ from agentic_eval_toyapp.providers import (
     ScriptedGenerationProvider,
     StructuredCompletion,
     StructuredCompletionClient,
+    _StructuredAgentAction,  # pyright: ignore[reportPrivateUsage]
+    make_object_schemas_strict,
 )
 
 
@@ -653,3 +656,69 @@ async def test_live_provider_logs_empty_completion_category(
 
     assert len(caplog.records) == 1
     assert "code=empty_content" in caplog.text
+
+
+_AGENT_FULL: dict[str, object] = {
+    "kind": "answer",
+    "query": None,
+    "top_k": None,
+    "question": None,
+    "markdown": "Leave is 14 days.",
+    "citations": ["chunk-1"],
+}
+
+
+def test_structured_agent_action_omitted_nullables_equal_explicit_nulls() -> None:
+    omitted = _StructuredAgentAction.model_validate(
+        {"kind": "answer", "markdown": "Leave is 14 days.", "citations": ["chunk-1"]}
+    )
+
+    assert omitted == _StructuredAgentAction.model_validate(_AGENT_FULL)
+    assert (omitted.query, omitted.top_k, omitted.question) == (None, None, None)
+
+
+def test_structured_agent_action_accepts_omitted_nullables_for_search() -> None:
+    action = _StructuredAgentAction.model_validate(
+        {"kind": "search", "query": "leave policy", "top_k": 4, "citations": []}
+    )
+
+    assert action.to_domain_action() == SearchAction(query="leave policy", top_k=4)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"kind": "search", "query": "leave", "markdown": "Hi", "citations": []},
+        {"kind": "clarify", "question": "Which?", "top_k": 3, "citations": []},
+        {"kind": "search", "query": "leave", "citations": []},
+        {**_AGENT_FULL, "unexpected": 1},
+        {"kind": "answer", "markdown": "Hi"},
+    ],
+    ids=[
+        "search-with-markdown",
+        "clarify-with-top-k",
+        "search-without-top-k",
+        "extra-key",
+        "omitted-list",
+    ],
+)
+def test_structured_agent_action_still_rejects_invalid_replies(
+    reply: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        _StructuredAgentAction.model_validate(reply)
+
+
+def test_structured_agent_action_schema_required_list_is_unchanged() -> None:
+    schema = _StructuredAgentAction.model_json_schema()
+    make_object_schemas_strict(schema)
+
+    assert schema["required"] == [
+        "kind",
+        "query",
+        "top_k",
+        "question",
+        "markdown",
+        "citations",
+    ]
+    assert schema["additionalProperties"] is False

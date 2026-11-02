@@ -9,7 +9,6 @@ from typing import Any, Protocol, cast, runtime_checkable
 from uuid import UUID
 
 from pydantic import (
-    BaseModel,
     ConfigDict,
     TypeAdapter,
     ValidationError,
@@ -59,6 +58,7 @@ from agentic_eval_toyapp.providers import (
     unpack_completion,
 )
 from agentic_eval_toyapp.reports import StoredReport
+from agentic_eval_toyapp.structured_models import NullableOmittedAsNone
 
 DEFAULT_COORDINATOR_PROMPT_PATH = Path(__file__).parent / "prompts" / "coordinator.md"
 _COORDINATOR_ACTION_ADAPTER: TypeAdapter[CoordinatorAction] = TypeAdapter(
@@ -139,7 +139,7 @@ class ShutdownableSpecialist(Protocol):
         ...
 
 
-class _StructuredCoordinatorAction(BaseModel):
+class _StructuredCoordinatorAction(NullableOmittedAsNone):
     """Gateway-friendly flat form of the coordinator decision union."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
