@@ -11,11 +11,18 @@ METIS agent evaluation metrics.
 
 ## What it does
 
-The app answers questions about a synthetic employee-policy corpus and analyses
-uploaded reports. A coordinator decides whether to answer directly, ask for
-clarification, or hand the task to a specialist. Every turn can be exported to
-Langfuse so METIS can retrieve and score it, and repository tooling can generate
-control/defect trace pairs with known expected metric outcomes.
+Agentic Eval Toy App is a small assistant you can use through a web chat page
+or call directly through a REST API. In either one you can ask questions about
+an employee-policy corpus, or upload a report and ask for a summary or its key
+findings. Behind the chat sits a coordinator that reads each message and
+decides how to handle it: it answers directly, asks you a clarifying question,
+or delegates the task to a specialist agent. There are two specialists, and each
+has one job. The policy RAG agent handles questions about the policy corpus: it
+retrieves the relevant passages first, then answers using only those and cites
+them. The report-analysis agent handles uploaded reports: it reads the whole
+document, answers from it alone, and points back to the pages or sections it
+relied on. Langfuse instrumentation is optional; when enabled, each turn is
+exported as a trace.
 
 ### How a turn flows
 
