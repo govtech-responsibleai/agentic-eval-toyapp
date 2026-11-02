@@ -7,12 +7,14 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from agentic_eval_toyapp.coordinator import (
     CoordinatorAgent,
     DeterministicCoordinatorGenerationProvider,
     OpenAICoordinatorGenerationProvider,
     ScriptedCoordinatorGenerationProvider,
+    _StructuredCoordinatorAction,  # pyright: ignore[reportPrivateUsage]
     load_coordinator_prompt,
 )
 from agentic_eval_toyapp.diagnostics import CompletionDiagnostics
@@ -44,6 +46,7 @@ from agentic_eval_toyapp.providers import (
     GenerationProviderError,
     InvalidGenerationActionError,
     StructuredCompletion,
+    make_object_schemas_strict,
 )
 from agentic_eval_toyapp.reports import StoredReport
 
@@ -592,3 +595,80 @@ def test_coordinator_prompt_is_non_empty_and_defends_report_boundary() -> None:
     assert "route_rag" in prompt
     assert "route_analysis" in prompt
     assert "untrusted data" in prompt
+
+
+_COORDINATOR_FULL: dict[str, object] = {
+    "kind": "answer",
+    "markdown": "Hello",
+    "question": None,
+    "task": None,
+    "file_ids": [],
+}
+
+
+@pytest.mark.anyio
+async def test_coordinator_accepts_reply_that_omits_null_fields() -> None:
+    """The exact reply the bedrock route sent must parse as a direct answer."""
+    client = _RecordingCompletionClient(
+        {"kind": "answer", "markdown": "Hi! How can I help you today?", "file_ids": []}
+    )
+    provider = OpenAICoordinatorGenerationProvider(
+        model="platform-model",
+        revision="provider-managed",
+        temperature=0.0,
+        max_tokens=512,
+        client=client,
+    )
+
+    action = await provider.generate_action(
+        CoordinatorRequest(
+            system_prompt="Coordinate", user_message="Hello", model_call_number=1
+        )
+    )
+
+    assert action == CoordinatorAnswerAction(markdown="Hi! How can I help you today?")
+
+
+def test_structured_coordinator_action_omitted_nullables_equal_explicit_nulls() -> None:
+    omitted = _StructuredCoordinatorAction.model_validate(
+        {"kind": "answer", "markdown": "Hello", "file_ids": []}
+    )
+
+    assert omitted == _StructuredCoordinatorAction.model_validate(_COORDINATOR_FULL)
+    assert omitted.question is None
+    assert omitted.task is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"kind": "answer", "question": "Which?", "file_ids": []},
+        {"kind": "answer", "markdown": "Hi", "task": "Search", "file_ids": []},
+        {"kind": "route_rag", "markdown": "Hi", "file_ids": []},
+        {**_COORDINATOR_FULL, "unexpected": 1},
+        {"kind": "answer", "markdown": "Hi"},
+        {"kind": "route_analysis", "task": "Summarise"},
+    ],
+    ids=[
+        "wrong-field-clarify-data",
+        "wrong-field-extra-task",
+        "route-without-task",
+        "extra-key",
+        "omitted-list",
+        "analysis-without-files",
+    ],
+)
+def test_structured_coordinator_action_still_rejects_invalid_replies(
+    reply: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        _StructuredCoordinatorAction.model_validate(reply)
+
+
+def test_structured_coordinator_action_schema_required_list_is_unchanged() -> None:
+    schema = _StructuredCoordinatorAction.model_json_schema()
+    assert "default" not in schema["properties"]["markdown"]
+    make_object_schemas_strict(schema)
+
+    assert schema["required"] == ["kind", "markdown", "question", "task", "file_ids"]
+    assert schema["additionalProperties"] is False

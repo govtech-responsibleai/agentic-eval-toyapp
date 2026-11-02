@@ -8,7 +8,7 @@ from time import perf_counter
 from typing import Protocol, cast, runtime_checkable
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import ConfigDict, ValidationError, model_validator
 
 from agentic_eval_toyapp.analysis_models import (
     AnalysisAction,
@@ -44,6 +44,7 @@ from agentic_eval_toyapp.providers import (
     unpack_completion,
 )
 from agentic_eval_toyapp.report_sources import SourceBlock, source_blocks
+from agentic_eval_toyapp.structured_models import NullableOmittedAsNone
 
 DEFAULT_ANALYSIS_PROMPT_PATH = Path(__file__).parent / "prompts" / "analysis.md"
 
@@ -74,7 +75,7 @@ class AnalysisGenerationProvider(Protocol):
     ) -> AnalysisAction: ...
 
 
-class _FlatReportReference(BaseModel):
+class _FlatReportReference(NullableOmittedAsNone):
     """Gateway-friendly form of a typed report locator."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -116,7 +117,7 @@ class _FlatReportReference(BaseModel):
         )
 
 
-class _FlatAnalysisAction(BaseModel):
+class _FlatAnalysisAction(NullableOmittedAsNone):
     """Flat strict JSON schema compatible with the model gateway."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)

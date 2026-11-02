@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import Any, Protocol, cast, runtime_checkable
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import ConfigDict, ValidationError, model_validator
 
 from agentic_eval_toyapp.diagnostics import CompletionDiagnostics, log_provider_failure
 from agentic_eval_toyapp.models import (
@@ -22,6 +22,7 @@ from agentic_eval_toyapp.models import (
     SearchAction,
 )
 from agentic_eval_toyapp.multi_agent_tracing import record_completion_usage
+from agentic_eval_toyapp.structured_models import NullableOmittedAsNone
 
 
 class GenerationProviderError(RuntimeError):
@@ -172,7 +173,7 @@ class OpenAICompatibleChatClient:
         return StructuredCompletion(content=content, diagnostics=diagnostics)
 
 
-class _StructuredAgentAction(BaseModel):
+class _StructuredAgentAction(NullableOmittedAsNone):
     """Gateway-friendly flat representation of one domain agent action."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
