@@ -213,7 +213,7 @@ def record_completion_usage(diagnostics: CompletionDiagnostics) -> None:
     if usage or metadata:
         values: dict[str, object] = {"metadata": metadata} if metadata else {}
         if usage:
-            values["usage_details"] = usage
+            values["usage"] = usage
         observation.update(**values)
 
 
