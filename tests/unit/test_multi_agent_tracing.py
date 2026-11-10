@@ -428,7 +428,7 @@ async def test_provider_usage_is_attached_only_to_active_generation() -> None:
             action.succeed(CoordinatorAnswerAction(markdown="Hi"))
     generation = client.observations[1]
     assert generation.model == "live-model"
-    assert _updated(generation, "usage_details") == [
+    assert _updated(generation, "usage") == [
         {"input": 11, "output": 7, "total": 18}
     ]
     assert _updated(generation, "metadata") == [
