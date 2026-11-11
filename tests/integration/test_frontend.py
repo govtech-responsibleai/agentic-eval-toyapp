@@ -299,7 +299,8 @@ def test_stylesheet_is_local_and_contains_responsive_layout() -> None:
     assert ".uploaded-file.is-selected" in response.text
     assert ".message-user .message-body p" in response.text
     assert "white-space: pre-wrap" in response.text
-    assert "height: calc(100dvh - 2.5rem)" in response.text
+    assert "height: 100dvh" in response.text
+    assert "grid-template-rows: minmax(0, 1fr)" in response.text
     assert ".details-scroll" in response.text
     assert "scrollbar-width: thin" in response.text
     assert ".message-body blockquote" in response.text
