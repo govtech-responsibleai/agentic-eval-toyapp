@@ -40,7 +40,10 @@ html {
 }
 
 body {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
+  min-height: 100dvh;
   margin: 0;
   color: var(--text);
   background:
@@ -93,17 +96,19 @@ p {
 }
 
 .site-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 3rem;
+  /* Same columns and gap as .app-shell so the copy aligns with the chat card. */
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(320px, 0.85fr);
+  align-items: start;
+  gap: 1.25rem;
   max-width: 1380px;
   margin: 0 auto;
-  padding: 2.75rem clamp(1.25rem, 4vw, 3.5rem) 1.75rem;
+  width: 100%;
+  padding: 1.75rem clamp(1.25rem, 4vw, 3.5rem) 1.25rem;
 }
 
 .header-copy {
-  max-width: 780px;
+  min-width: 0;
 }
 
 h1 {
@@ -152,11 +157,56 @@ h3 {
 }
 
 .intro {
-  max-width: 690px;
   margin-bottom: 0;
   color: var(--muted);
   font-size: clamp(1rem, 1.4vw, 1.12rem);
   letter-spacing: -0.012em;
+  line-height: 1.55;
+}
+
+.intro-details {
+  margin-top: 0.55rem;
+  color: var(--muted);
+}
+
+.intro-details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 6px;
+  color: var(--primary);
+  font-size: 0.9rem;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+}
+
+.intro-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.intro-details summary::after {
+  content: "";
+  width: 0.42rem;
+  height: 0.42rem;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 160ms ease;
+}
+
+.intro-details[open] summary::after {
+  transform: translateY(1px) rotate(-135deg);
+}
+
+.intro-details summary:hover {
+  text-decoration: underline;
+}
+
+.intro-details p {
+  margin: 0.5rem 0 0;
+  font-size: 0.95rem;
+  letter-spacing: -0.008em;
   line-height: 1.55;
 }
 
@@ -175,6 +225,7 @@ h3 {
   font-size: 0.88rem;
   font-weight: 600;
   text-decoration: none;
+  justify-self: end;
   -webkit-backdrop-filter: saturate(160%) blur(18px);
   backdrop-filter: saturate(160%) blur(18px);
   transition:
@@ -196,20 +247,41 @@ h3 {
   display: grid;
   grid-template-columns: minmax(0, 1.65fr) minmax(320px, 0.85fr);
   gap: 1.25rem;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
   max-width: 1380px;
   margin: 0 auto;
-  padding: 0 clamp(1.25rem, 4vw, 3.5rem) 2.5rem;
+  padding: 0 clamp(1.25rem, 4vw, 3.5rem) 1.25rem;
+}
+
+/*
+ * On desktop the page is exactly one viewport tall: the header keeps its
+ * natural height and the cards fill the remaining space, so the composer is
+ * visible without scrolling. Cards keep a minimum height, so very short
+ * windows scroll the page rather than collapsing the chat.
+ */
+@media (min-width: 901px) and (min-height: 641px) {
+  body {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .app-shell {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .chat-card,
+  .details-card {
+    min-height: 480px;
+  }
 }
 
 .chat-card,
 .details-card {
-  position: sticky;
-  top: 1.25rem;
   display: flex;
   flex-direction: column;
-  align-self: start;
-  height: calc(100vh - 2.5rem);
-  height: calc(100dvh - 2.5rem);
+  align-self: stretch;
   min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.9);
@@ -1213,9 +1285,12 @@ h3 {
   }
 
   .site-header {
-    flex-direction: column;
     gap: 1.15rem;
     padding-top: 2rem;
+  }
+
+  .api-link {
+    justify-self: start;
   }
 
   .chat-card,
