@@ -128,6 +128,8 @@ def test_settings_defaults_select_the_live_runtime_without_storing_credentials()
     assert settings.upload_max_reports_per_session == 10
     assert settings.report_load_concurrency == 4
     assert settings.session_idle_ttl_seconds == 30 * 24 * 60 * 60
+    assert settings.redis_memory_high_water == 0.75
+    assert settings.redis_memory_budget_bytes is None
 
 
 def test_settings_load_prefixed_environment_variables(
@@ -369,6 +371,9 @@ def test_settings_reject_blank_required_text(field: str) -> None:
         ("llm_max_concurrent_calls", 0),
         ("report_load_concurrency", 0),
         ("session_idle_ttl_seconds", 59),
+        ("redis_memory_high_water", 0),
+        ("redis_memory_high_water", 1.01),
+        ("redis_memory_budget_bytes", 0),
         ("max_pending_turns", -1),
     ],
 )
@@ -414,6 +419,18 @@ def test_session_idle_ttl_reads_the_environment(
     monkeypatch.setenv("TOYAPP_SESSION_IDLE_TTL_SECONDS", "60")
 
     assert AppSettings().session_idle_ttl_seconds == 60
+
+
+def test_redis_memory_settings_read_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TOYAPP_REDIS_MEMORY_HIGH_WATER", "1")
+    monkeypatch.setenv("TOYAPP_REDIS_MEMORY_BUDGET_BYTES", "268435456")
+
+    settings = AppSettings()
+
+    assert settings.redis_memory_high_water == 1.0
+    assert settings.redis_memory_budget_bytes == 268_435_456
 
 
 def test_langfuse_project_url_defaults_to_unset() -> None:

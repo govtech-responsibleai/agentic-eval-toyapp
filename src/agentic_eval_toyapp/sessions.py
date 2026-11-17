@@ -21,6 +21,14 @@ from agentic_eval_toyapp.models import (
     SessionMessageRequest,
     SessionResponse,
 )
+from agentic_eval_toyapp.redis_memory import (
+    KEY_OVERHEAD_BYTES,
+    TURN_REPLY_ALLOWANCE_BYTES,
+    BookkeepingPipeline,
+    MemoryUsage,
+    RedisMemoryClient,
+    RedisMemoryGuard,
+)
 from agentic_eval_toyapp.reports import StoredReport
 
 
@@ -260,8 +268,12 @@ class _RedisLock(Protocol):
         ...
 
 
-class _RedisClient(Protocol):
+class _RedisClient(RedisMemoryClient, Protocol):
     """Small redis.asyncio surface kept injectable for offline tests."""
+
+    def pipeline(self, transaction: bool = True) -> BookkeepingPipeline:
+        """Return a MULTI/EXEC pipeline for memory bookkeeping."""
+        ...
 
     async def ping(self) -> bool:
         """Check connectivity to the Redis service."""
@@ -308,6 +320,11 @@ class RedisSessionStore:
     Every write of a mutable session sets the idle TTL with `SET ... EX`, so
     no write path can strip it, and `get` refreshes it. Seeded read-only demo
     sessions are written without a TTL and are never refreshed.
+
+    With a memory guard, creating a session and starting a turn first make
+    room under the Redis memory budget, and every access records the session's
+    last-access time and size so idle sessions can be evicted. Demo sessions
+    are never tracked, so they are never evicted.
     """
 
     _PAYLOAD_VERSION = 2
@@ -322,6 +339,7 @@ class RedisSessionStore:
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
         idle_ttl_seconds: int = 2_592_000,
+        memory_guard: RedisMemoryGuard | None = None,
         id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         if (client is None) == (client_factory is None):
@@ -345,6 +363,7 @@ class RedisSessionStore:
         self._lock_timeout_seconds = lock_timeout_seconds
         self._lock_blocking_timeout_seconds = lock_blocking_timeout_seconds
         self._idle_ttl_seconds = idle_ttl_seconds
+        self._memory_guard = memory_guard
         self._id_factory = id_factory
 
     @classmethod
@@ -358,6 +377,7 @@ class RedisSessionStore:
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
         idle_ttl_seconds: int = 2_592_000,
+        memory_guard: RedisMemoryGuard | None = None,
     ) -> "RedisSessionStore":
         """Describe a Redis client that `open()` creates on the running loop."""
 
@@ -377,6 +397,7 @@ class RedisSessionStore:
             lock_timeout_seconds=lock_timeout_seconds,
             lock_blocking_timeout_seconds=lock_blocking_timeout_seconds,
             idle_ttl_seconds=idle_ttl_seconds,
+            memory_guard=memory_guard,
         )
 
     @property
@@ -426,18 +447,24 @@ class RedisSessionStore:
     async def create(self) -> SessionResponse:
         """Create an empty persistent session using an atomic unique-key claim."""
         client = self._require_client()
+        payload = self._serialize(())
+        if self._memory_guard is not None:
+            await self._memory_guard.ensure_room(
+                client, incoming_bytes=len(payload) + KEY_OVERHEAD_BYTES
+            )
         for _ in range(100):
             session_id = self._id_factory()
             try:
                 created = await client.set(
                     self._session_key(session_id),
-                    self._serialize(()),
+                    payload,
                     nx=True,
                     ex=self._idle_ttl_seconds,
                 )
             except RedisError as error:
                 raise SessionStoreUnavailableError("Redis is unavailable") from error
             if created:
+                await self._track(session_id, session_bytes=len(payload))
                 return SessionResponse(session_id=session_id, retained_turns=0)
         raise RuntimeError("could not allocate a unique session ID")
 
@@ -478,6 +505,7 @@ class RedisSessionStore:
         turns, read_only = await self._read_session(session_id)
         if not read_only:
             await self._refresh_ttl(session_id)
+            await self._track(session_id)
         return SessionResponse(
             session_id=session_id,
             messages=_flatten_turns(turns),
@@ -501,6 +529,15 @@ class RedisSessionStore:
         )
         async with self._session_lock(session_id):
             turns, _read_only = await self._read_session(session_id)
+            if self._memory_guard is not None:
+                # Admit the turn before any model call or trace exists. The
+                # reply size is unknown until the agent runs, so reserve room.
+                await self._memory_guard.ensure_room(
+                    self._require_client(),
+                    incoming_bytes=len(user.model_dump_json())
+                    + TURN_REPLY_ALLOWANCE_BYTES,
+                    current_session=session_id,
+                )
             result = await agent.run(
                 user.content,
                 history=_flatten_turns(turns),
@@ -538,16 +575,43 @@ class RedisSessionStore:
         self, session_id: UUID, turns: Iterable[_StoredTurn]
     ) -> None:
         client = self._require_client()
+        payload = self._serialize(turns)
         try:
             stored = await client.set(
                 self._session_key(session_id),
-                self._serialize(turns),
+                payload,
                 ex=self._idle_ttl_seconds,
             )
         except RedisError as error:
             raise SessionStoreUnavailableError("Redis is unavailable") from error
         if not stored:
             raise SessionStoreUnavailableError("Redis did not persist the session")
+        await self._track(session_id, session_bytes=len(payload))
+
+    async def memory_usage(self) -> MemoryUsage | None:
+        """Return Redis memory use against the budget, or None without a guard."""
+        if self._memory_guard is None:
+            return None
+        return await self._memory_guard.usage(self._require_client())
+
+    async def _track(
+        self, session_id: UUID, *, session_bytes: int | None = None
+    ) -> None:
+        """Record last access, and size when known, for idle eviction."""
+        if self._memory_guard is None:
+            return
+        pipeline = self._require_client().pipeline(transaction=True)
+        self._memory_guard.track(
+            pipeline,
+            session_id,
+            session_bytes=(
+                None if session_bytes is None else session_bytes + KEY_OVERHEAD_BYTES
+            ),
+        )
+        try:
+            await pipeline.execute()
+        except RedisError as error:
+            raise SessionStoreUnavailableError("Redis is unavailable") from error
 
     async def _refresh_ttl(self, session_id: UUID) -> None:
         # A key that expired since the read is not recreated; the next request

@@ -80,6 +80,12 @@ from agentic_eval_toyapp.providers import (
     OpenAICompatibleChatClient,
     StructuredCompletionClient,
 )
+from agentic_eval_toyapp.redis_memory import (
+    RedisMemoryGuard,
+    StorageBudgetUnavailableError,
+    StorageCapacityError,
+    StorageUnavailableError,
+)
 from agentic_eval_toyapp.reports import (
     InMemoryReportStore,
     RedisReportStore,
@@ -444,7 +450,18 @@ def _build_default_agent(
     return _build_rag_agent(settings, retrieval_limiter)
 
 
-def _build_session_store(settings: AppSettings) -> SessionStore:
+def _build_memory_guard(settings: AppSettings) -> RedisMemoryGuard:
+    """Construct the stateless guard that keeps Redis under its memory budget."""
+    return RedisMemoryGuard(
+        key_prefix=settings.redis_key_prefix,
+        high_water=settings.redis_memory_high_water,
+        budget_bytes=settings.redis_memory_budget_bytes,
+    )
+
+
+def _build_session_store(
+    settings: AppSettings, memory_guard: RedisMemoryGuard
+) -> SessionStore:
     """Construct the explicitly selected conversation-session backend."""
     if settings.session_store_backend is SessionStoreBackend.MEMORY:
         return InMemorySessionStore(max_turns=settings.session_max_turns)
@@ -456,10 +473,13 @@ def _build_session_store(settings: AppSettings) -> SessionStore:
         lock_timeout_seconds=settings.redis_lock_timeout_seconds,
         lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
         idle_ttl_seconds=settings.session_idle_ttl_seconds,
+        memory_guard=memory_guard,
     )
 
 
-def _build_report_store(settings: AppSettings) -> ReportStore:
+def _build_report_store(
+    settings: AppSettings, memory_guard: RedisMemoryGuard
+) -> ReportStore:
     """Construct the report backend selected with conversation persistence."""
     if settings.session_store_backend is SessionStoreBackend.MEMORY:
         return InMemoryReportStore(
@@ -474,6 +494,7 @@ def _build_report_store(settings: AppSettings) -> ReportStore:
         lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
         report_load_concurrency=settings.report_load_concurrency,
         idle_ttl_seconds=settings.session_idle_ttl_seconds,
+        memory_guard=memory_guard,
     )
 
 
@@ -547,6 +568,28 @@ async def _handle_report_store_busy(
         status_code=409,
         code="report_store_busy",
         message="Another request is currently updating this session's reports.",
+    )
+
+
+async def _handle_storage_capacity(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    # Same public shape as turn admission: the service is at capacity, not down.
+    return _public_error(
+        status_code=503,
+        code="server_busy",
+        message="The service is at capacity. Retry the request shortly.",
+        headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+    )
+
+
+async def _handle_storage_unavailable(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    return _public_error(
+        status_code=503,
+        code="session_store_unavailable",
+        message="The conversation session store is temporarily unavailable.",
     )
 
 
@@ -663,13 +706,18 @@ def create_app(
 ) -> FastAPI:
     """Construct an application with explicit, injectable dependencies."""
     resolved_settings = settings or get_settings()
-    resolved_store = session_store or _build_session_store(resolved_settings)
+    memory_guard = _build_memory_guard(resolved_settings)
+    resolved_store = session_store or _build_session_store(
+        resolved_settings, memory_guard
+    )
     resolved_report_processor = report_processor or ReportProcessor(
         max_bytes=resolved_settings.upload_max_bytes,
         max_pdf_pages=resolved_settings.upload_max_pdf_pages,
         max_extracted_characters=(resolved_settings.upload_max_extracted_characters),
     )
-    resolved_report_store = report_store or _build_report_store(resolved_settings)
+    resolved_report_store = report_store or _build_report_store(
+        resolved_settings, memory_guard
+    )
     demos = load_demos()
 
     async def access_session(session_id: UUID) -> SessionResponse:
@@ -751,6 +799,10 @@ def create_app(
         _handle_agent_initialisation_error,
     )
     application.add_exception_handler(ServerBusyError, _handle_server_busy)
+    application.add_exception_handler(StorageCapacityError, _handle_storage_capacity)
+    application.add_exception_handler(
+        StorageUnavailableError, _handle_storage_unavailable
+    )
     application.add_exception_handler(TraceExportError, _handle_trace_export_error)
     application.add_exception_handler(
         RequestValidationError,
@@ -865,6 +917,32 @@ def create_app(
                 status=CheckStatus.FAIL,
                 detail="configured report store is unavailable",
             )
+        memory_check: ReadinessCheck | None = None
+        if session_store_ready and isinstance(resolved_store, RedisSessionStore):
+            try:
+                usage = await resolved_store.memory_usage()
+            except StorageUnavailableError as error:
+                session_store_ready = False
+                memory_check = ReadinessCheck(
+                    name="redis_memory_budget",
+                    status=CheckStatus.FAIL,
+                    detail=(
+                        "Redis maxmemory is 0 or unreadable; set "
+                        "TOYAPP_REDIS_MEMORY_BUDGET_BYTES"
+                        if isinstance(error, StorageBudgetUnavailableError)
+                        else "Redis memory usage could not be read"
+                    ),
+                )
+            else:
+                if usage is not None:
+                    memory_check = ReadinessCheck(
+                        name="redis_memory_budget",
+                        status=CheckStatus.PASS,
+                        detail=(
+                            f"budget {usage.budget_bytes} bytes from {usage.source}; "
+                            f"{usage.used_bytes} bytes used"
+                        ),
+                    )
         checks = [
             ReadinessCheck(
                 name="configuration",
@@ -872,6 +950,7 @@ def create_app(
                 detail="service settings validated",
             ),
             session_store_check,
+            *(() if memory_check is None else (memory_check,)),
             report_store_check,
             ReadinessCheck(
                 name="langfuse_tracing",
@@ -1027,7 +1106,12 @@ def create_app(
                     error=error,
                 )
                 raise
-            except (ReportStoreUnavailableError, ReportStoreBusyError):
+            except (
+                ReportStoreUnavailableError,
+                ReportStoreBusyError,
+                StorageCapacityError,
+                StorageUnavailableError,
+            ):
                 raise
             except Exception as error:
                 log_failure(

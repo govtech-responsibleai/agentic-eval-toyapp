@@ -5,7 +5,7 @@ import traceback
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 from uuid import UUID
 
 import pytest
@@ -228,6 +228,7 @@ def test_redis_backend_configuration_builds_the_persistent_stores() -> None:
         lock_timeout_seconds=1_800.0,
         lock_blocking_timeout_seconds=10.0,
         idle_ttl_seconds=2_592_000,
+        memory_guard=ANY,
     )
     report_from_url.assert_called_once_with(
         "rediss://user:private@redis.example:6380/0",
@@ -238,7 +239,11 @@ def test_redis_backend_configuration_builds_the_persistent_stores() -> None:
         lock_blocking_timeout_seconds=10.0,
         report_load_concurrency=4,
         idle_ttl_seconds=2_592_000,
+        memory_guard=ANY,
     )
+    session_guard = session_from_url.call_args.kwargs["memory_guard"]
+    assert report_from_url.call_args.kwargs["memory_guard"] is session_guard
+    assert session_guard.lru_key == "test-prefix:sessions:lru"
 
 
 def test_startup_initialises_the_agent_factory_exactly_once() -> None:

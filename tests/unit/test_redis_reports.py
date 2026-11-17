@@ -5,15 +5,17 @@ import base64
 import hashlib
 import json
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 from anyio import to_thread
 from redis.exceptions import ConnectionError
+from tests.support.fake_redis_memory import FakeMemoryState
 
 from agentic_eval_toyapp.models import ReportMediaType, ReportUploadResponse
+from agentic_eval_toyapp.redis_memory import RedisMemoryGuard, StorageCapacityError
 from agentic_eval_toyapp.reports import (
     ExtractedPage,
     ProcessedReport,
@@ -91,6 +93,7 @@ class _FakePipeline:
             raise AssertionError("report writes must use a MULTI/EXEC pipeline")
         self._client = client
         self._commands: list[tuple[str, tuple[str, ...], int | None]] = []
+        self._bookkeeping: list[tuple[str, tuple[object, ...]]] = []
 
     def set(self, name: str, value: str, *, ex: int | None = None) -> object:
         self._commands.append(("set", (name, value), ex))
@@ -98,6 +101,18 @@ class _FakePipeline:
 
     def expire(self, name: str, time: int) -> object:
         self._commands.append(("expire", (name,), time))
+        return self
+
+    def zadd(self, name: str, mapping: Mapping[str, float]) -> object:
+        self._bookkeeping.append(("zadd", (name, dict(mapping))))
+        return self
+
+    def hset(self, name: str, key: str, value: str) -> object:
+        self._bookkeeping.append(("hset", (name, key, value)))
+        return self
+
+    def hdel(self, name: str, *keys: str) -> object:
+        self._bookkeeping.append(("hdel", (name, *keys)))
         return self
 
     def delete(self, *names: str) -> object:
@@ -135,6 +150,8 @@ class _FakePipeline:
                     del data[name]
                     ttls.pop(name, None)
                 results.append(len(removed))
+        for command, arguments in self._bookkeeping:
+            results.append(self._client.memory.apply(command, arguments))
         return results
 
 
@@ -142,6 +159,7 @@ class _FakeRedisClient:
     def __init__(self) -> None:
         self.data: dict[str, str | bytes] = {}
         self.ttls: dict[str, int] = {}
+        self.memory = FakeMemoryState()
         self.reads: list[str] = []
         self.available = True
         self.lock_available = True
@@ -172,6 +190,14 @@ class _FakeRedisClient:
 
     def pipeline(self, transaction: bool = True) -> _FakePipeline:
         return _FakePipeline(self, transaction=transaction)
+
+    async def info(self, section: str) -> Mapping[str, object]:
+        self.ensure_available()
+        return await self.memory.info(section)
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> object:
+        self.ensure_available()
+        return await self.memory.eval(script, numkeys, *keys_and_args)
 
     def lock(
         self,
@@ -962,3 +988,86 @@ async def test_seeded_demo_reports_have_no_ttl() -> None:
 
     assert len(client.data) == 2
     assert client.ttls == {}
+
+
+def _guarded_store(
+    client: _FakeRedisClient, *, budget: int, max_reports: int = 3
+) -> RedisReportStore:
+    client.memory.maxmemory = budget
+    return RedisReportStore(
+        client,
+        max_reports_per_session=max_reports,
+        idle_ttl_seconds=_TTL,
+        memory_guard=RedisMemoryGuard(high_water=1.0, clock=lambda: 7.0),
+    )
+
+
+@pytest.mark.anyio
+async def test_guarded_add_and_delete_keep_the_report_size_current() -> None:
+    client = _FakeRedisClient()
+    store = _guarded_store(client, budget=1 << 30)
+    session_id = uuid4()
+    field = f"{session_id}:reports"
+
+    first = await store.add(session_id, _processed_report("first"))
+    one = int(client.memory.sizes[field])
+    second = await store.add(session_id, _pdf_report())
+    two = int(client.memory.sizes[field])
+    assert two > one > len(client.data[_content_key(session_id, first.file_id)])
+    assert client.memory.lru == {str(session_id): 7.0}
+
+    await store.delete(session_id, second.file_id)
+    assert int(client.memory.sizes[field]) == one
+    await store.delete(session_id, first.file_id)
+    assert field not in client.memory.sizes
+
+
+@pytest.mark.anyio
+async def test_guarded_add_refuses_a_report_larger_than_the_budget() -> None:
+    client = _FakeRedisClient()
+    store = _guarded_store(client, budget=600)
+    session_id = uuid4()
+
+    with pytest.raises(StorageCapacityError):
+        await store.add(session_id, _processed_report("x" * 1_000))
+
+    assert client.data == {}
+    assert client.memory.eval_calls == []
+    assert [lock.acquired for lock in client.locks] == [False]
+
+
+@pytest.mark.anyio
+async def test_guarded_add_evicts_others_but_never_its_own_session() -> None:
+    client = _FakeRedisClient()
+    store = _guarded_store(client, budget=1 << 20)
+    session_id = uuid4()
+    client.memory.used_memory = 1 << 20
+
+    def evict(_args: tuple[str, ...]) -> object:
+        client.memory.used_memory = 0
+        return ["idle", "memory_budget", "9000", "1"]
+
+    client.memory.evict = evict
+    await store.add(session_id, _processed_report("first"))
+
+    (call,) = client.memory.eval_calls
+    assert call[:3] == (
+        f"{_PREFIX}:sessions:lru",
+        f"{_PREFIX}:sessions:bytes",
+        _PREFIX,
+    )
+    assert call[-1] == str(session_id)
+
+
+@pytest.mark.anyio
+async def test_guarded_seed_does_not_track_demo_reports() -> None:
+    client = _FakeRedisClient()
+    store = _guarded_store(client, budget=1 << 30)
+    session_id = uuid4()
+
+    await store.seed(
+        session_id, (_stored(session_id, _processed_report("demo"), UUID(int=3)),)
+    )
+
+    assert client.memory.lru == {}
+    assert client.memory.sizes == {}

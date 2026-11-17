@@ -4,7 +4,7 @@ import base64
 import binascii
 import hashlib
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -21,6 +21,12 @@ from redis.asyncio import Redis
 from redis.exceptions import LockError, RedisError
 
 from agentic_eval_toyapp.models import ReportMediaType, ReportUploadResponse
+from agentic_eval_toyapp.redis_memory import (
+    KEY_OVERHEAD_BYTES,
+    RedisMemoryClient,
+    RedisMemoryGuard,
+    estimate_report_bytes,
+)
 
 
 class UnsupportedReportTypeError(ValueError):
@@ -441,6 +447,18 @@ class _RedisReportLock(Protocol):
 class _RedisReportPipeline(Protocol):
     """Subset of a redis.asyncio MULTI/EXEC pipeline; commands buffer locally."""
 
+    def zadd(self, name: str, mapping: Mapping[str, float]) -> object:
+        """Queue a sorted-set score update."""
+        ...
+
+    def hset(self, name: str, key: str, value: str) -> object:
+        """Queue one hash field write."""
+        ...
+
+    def hdel(self, name: str, *keys: str) -> object:
+        """Queue removal of hash fields."""
+        ...
+
     def set(self, name: str, value: str, *, ex: int | None = None) -> object:
         """Queue one string write, with an expiry in seconds when given."""
         ...
@@ -458,7 +476,7 @@ class _RedisReportPipeline(Protocol):
         ...
 
 
-class _RedisReportClient(Protocol):
+class _RedisReportClient(RedisMemoryClient, Protocol):
     """Small redis.asyncio surface kept injectable for offline tests."""
 
     async def ping(self) -> bool:
@@ -556,6 +574,7 @@ class RedisReportStore:
         lock_blocking_timeout_seconds: float = 10.0,
         report_load_concurrency: int = 4,
         idle_ttl_seconds: int = 2_592_000,
+        memory_guard: RedisMemoryGuard | None = None,
         id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         if (client is None) == (client_factory is None):
@@ -581,6 +600,7 @@ class RedisReportStore:
         self._lock_timeout_seconds = lock_timeout_seconds
         self._lock_blocking_timeout_seconds = lock_blocking_timeout_seconds
         self._idle_ttl_seconds = idle_ttl_seconds
+        self._memory_guard = memory_guard
         self._id_factory = id_factory
         # anyio's semaphore binds to an event loop on first use, so building it
         # here does not require a running loop.
@@ -598,6 +618,7 @@ class RedisReportStore:
         lock_blocking_timeout_seconds: float = 10.0,
         report_load_concurrency: int = 4,
         idle_ttl_seconds: int = 2_592_000,
+        memory_guard: RedisMemoryGuard | None = None,
     ) -> "RedisReportStore":
         """Describe a Redis client that `open()` creates on the running loop."""
 
@@ -618,6 +639,7 @@ class RedisReportStore:
             lock_blocking_timeout_seconds=lock_blocking_timeout_seconds,
             report_load_concurrency=report_load_concurrency,
             idle_ttl_seconds=idle_ttl_seconds,
+            memory_guard=memory_guard,
         )
 
     @property
@@ -700,6 +722,16 @@ class RedisReportStore:
                 pages=report.pages,
             )
             content = await to_thread.run_sync(self._serialize_content, stored)
+            updated_index = (*index, metadata)
+            index_payload = self._serialize_index(updated_index)
+            if self._memory_guard is not None:
+                await self._memory_guard.ensure_room(
+                    self._require_client(),
+                    incoming_bytes=len(content)
+                    + len(index_payload)
+                    + KEY_OVERHEAD_BYTES,
+                    current_session=session_id,
+                )
             pipeline = self._require_client().pipeline(transaction=True)
             pipeline.set(
                 self._content_key(session_id, file_id),
@@ -708,9 +740,10 @@ class RedisReportStore:
             )
             pipeline.set(
                 self._index_key(session_id),
-                self._serialize_index((*index, metadata)),
+                index_payload,
                 ex=self._idle_ttl_seconds,
             )
+            self._track_size(pipeline, session_id, updated_index)
             await self._execute(pipeline)
             return metadata
 
@@ -739,6 +772,7 @@ class RedisReportStore:
                 )
             else:
                 pipeline.delete(self._index_key(session_id))
+            self._track_size(pipeline, session_id, retained)
             await self._execute(pipeline)
 
     async def resolve(
@@ -809,6 +843,30 @@ class RedisReportStore:
             self._serialize_index(tuple(report.metadata for report in reports)),
         )
         await self._execute(pipeline)
+
+    def _track_size(
+        self,
+        pipeline: _RedisReportPipeline,
+        session_id: UUID,
+        index: tuple[ReportUploadResponse, ...],
+    ) -> None:
+        """Queue the session's estimated report size, or its removal when empty."""
+        guard = self._memory_guard
+        if guard is None:
+            return
+        if not index:
+            guard.forget_reports(pipeline, session_id)
+            return
+        total = KEY_OVERHEAD_BYTES + len(self._serialize_index(index))
+        total += sum(
+            estimate_report_bytes(
+                byte_size=metadata.byte_size,
+                extracted_text_length=metadata.extracted_text_length,
+                has_pages=metadata.media_type is ReportMediaType.PDF,
+            )
+            for metadata in index
+        )
+        guard.track(pipeline, session_id, reports_bytes=total)
 
     def _index_key(self, session_id: UUID) -> str:
         return f"{self._key_prefix}:reports:{session_id}:index"

@@ -120,6 +120,8 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("REDIS_URL", "TOYAPP_REDIS_URL"),
     )
     redis_key_prefix: str = "agentic-eval-toyapp"
+    redis_memory_high_water: float = Field(default=0.75, gt=0.0, le=1.0)
+    redis_memory_budget_bytes: int | None = Field(default=None, ge=1)
     redis_socket_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
     redis_lock_timeout_seconds: float = Field(default=1_800.0, gt=0.0, le=3_600.0)
     redis_lock_blocking_timeout_seconds: float = Field(
