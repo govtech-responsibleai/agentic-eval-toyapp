@@ -471,6 +471,7 @@ def _build_report_store(settings: AppSettings) -> ReportStore:
         socket_timeout_seconds=settings.redis_socket_timeout_seconds,
         lock_timeout_seconds=settings.redis_lock_timeout_seconds,
         lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
+        report_load_concurrency=settings.report_load_concurrency,
     )
 
 

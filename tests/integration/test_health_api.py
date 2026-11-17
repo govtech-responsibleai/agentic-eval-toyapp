@@ -235,6 +235,7 @@ def test_redis_backend_configuration_builds_the_persistent_stores() -> None:
         socket_timeout_seconds=5.0,
         lock_timeout_seconds=1_800.0,
         lock_blocking_timeout_seconds=10.0,
+        report_load_concurrency=4,
     )
 
 

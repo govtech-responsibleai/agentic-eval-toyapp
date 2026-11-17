@@ -3,7 +3,6 @@
 import base64
 import binascii
 import hashlib
-import json
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -11,11 +10,12 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import PurePath
 from threading import Lock
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 import anyio
 from anyio import to_thread
+from pydantic import BaseModel, ConfigDict, Field
 from pypdf import PdfReader
 from redis.asyncio import Redis
 from redis.exceptions import LockError, RedisError
@@ -430,6 +430,22 @@ class _RedisReportLock(Protocol):
         ...
 
 
+class _RedisReportPipeline(Protocol):
+    """Subset of a redis.asyncio MULTI/EXEC pipeline; commands buffer locally."""
+
+    def set(self, name: str, value: str) -> object:
+        """Queue one string write."""
+        ...
+
+    def delete(self, *names: str) -> object:
+        """Queue removal of the named keys."""
+        ...
+
+    async def execute(self) -> list[object]:
+        """Apply every queued command atomically, or raise and apply none."""
+        ...
+
+
 class _RedisReportClient(Protocol):
     """Small redis.asyncio surface kept injectable for offline tests."""
 
@@ -437,12 +453,12 @@ class _RedisReportClient(Protocol):
         """Check connectivity to the Redis service."""
         ...
 
-    async def set(self, name: str, value: str) -> object:
-        """Persist one serialized session report collection."""
+    async def get(self, name: str) -> str | bytes | None:
+        """Return one serialized report index or report content value."""
         ...
 
-    async def get(self, name: str) -> str | bytes | None:
-        """Return one serialized session report collection."""
+    def pipeline(self, transaction: bool = True) -> _RedisReportPipeline:
+        """Return a pipeline that wraps its commands in MULTI/EXEC."""
         ...
 
     def lock(
@@ -460,17 +476,58 @@ class _RedisReportClient(Protocol):
         ...
 
 
-class RedisReportStore:
-    """Persist original bytes, metadata, and extracted report text in Redis.
+_REPORT_PAYLOAD_VERSION = 2
 
-    Redis calls and lock waits are awaited on the event loop. Only the pure
-    JSON and base64 work on payloads that can reach several megabytes is moved
-    to a worker thread, so it neither stalls the loop nor touches Redis.
+
+class _StoredPagePayload(BaseModel):
+    """One persisted PDF page; strict so booleans are not accepted as numbers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    page_number: int = Field(ge=1)
+    text: str = Field(min_length=1)
+
+
+class _ReportIndexPayload(BaseModel):
+    """Per-session report metadata in upload order, without any content."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal[2]
+    reports: tuple[ReportUploadResponse, ...]
+
+
+class _ReportContentPayload(BaseModel):
+    """One report's original bytes and extracted text, keyed by its file ID."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal[2]
+    file_id: UUID
+    original_content_base64: str
+    extracted_text: str = Field(min_length=1)
+    pages: tuple[_StoredPagePayload, ...]
+
+
+class RedisReportStore:
+    """Persist report metadata and each report's content under separate keys.
+
+    `<prefix>:reports:<session>:index` holds every report's public metadata in
+    upload order and decides ownership. `<prefix>:report:<session>:<file>`
+    holds one report's original bytes, extracted text and pages. Listing reads
+    only the index, and resolving reads only the requested content keys, so a
+    request never loads reports it does not use. Mutations hold a per-session
+    distributed lock and write their keys in one MULTI/EXEC transaction.
+
+    Redis calls and lock waits are awaited on the event loop. Only the JSON
+    and base64 work on content values, which can reach several megabytes, runs
+    in a worker thread. Content loads are bounded by `report_load_concurrency`
+    so concurrent requests cannot hold unbounded report content in memory.
     A store built by `from_url` creates its loop-bound client in `open()` and
     closes it in `aclose()`; a client passed in is owned by the caller.
     """
 
-    _PAYLOAD_VERSION = 1
+    _PAYLOAD_VERSION = _REPORT_PAYLOAD_VERSION
 
     def __init__(
         self,
@@ -481,6 +538,7 @@ class RedisReportStore:
         key_prefix: str = "agentic-eval-toyapp",
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
+        report_load_concurrency: int = 4,
         id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         if (client is None) == (client_factory is None):
@@ -494,6 +552,8 @@ class RedisReportStore:
             raise ValueError("lock_timeout_seconds must be positive")
         if lock_blocking_timeout_seconds < 0:
             raise ValueError("lock_blocking_timeout_seconds must not be negative")
+        if report_load_concurrency < 1:
+            raise ValueError("report_load_concurrency must be at least 1")
         self._client = client
         self._client_factory = client_factory
         self._owns_client = False
@@ -502,6 +562,9 @@ class RedisReportStore:
         self._lock_timeout_seconds = lock_timeout_seconds
         self._lock_blocking_timeout_seconds = lock_blocking_timeout_seconds
         self._id_factory = id_factory
+        # anyio's semaphore binds to an event loop on first use, so building it
+        # here does not require a running loop.
+        self._load_semaphore = anyio.Semaphore(report_load_concurrency)
 
     @classmethod
     def from_url(
@@ -513,6 +576,7 @@ class RedisReportStore:
         socket_timeout_seconds: float = 5.0,
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
+        report_load_concurrency: int = 4,
     ) -> "RedisReportStore":
         """Describe a Redis client that `open()` creates on the running loop."""
 
@@ -531,6 +595,7 @@ class RedisReportStore:
             key_prefix=key_prefix,
             lock_timeout_seconds=lock_timeout_seconds,
             lock_blocking_timeout_seconds=lock_blocking_timeout_seconds,
+            report_load_concurrency=report_load_concurrency,
         )
 
     @property
@@ -583,12 +648,12 @@ class RedisReportStore:
     async def add(
         self, session_id: UUID, report: ProcessedReport
     ) -> ReportUploadResponse:
-        """Persist one complete report under a session-scoped mutation lock."""
+        """Persist one report's content and index entry in one transaction."""
         async with self._session_lock(session_id):
-            reports = await self._read_reports(session_id)
-            if len(reports) >= self.max_reports_per_session:
+            index = await self._read_index(session_id)
+            if len(index) >= self.max_reports_per_session:
                 raise ReportCapacityError("session report capacity reached")
-            existing_ids = {stored.metadata.file_id for stored in reports}
+            existing_ids = {metadata.file_id for metadata in index}
             file_id: UUID | None = None
             for _ in range(100):
                 candidate = self._id_factory()
@@ -606,49 +671,67 @@ class RedisReportStore:
                 sha256=report.sha256,
                 page_count=report.page_count,
             )
-            reports.append(
-                StoredReport(
-                    metadata=metadata,
-                    original_bytes=report.original_bytes,
-                    extracted_text=report.extracted_text,
-                    pages=report.pages,
-                )
+            stored = StoredReport(
+                metadata=metadata,
+                original_bytes=report.original_bytes,
+                extracted_text=report.extracted_text,
+                pages=report.pages,
             )
-            await self._write_reports(session_id, reports)
+            content = await to_thread.run_sync(self._serialize_content, stored)
+            pipeline = self._require_client().pipeline(transaction=True)
+            pipeline.set(self._content_key(session_id, file_id), content)
+            pipeline.set(
+                self._index_key(session_id), self._serialize_index((*index, metadata))
+            )
+            await self._execute(pipeline)
             return metadata
 
     async def list_for_session(
         self, session_id: UUID
     ) -> tuple[ReportUploadResponse, ...]:
-        """List persistent report metadata without returning private contents."""
-        reports = await self._read_reports(session_id)
-        return tuple(report.metadata for report in reports)
+        """List report metadata from the index without loading any content."""
+        return await self._read_index(session_id)
 
     async def delete(self, session_id: UUID, file_id: UUID) -> None:
-        """Delete one persistent report only from its owning session."""
+        """Delete one report's content and index entry from its owning session."""
         async with self._session_lock(session_id):
-            reports = await self._read_reports(session_id)
-            retained = [
-                report for report in reports if report.metadata.file_id != file_id
-            ]
-            if len(retained) == len(reports):
+            index = await self._read_index(session_id)
+            retained = tuple(
+                metadata for metadata in index if metadata.file_id != file_id
+            )
+            if len(retained) == len(index):
                 raise ReportNotFoundError from None
-            await self._write_reports(session_id, retained)
+            pipeline = self._require_client().pipeline(transaction=True)
+            pipeline.delete(self._content_key(session_id, file_id))
+            if retained:
+                pipeline.set(
+                    self._index_key(session_id), self._serialize_index(retained)
+                )
+            else:
+                pipeline.delete(self._index_key(session_id))
+            await self._execute(pipeline)
 
     async def resolve(
         self,
         session_id: UUID,
         file_ids: Sequence[UUID],
     ) -> tuple[StoredReport, ...]:
-        """Resolve persistent reports only for their owning session."""
-        reports_by_id = {
-            report.metadata.file_id: report
-            for report in await self._read_reports(session_id)
+        """Load only the requested reports, after checking session ownership."""
+        if not file_ids:
+            return ()
+        metadata_by_id = {
+            metadata.file_id: metadata
+            for metadata in await self._read_index(session_id)
         }
-        try:
-            return tuple(reports_by_id[file_id] for file_id in file_ids)
-        except KeyError:
+        if any(file_id not in metadata_by_id for file_id in file_ids):
             raise ReportNotFoundError from None
+        loaded: dict[UUID, StoredReport] = {}
+        for file_id in file_ids:
+            if file_id not in loaded:
+                loaded[file_id] = await self._read_content(
+                    session_id, metadata_by_id[file_id]
+                )
+        return tuple(loaded[file_id] for file_id in file_ids)
 
     async def seed(
         self,
@@ -660,49 +743,72 @@ class RedisReportStore:
         Intended for deterministic startup seeding.  Not part of the
         ``ReportStore`` protocol.
         """
-        existing = await self._read_reports(session_id)
-        if existing:
+        if await self._read_index(session_id):
             raise ReportStoreUnavailableError(
                 "report store already contains data for the demo session"
             )
-        await self._write_reports(session_id, list(reports))
+        if not reports:
+            return
+        pipeline = self._require_client().pipeline(transaction=True)
+        for report in reports:
+            content = await to_thread.run_sync(self._serialize_content, report)
+            pipeline.set(
+                self._content_key(session_id, report.metadata.file_id), content
+            )
+        pipeline.set(
+            self._index_key(session_id),
+            self._serialize_index(tuple(report.metadata for report in reports)),
+        )
+        await self._execute(pipeline)
 
-    def _session_key(self, session_id: UUID) -> str:
-        return f"{self._key_prefix}:reports:{session_id}"
+    def _index_key(self, session_id: UUID) -> str:
+        return f"{self._key_prefix}:reports:{session_id}:index"
+
+    def _content_key(self, session_id: UUID, file_id: UUID) -> str:
+        return f"{self._key_prefix}:report:{session_id}:{file_id}"
 
     def _lock_key(self, session_id: UUID) -> str:
-        return f"{self._session_key(session_id)}:mutation-lock"
+        return f"{self._key_prefix}:reports:{session_id}:mutation-lock"
 
-    async def _read_reports(self, session_id: UUID) -> list[StoredReport]:
+    async def _get(self, key: str) -> str | None:
         client = self._require_client()
         try:
-            raw = await client.get(self._session_key(session_id))
+            raw = await client.get(key)
         except RedisError as error:
             raise ReportStoreUnavailableError("Redis is unavailable") from error
+        if isinstance(raw, bytes):
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ReportStoreUnavailableError(
+                    "Redis contains invalid report data"
+                ) from error
+        return raw
+
+    async def _read_index(self, session_id: UUID) -> tuple[ReportUploadResponse, ...]:
+        raw = await self._get(self._index_key(session_id))
         if raw is None:
-            return []
-        try:
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ReportStoreUnavailableError(
-                "Redis contains invalid report data"
-            ) from error
-        return await to_thread.run_sync(self._deserialize, raw)
+            return ()
+        # The index is metadata only, so it is parsed on the event loop.
+        return self._deserialize_index(raw)
 
-    async def _write_reports(
-        self,
-        session_id: UUID,
-        reports: Sequence[StoredReport],
-    ) -> None:
-        client = self._require_client()
-        payload = await to_thread.run_sync(self._serialize, reports)
+    async def _read_content(
+        self, session_id: UUID, metadata: ReportUploadResponse
+    ) -> StoredReport:
+        async with self._load_semaphore:
+            raw = await self._get(self._content_key(session_id, metadata.file_id))
+            if raw is None:
+                # The index lists a report whose content key is gone; treat the
+                # report as deleted rather than failing the request.
+                raise ReportNotFoundError from None
+            return await to_thread.run_sync(self._deserialize_content, raw, metadata)
+
+    @staticmethod
+    async def _execute(pipeline: _RedisReportPipeline) -> None:
         try:
-            stored = await client.set(self._session_key(session_id), payload)
+            await pipeline.execute()
         except RedisError as error:
             raise ReportStoreUnavailableError("Redis is unavailable") from error
-        if not stored:
-            raise ReportStoreUnavailableError("Redis did not persist the reports")
 
     @asynccontextmanager
     async def _session_lock(self, session_id: UUID) -> AsyncGenerator[None, None]:
@@ -730,102 +836,71 @@ class RedisReportStore:
                     "Redis report lock could not be released"
                 ) from error
 
-    def _serialize(self, reports: Sequence[StoredReport]) -> str:
-        return json.dumps(
-            {
-                "version": self._PAYLOAD_VERSION,
-                "reports": [
-                    {
-                        "metadata": report.metadata.model_dump(mode="json"),
-                        "original_content_base64": base64.b64encode(
-                            report.original_bytes
-                        ).decode("ascii"),
-                        "extracted_text": report.extracted_text,
-                        "pages": [
-                            {
-                                "page_number": page.page_number,
-                                "text": page.text,
-                            }
-                            for page in report.pages
-                        ],
-                    }
-                    for report in reports
-                ],
-            },
-            separators=(",", ":"),
-        )
+    def _serialize_index(self, reports: tuple[ReportUploadResponse, ...]) -> str:
+        return _ReportIndexPayload(
+            version=_REPORT_PAYLOAD_VERSION, reports=reports
+        ).model_dump_json()
 
-    def _deserialize(self, raw: str) -> list[StoredReport]:
+    def _deserialize_index(self, raw: str) -> tuple[ReportUploadResponse, ...]:
         try:
-            decoded = cast(object, json.loads(raw))
-            if not isinstance(decoded, dict):
-                raise ValueError("report payload must be an object")
-            payload = cast(dict[str, object], decoded)
-            if payload.get("version") != self._PAYLOAD_VERSION:
-                raise ValueError("unsupported report payload version")
-            decoded_reports = payload.get("reports")
-            if not isinstance(decoded_reports, list):
-                raise ValueError("reports must be a list")
-            report_items = cast(list[object], decoded_reports)
-            if len(report_items) > self.max_reports_per_session:
+            payload = _ReportIndexPayload.model_validate_json(raw)
+            if len(payload.reports) > self.max_reports_per_session:
                 raise ValueError("report capacity exceeded in stored data")
-            reports: list[StoredReport] = []
-            seen_ids: set[UUID] = set()
-            for decoded_report in report_items:
-                if not isinstance(decoded_report, dict):
-                    raise ValueError("stored report must be an object")
-                report_payload = cast(dict[str, object], decoded_report)
-                metadata = ReportUploadResponse.model_validate(
-                    report_payload.get("metadata")
-                )
-                if metadata.file_id in seen_ids:
-                    raise ValueError("duplicate stored file ID")
-                seen_ids.add(metadata.file_id)
-                encoded_content = report_payload.get("original_content_base64")
-                if not isinstance(encoded_content, str):
-                    raise ValueError("stored original content must be text")
-                original_bytes = base64.b64decode(encoded_content, validate=True)
-                extracted_text = report_payload.get("extracted_text")
-                if not isinstance(extracted_text, str) or not extracted_text:
-                    raise ValueError("stored extracted text must not be empty")
-                decoded_pages = report_payload.get("pages")
-                if not isinstance(decoded_pages, list):
-                    raise ValueError("stored pages must be a list")
-                pages: list[ExtractedPage] = []
-                for decoded_page in cast(list[object], decoded_pages):
-                    if not isinstance(decoded_page, dict):
-                        raise ValueError("stored page must be an object")
-                    page_payload = cast(dict[str, object], decoded_page)
-                    page_number = page_payload.get("page_number")
-                    text = page_payload.get("text")
-                    if (
-                        not isinstance(page_number, int)
-                        or isinstance(page_number, bool)
-                        or page_number < 1
-                        or not isinstance(text, str)
-                        or not text
-                    ):
-                        raise ValueError("stored page is invalid")
-                    pages.append(ExtractedPage(page_number=page_number, text=text))
-                self._validate_stored_report(
-                    metadata=metadata,
-                    original_bytes=original_bytes,
-                    extracted_text=extracted_text,
-                    pages=pages,
-                )
-                reports.append(
-                    StoredReport(
-                        metadata=metadata,
-                        original_bytes=original_bytes,
-                        extracted_text=extracted_text,
-                        pages=tuple(pages),
-                    )
-                )
-            return reports
-        except (binascii.Error, TypeError, UnicodeDecodeError, ValueError) as error:
+            if len({metadata.file_id for metadata in payload.reports}) != len(
+                payload.reports
+            ):
+                raise ValueError("duplicate stored file ID")
+        except ValueError as error:
             raise ReportStoreUnavailableError(
                 "Redis contains invalid report data"
             ) from error
+        return payload.reports
+
+    @staticmethod
+    def _serialize_content(report: StoredReport) -> str:
+        return _ReportContentPayload(
+            version=_REPORT_PAYLOAD_VERSION,
+            file_id=report.metadata.file_id,
+            original_content_base64=base64.b64encode(report.original_bytes).decode(
+                "ascii"
+            ),
+            extracted_text=report.extracted_text,
+            pages=tuple(
+                _StoredPagePayload(page_number=page.page_number, text=page.text)
+                for page in report.pages
+            ),
+        ).model_dump_json()
+
+    def _deserialize_content(
+        self, raw: str, metadata: ReportUploadResponse
+    ) -> StoredReport:
+        try:
+            payload = _ReportContentPayload.model_validate_json(raw)
+            if payload.file_id != metadata.file_id:
+                raise ValueError("stored content belongs to another file ID")
+            original_bytes = base64.b64decode(
+                payload.original_content_base64, validate=True
+            )
+            pages = tuple(
+                ExtractedPage(page_number=page.page_number, text=page.text)
+                for page in payload.pages
+            )
+            self._validate_stored_report(
+                metadata=metadata,
+                original_bytes=original_bytes,
+                extracted_text=payload.extracted_text,
+                pages=pages,
+            )
+        except (binascii.Error, ValueError) as error:
+            raise ReportStoreUnavailableError(
+                "Redis contains invalid report data"
+            ) from error
+        return StoredReport(
+            metadata=metadata,
+            original_bytes=original_bytes,
+            extracted_text=payload.extracted_text,
+            pages=pages,
+        )
 
     @staticmethod
     def _validate_stored_report(

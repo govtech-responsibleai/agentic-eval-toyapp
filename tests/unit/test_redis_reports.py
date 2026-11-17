@@ -1,23 +1,39 @@
 """Offline tests for persistent Redis-backed session reports."""
 
 import asyncio
+import base64
 import hashlib
+import json
 import threading
+from collections.abc import Callable
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
 from anyio import to_thread
 from redis.exceptions import ConnectionError
 
-from agentic_eval_toyapp.models import ReportMediaType
+from agentic_eval_toyapp.models import ReportMediaType, ReportUploadResponse
 from agentic_eval_toyapp.reports import (
+    ExtractedPage,
     ProcessedReport,
     RedisReportStore,
     ReportCapacityError,
     ReportNotFoundError,
     ReportStoreBusyError,
     ReportStoreUnavailableError,
+    StoredReport,
 )
+
+_PREFIX = "agentic-eval-toyapp"
+
+
+def _index_key(session_id: UUID) -> str:
+    return f"{_PREFIX}:reports:{session_id}:index"
+
+
+def _content_key(session_id: UUID, file_id: UUID) -> str:
+    return f"{_PREFIX}:report:{session_id}:{file_id}"
 
 
 def _processed_report(text: str, *, filename: str = "report.txt") -> ProcessedReport:
@@ -29,6 +45,24 @@ def _processed_report(text: str, *, filename: str = "report.txt") -> ProcessedRe
         original_bytes=content,
         extracted_text=text,
         sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _pdf_report() -> ProcessedReport:
+    content = b"%PDF-1.7 fake bytes that the store never parses"
+    pages = (
+        ExtractedPage(page_number=1, text="Page one."),
+        ExtractedPage(page_number=3, text="Page three."),
+    )
+    return ProcessedReport(
+        filename="report.pdf",
+        media_type=ReportMediaType.PDF,
+        byte_size=len(content),
+        original_bytes=content,
+        extracted_text="\n\n".join(page.text for page in pages),
+        sha256=hashlib.sha256(content).hexdigest(),
+        page_count=3,
+        pages=pages,
     )
 
 
@@ -49,11 +83,52 @@ class _FakeLock:
         self.acquired = False
 
 
+class _FakePipeline:
+    """Queue commands and apply all of them, or none, on `execute`."""
+
+    def __init__(self, client: "_FakeRedisClient", *, transaction: bool) -> None:
+        if not transaction:
+            raise AssertionError("report writes must use a MULTI/EXEC pipeline")
+        self._client = client
+        self._commands: list[tuple[str, tuple[str, ...]]] = []
+
+    def set(self, name: str, value: str) -> object:
+        self._commands.append(("set", (name, value)))
+        return self
+
+    def delete(self, *names: str) -> object:
+        self._commands.append(("delete", names))
+        return self
+
+    async def execute(self) -> list[object]:
+        self._client.ensure_available()
+        await asyncio.sleep(0)
+        if self._client.fail_next_execute:
+            self._client.fail_next_execute = False
+            raise ConnectionError("fake EXEC failure")
+        self._client.executed += 1
+        results: list[object] = []
+        for command, arguments in self._commands:
+            if command == "set":
+                name, value = arguments
+                self._client.data[name] = value
+                results.append(True)
+            else:
+                removed = [name for name in arguments if name in self._client.data]
+                for name in removed:
+                    del self._client.data[name]
+                results.append(len(removed))
+        return results
+
+
 class _FakeRedisClient:
     def __init__(self) -> None:
         self.data: dict[str, str | bytes] = {}
+        self.reads: list[str] = []
         self.available = True
         self.lock_available = True
+        self.fail_next_execute = False
+        self.executed = 0
         self.locks: list[_FakeLock] = []
         self.closed = False
 
@@ -74,7 +149,11 @@ class _FakeRedisClient:
     async def get(self, name: str) -> str | bytes | None:
         self.ensure_available()
         await asyncio.sleep(0)
+        self.reads.append(name)
         return self.data.get(name)
+
+    def pipeline(self, transaction: bool = True) -> _FakePipeline:
+        return _FakePipeline(self, transaction=transaction)
 
     def lock(
         self,
@@ -266,29 +345,6 @@ async def test_redis_report_store_client_lifecycle_is_lazy_and_idempotent() -> N
     assert injected.closed is False
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        "not JSON",
-        '{"version":2,"reports":[]}',
-        '{"version":1,"reports":[{"metadata":null}]}',
-        b"\xff",
-    ],
-)
-@pytest.mark.anyio
-async def test_redis_report_store_rejects_corrupt_persistent_data(
-    payload: str | bytes,
-) -> None:
-    """Malformed persistent data must fail closed instead of leaking partial state."""
-    client = _FakeRedisClient()
-    store = RedisReportStore(client, max_reports_per_session=2)
-    session_id = uuid4()
-    client.data[f"agentic-eval-toyapp:reports:{session_id}"] = payload
-
-    with pytest.raises(ReportStoreUnavailableError, match="invalid report data"):
-        await store.list_for_session(session_id)
-
-
 def test_redis_report_store_validates_configuration() -> None:
     """Persistent report storage should reject unusable configuration."""
     client = _FakeRedisClient()
@@ -304,3 +360,468 @@ def test_redis_report_store_validates_configuration() -> None:
         )
     with pytest.raises(ValueError, match="exactly one"):
         RedisReportStore(max_reports_per_session=1)
+    with pytest.raises(ValueError, match="report_load_concurrency"):
+        RedisReportStore(client, max_reports_per_session=1, report_load_concurrency=0)
+
+
+def _stored(
+    session_id: UUID, processed: ProcessedReport, file_id: UUID
+) -> StoredReport:
+    del session_id
+    return StoredReport(
+        metadata=ReportUploadResponse(
+            file_id=file_id,
+            filename=processed.filename,
+            media_type=processed.media_type,
+            byte_size=processed.byte_size,
+            extracted_text_length=len(processed.extracted_text),
+            sha256=processed.sha256,
+            page_count=processed.page_count,
+        ),
+        original_bytes=processed.original_bytes,
+        extracted_text=processed.extracted_text,
+        pages=processed.pages,
+    )
+
+
+def _load_json(client: _FakeRedisClient, key: str) -> dict[str, object]:
+    raw = client.data[key]
+    assert isinstance(raw, str)
+    return cast(dict[str, object], json.loads(raw))
+
+
+@pytest.mark.anyio
+async def test_add_writes_a_metadata_index_and_one_content_key_per_report() -> None:
+    """Each report gets its own content key; the index holds metadata only."""
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=3)
+    session_id = uuid4()
+    first = await store.add(session_id, _processed_report("first"))
+    second = await store.add(session_id, _pdf_report())
+
+    assert set(client.data) == {
+        _index_key(session_id),
+        _content_key(session_id, first.file_id),
+        _content_key(session_id, second.file_id),
+    }
+    index = _load_json(client, _index_key(session_id))
+    assert index == {
+        "version": 2,
+        "reports": [
+            first.model_dump(mode="json"),
+            second.model_dump(mode="json"),
+        ],
+    }
+    content = _load_json(client, _content_key(session_id, second.file_id))
+    assert content["version"] == 2
+    assert content["file_id"] == str(second.file_id)
+    assert base64.b64decode(cast(str, content["original_content_base64"])) == (
+        _pdf_report().original_bytes
+    )
+    # Every report write is one MULTI/EXEC transaction.
+    assert client.executed == 2
+
+
+@pytest.mark.anyio
+async def test_list_reads_only_the_index_even_when_content_is_absent() -> None:
+    """Listing must never load report content, so missing content is invisible."""
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2)
+    session_id = uuid4()
+    first = await store.add(session_id, _processed_report("first"))
+    second = await store.add(session_id, _processed_report("second"))
+    client.data[_content_key(session_id, first.file_id)] = "corrupt"
+    del client.data[_content_key(session_id, second.file_id)]
+    client.reads.clear()
+
+    assert await store.list_for_session(session_id) == (first, second)
+    assert client.reads == [_index_key(session_id)]
+
+
+@pytest.mark.anyio
+async def test_list_for_a_session_without_reports_returns_nothing() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+
+    assert await store.list_for_session(session_id) == ()
+    assert client.reads == [_index_key(session_id)]
+
+
+@pytest.mark.anyio
+async def test_resolve_loads_only_the_requested_reports_in_requested_order() -> None:
+    """A turn attaching one file must load that file's content key alone."""
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=3)
+    session_id = uuid4()
+    first = await store.add(session_id, _processed_report("first"))
+    second = await store.add(session_id, _pdf_report())
+    third = await store.add(session_id, _processed_report("third"))
+    client.reads.clear()
+
+    (only,) = await store.resolve(session_id, (second.file_id,))
+    assert only.metadata == second
+    assert only.pages == _pdf_report().pages
+    assert only.extracted_text == _pdf_report().extracted_text
+    assert client.reads == [
+        _index_key(session_id),
+        _content_key(session_id, second.file_id),
+    ]
+
+    client.reads.clear()
+    resolved = await store.resolve(
+        session_id, (third.file_id, first.file_id, third.file_id)
+    )
+    assert [report.metadata for report in resolved] == [third, first, third]
+    assert client.reads == [
+        _index_key(session_id),
+        _content_key(session_id, third.file_id),
+        _content_key(session_id, first.file_id),
+    ]
+
+
+@pytest.mark.anyio
+async def test_resolve_with_no_ids_reads_no_content() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+    await store.add(session_id, _processed_report("first"))
+    client.reads.clear()
+
+    assert await store.resolve(session_id, ()) == ()
+    assert all(not key.startswith(f"{_PREFIX}:report:") for key in client.reads)
+
+
+@pytest.mark.anyio
+async def test_unknown_and_cross_session_ids_fail_before_loading_content() -> None:
+    """Ownership comes from the index; no content key is read for a foreign ID."""
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2)
+    owner = uuid4()
+    other = uuid4()
+    owned = await store.add(owner, _processed_report("owned"))
+    await store.add(other, _processed_report("other"))
+    client.reads.clear()
+
+    with pytest.raises(ReportNotFoundError):
+        await store.resolve(other, (owned.file_id,))
+    with pytest.raises(ReportNotFoundError):
+        await store.resolve(owner, (owned.file_id, uuid4()))
+    assert all(not key.startswith(f"{_PREFIX}:report:") for key in client.reads)
+
+
+@pytest.mark.anyio
+async def test_resolve_treats_a_missing_content_key_as_a_missing_report() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+    metadata = await store.add(session_id, _processed_report("first"))
+    del client.data[_content_key(session_id, metadata.file_id)]
+
+    with pytest.raises(ReportNotFoundError):
+        await store.resolve(session_id, (metadata.file_id,))
+
+
+def _set_field(name: str, value: object) -> Callable[[dict[str, object]], object]:
+    def mutate(payload: dict[str, object]) -> object:
+        payload[name] = value
+        return payload
+
+    return mutate
+
+
+def _replace_with(value: object) -> Callable[[dict[str, object]], object]:
+    def mutate(payload: dict[str, object]) -> object:
+        del payload
+        return value
+
+    return mutate
+
+
+def _without(name: str) -> Callable[[dict[str, object]], object]:
+    def mutate(payload: dict[str, object]) -> object:
+        del payload[name]
+        return payload
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_replace_with("not an object"), id="not-an-object"),
+        pytest.param(_set_field("version", 1), id="old-version"),
+        pytest.param(_set_field("file_id", str(UUID(int=7))), id="file-id-mismatch"),
+        pytest.param(_set_field("file_id", "not-a-uuid"), id="file-id-invalid"),
+        pytest.param(_set_field("original_content_base64", "!!!"), id="invalid-base64"),
+        pytest.param(
+            _set_field("original_content_base64", base64.b64encode(b"other").decode()),
+            id="size-mismatch",
+        ),
+        pytest.param(
+            _set_field(
+                "original_content_base64",
+                base64.b64encode(
+                    b"%PDF-1.7 fake bytes that the store never parsez"
+                ).decode(),
+            ),
+            id="hash-mismatch",
+        ),
+        pytest.param(_set_field("extracted_text", ""), id="empty-text"),
+        pytest.param(_set_field("extracted_text", "Page one."), id="text-length"),
+        pytest.param(
+            _set_field("pages", [{"page_number": 1, "text": "Page one."}]),
+            id="pages-disagree-with-text",
+        ),
+        pytest.param(
+            _set_field("pages", [{"page_number": 0, "text": "x"}]), id="page-zero"
+        ),
+        pytest.param(
+            _set_field(
+                "pages",
+                [
+                    {"page_number": 1, "text": "Page one."},
+                    {"page_number": 4, "text": "Page three."},
+                ],
+            ),
+            id="page-beyond-count",
+        ),
+        pytest.param(
+            _set_field("pages", [{"page_number": True, "text": "Page one."}]),
+            id="page-number-bool",
+        ),
+        pytest.param(_set_field("pages", []), id="pdf-without-pages"),
+        pytest.param(_set_field("unexpected", 1), id="extra-field"),
+        pytest.param(_without("extracted_text"), id="missing-field"),
+    ],
+)
+@pytest.mark.anyio
+async def test_resolve_rejects_corrupt_report_content(
+    mutate: Callable[[dict[str, object]], object],
+) -> None:
+    """Content that disagrees with its index entry must fail closed."""
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+    metadata = await store.add(session_id, _pdf_report())
+    key = _content_key(session_id, metadata.file_id)
+    client.data[key] = json.dumps(mutate(_load_json(client, key)))
+
+    with pytest.raises(ReportStoreUnavailableError, match="invalid report data"):
+        await store.resolve(session_id, (metadata.file_id,))
+
+
+@pytest.mark.anyio
+async def test_resolve_rejects_non_utf8_content_bytes() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+    metadata = await store.add(session_id, _processed_report("first"))
+    client.data[_content_key(session_id, metadata.file_id)] = b"\xff"
+
+    with pytest.raises(ReportStoreUnavailableError, match="invalid report data"):
+        await store.resolve(session_id, (metadata.file_id,))
+
+
+@pytest.mark.anyio
+async def test_a_text_report_with_stored_pages_is_rejected() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+    metadata = await store.add(session_id, _processed_report("first"))
+    key = _content_key(session_id, metadata.file_id)
+    payload = _load_json(client, key)
+    payload["pages"] = [{"page_number": 1, "text": "first"}]
+    client.data[key] = json.dumps(payload)
+
+    with pytest.raises(ReportStoreUnavailableError, match="invalid report data"):
+        await store.resolve(session_id, (metadata.file_id,))
+
+
+def _metadata_json(file_id: UUID) -> dict[str, object]:
+    return _stored(uuid4(), _processed_report("x"), file_id).metadata.model_dump(
+        mode="json"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("not JSON", id="not-json"),
+        pytest.param(b"\xff", id="not-utf8"),
+        pytest.param("[]", id="not-an-object"),
+        pytest.param('{"version":1,"reports":[]}', id="old-version"),
+        pytest.param('{"version":2,"reports":{}}', id="reports-not-a-list"),
+        pytest.param('{"version":2,"reports":[{"file_id":null}]}', id="bad-metadata"),
+        pytest.param('{"version":2,"reports":[],"extra":1}', id="extra-field"),
+        pytest.param(
+            json.dumps({"version": 2, "reports": [_metadata_json(UUID(int=1))] * 2}),
+            id="duplicate-file-id",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "version": 2,
+                    "reports": [_metadata_json(UUID(int=n)) for n in (1, 2, 3)],
+                }
+            ),
+            id="over-capacity",
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_list_rejects_a_corrupt_index(payload: str | bytes) -> None:
+    """A malformed index must fail closed instead of leaking partial state."""
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2)
+    session_id = uuid4()
+    client.data[_index_key(session_id)] = payload
+
+    with pytest.raises(ReportStoreUnavailableError, match="invalid report data"):
+        await store.list_for_session(session_id)
+
+
+@pytest.mark.anyio
+async def test_a_version_one_collection_under_the_old_key_is_ignored() -> None:
+    """Old single-value data is not read; flushing Redis is a deploy step."""
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+    client.data[f"{_PREFIX}:reports:{session_id}"] = '{"version":1,"reports":[]}'
+
+    assert await store.list_for_session(session_id) == ()
+    await store.add(session_id, _processed_report("fresh"))
+    assert len(await store.list_for_session(session_id)) == 1
+
+
+@pytest.mark.anyio
+async def test_a_failed_add_transaction_leaves_no_keys_and_frees_the_lock() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2)
+    session_id = uuid4()
+    client.fail_next_execute = True
+
+    with pytest.raises(ReportStoreUnavailableError):
+        await store.add(session_id, _processed_report("first"))
+    assert client.data == {}
+    assert [lock.acquired for lock in client.locks] == [False]
+
+
+@pytest.mark.anyio
+async def test_deleting_the_last_report_removes_its_content_and_the_index() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2)
+    session_id = uuid4()
+    first = await store.add(session_id, _processed_report("first"))
+    second = await store.add(session_id, _processed_report("second"))
+
+    await store.delete(session_id, first.file_id)
+    assert set(client.data) == {
+        _index_key(session_id),
+        _content_key(session_id, second.file_id),
+    }
+    await store.delete(session_id, second.file_id)
+    assert client.data == {}
+    assert await store.list_for_session(session_id) == ()
+
+
+@pytest.mark.anyio
+async def test_deleting_an_unknown_report_writes_nothing() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+    await store.add(session_id, _processed_report("first"))
+    before = dict(client.data)
+    executed = client.executed
+
+    with pytest.raises(ReportNotFoundError):
+        await store.delete(session_id, uuid4())
+    with pytest.raises(ReportNotFoundError):
+        await store.delete(uuid4(), uuid4())
+    assert client.data == before
+    assert client.executed == executed
+
+
+@pytest.mark.anyio
+async def test_seed_writes_every_report_in_one_transaction() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2)
+    session_id = uuid4()
+    reports = (
+        _stored(session_id, _processed_report("a"), UUID(int=1)),
+        _stored(session_id, _pdf_report(), UUID(int=2)),
+    )
+
+    await store.seed(session_id, reports)
+
+    assert client.executed == 1
+    assert set(client.data) == {
+        _index_key(session_id),
+        _content_key(session_id, UUID(int=1)),
+        _content_key(session_id, UUID(int=2)),
+    }
+    assert await store.resolve(session_id, (UUID(int=2), UUID(int=1))) == (
+        reports[1],
+        reports[0],
+    )
+
+
+@pytest.mark.anyio
+async def test_seed_refuses_existing_data_and_writes_nothing_when_empty() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2)
+    session_id = uuid4()
+
+    await store.seed(session_id, ())
+    assert client.data == {}
+    assert client.executed == 0
+
+    await store.add(session_id, _processed_report("a"))
+    with pytest.raises(ReportStoreUnavailableError, match="already contains"):
+        await store.seed(
+            session_id, (_stored(session_id, _processed_report("b"), UUID(int=9)),)
+        )
+
+
+@pytest.mark.anyio
+async def test_content_loads_are_bounded_by_report_load_concurrency() -> None:
+    """At most N content loads may run at once across all sessions."""
+    release = asyncio.Event()
+    in_flight = 0
+    peak = 0
+
+    class _GatedClient(_FakeRedisClient):
+        async def get(self, name: str) -> str | bytes | None:
+            nonlocal in_flight, peak
+            if not name.startswith(f"{_PREFIX}:report:"):
+                return await super().get(name)
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await release.wait()
+                return await super().get(name)
+            finally:
+                in_flight -= 1
+
+    client = _GatedClient()
+    store = RedisReportStore(
+        client, max_reports_per_session=1, report_load_concurrency=2
+    )
+    sessions = [uuid4() for _ in range(4)]
+    file_ids = [
+        (await store.add(session_id, _processed_report(f"r{n}"))).file_id
+        for n, session_id in enumerate(sessions)
+    ]
+
+    tasks = [
+        asyncio.create_task(store.resolve(session_id, (file_id,)))
+        for session_id, file_id in zip(sessions, file_ids, strict=True)
+    ]
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert in_flight == 2
+    release.set()
+    results = await asyncio.wait_for(asyncio.gather(*tasks), 1.0)
+
+    assert peak == 2
+    assert [result[0].metadata.file_id for result in results] == file_ids

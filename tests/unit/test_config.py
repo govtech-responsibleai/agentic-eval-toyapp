@@ -126,6 +126,7 @@ def test_settings_defaults_select_the_live_runtime_without_storing_credentials()
     assert settings.upload_max_extracted_characters == 100_000
     assert settings.upload_max_files_per_message == 1
     assert settings.upload_max_reports_per_session == 10
+    assert settings.report_load_concurrency == 4
 
 
 def test_settings_load_prefixed_environment_variables(
@@ -365,6 +366,7 @@ def test_settings_reject_blank_required_text(field: str) -> None:
         ("max_pending_turns", 0),
         ("llm_max_requests_per_minute", 0),
         ("llm_max_concurrent_calls", 0),
+        ("report_load_concurrency", 0),
         ("max_pending_turns", -1),
     ],
 )
@@ -394,6 +396,14 @@ def test_backpressure_settings_accept_one_and_read_the_environment(
     assert settings.max_pending_turns == 1
     assert settings.llm_max_requests_per_minute == 450
     assert settings.llm_max_concurrent_calls == 1
+
+
+def test_report_load_concurrency_reads_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TOYAPP_REPORT_LOAD_CONCURRENCY", "1")
+
+    assert AppSettings().report_load_concurrency == 1
 
 
 def test_langfuse_project_url_defaults_to_unset() -> None:

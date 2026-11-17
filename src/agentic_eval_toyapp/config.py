@@ -135,6 +135,7 @@ class AppSettings(BaseSettings):
     )
     upload_max_files_per_message: int = Field(default=1, ge=1, le=10)
     upload_max_reports_per_session: int = Field(default=10, ge=1, le=100)
+    report_load_concurrency: int = Field(default=4, ge=1)
     max_pending_turns: int = Field(default=128, ge=1)
     llm_max_requests_per_minute: int = Field(default=180, ge=1)
     llm_max_concurrent_calls: int = Field(default=16, ge=1)

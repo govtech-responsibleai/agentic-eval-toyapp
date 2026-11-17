@@ -54,6 +54,35 @@ class _Lock:
         self._guard.release()
 
 
+class _Pipeline:
+    """Buffer writes and apply them together, like MULTI/EXEC."""
+
+    def __init__(self, client: "_FakeRedis") -> None:
+        self._client = client
+        self._commands: list[tuple[str, tuple[str, ...]]] = []
+
+    def set(self, name: str, value: str) -> object:
+        self._commands.append(("set", (name, value)))
+        return self
+
+    def delete(self, *names: str) -> object:
+        self._commands.append(("delete", names))
+        return self
+
+    async def execute(self) -> list[object]:
+        await asyncio.sleep(0)
+        results: list[object] = []
+        for command, arguments in self._commands:
+            if command == "set":
+                self._client.data[arguments[0]] = arguments[1]
+                results.append(True)
+            else:
+                results.append(
+                    sum(self._client.data.pop(n, None) is not None for n in arguments)
+                )
+        return results
+
+
 class _FakeRedis:
     """Async stand-in for `redis.asyncio.Redis`, bound to whichever loop calls it."""
 
@@ -75,6 +104,15 @@ class _FakeRedis:
     async def get(self, name: str) -> str | None:
         await asyncio.sleep(0)
         return self.data.get(name)
+
+    async def delete(self, *names: str) -> int:
+        await asyncio.sleep(0)
+        removed = [name for name in names if self.data.pop(name, None) is not None]
+        return len(removed)
+
+    def pipeline(self, transaction: bool = True) -> "_Pipeline":
+        assert transaction
+        return _Pipeline(self)
 
     def lock(self, name: str, *, timeout: float, blocking_timeout: float) -> _Lock:
         del timeout, blocking_timeout
