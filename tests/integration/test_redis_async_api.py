@@ -59,27 +59,32 @@ class _Pipeline:
 
     def __init__(self, client: "_FakeRedis") -> None:
         self._client = client
-        self._commands: list[tuple[str, tuple[str, ...]]] = []
+        self._commands: list[tuple[str, tuple[str, ...], int | None]] = []
 
-    def set(self, name: str, value: str) -> object:
-        self._commands.append(("set", (name, value)))
+    def set(self, name: str, value: str, *, ex: int | None = None) -> object:
+        self._commands.append(("set", (name, value), ex))
+        return self
+
+    def expire(self, name: str, time: int) -> object:
+        self._commands.append(("expire", (name,), time))
         return self
 
     def delete(self, *names: str) -> object:
-        self._commands.append(("delete", names))
+        self._commands.append(("delete", names, None))
         return self
 
     async def execute(self) -> list[object]:
         await asyncio.sleep(0)
         results: list[object] = []
-        for command, arguments in self._commands:
+        for command, arguments, seconds in self._commands:
             if command == "set":
-                self._client.data[arguments[0]] = arguments[1]
+                self._client.store(arguments[0], arguments[1], seconds)
                 results.append(True)
+            elif command == "expire":
+                assert seconds is not None
+                results.append(self._client.refresh(arguments[0], seconds))
             else:
-                results.append(
-                    sum(self._client.data.pop(n, None) is not None for n in arguments)
-                )
+                results.append(sum(self._client.remove(n) for n in arguments))
         return results
 
 
@@ -88,27 +93,47 @@ class _FakeRedis:
 
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
         self.closed = False
         self._guards: dict[str, asyncio.Lock] = {}
+
+    def store(self, name: str, value: str, ex: int | None) -> None:
+        """Write like Redis: a SET without EX clears any existing TTL."""
+        self.data[name] = value
+        if ex is None:
+            self.ttls.pop(name, None)
+        else:
+            self.ttls[name] = ex
+
+    def refresh(self, name: str, seconds: int) -> bool:
+        if name not in self.data:
+            return False
+        self.ttls[name] = seconds
+        return True
+
+    def remove(self, name: str) -> bool:
+        self.ttls.pop(name, None)
+        return self.data.pop(name, None) is not None
 
     async def ping(self) -> bool:
         return True
 
-    async def set(self, name: str, value: str, *, nx: bool = False) -> object:
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> object:
         await asyncio.sleep(0)
         if nx and name in self.data:
             return False
-        self.data[name] = value
+        self.store(name, value, ex)
         return True
+
+    async def expire(self, name: str, time: int) -> bool:
+        await asyncio.sleep(0)
+        return self.refresh(name, time)
 
     async def get(self, name: str) -> str | None:
         await asyncio.sleep(0)
         return self.data.get(name)
-
-    async def delete(self, *names: str) -> int:
-        await asyncio.sleep(0)
-        removed = [name for name in names if self.data.pop(name, None) is not None]
-        return len(removed)
 
     def pipeline(self, transaction: bool = True) -> "_Pipeline":
         assert transaction
@@ -251,3 +276,78 @@ async def test_injected_fakes_serve_requests_under_async_client() -> None:
         )
         assert deleted.status_code == 204
         assert (await client.get("/ready")).json()["status"] == "ready"
+
+
+_TTL = 3_600
+
+
+def _expiring_keys(fake: _FakeRedis, session_id: str) -> dict[str, int]:
+    return {key: ttl for key, ttl in fake.ttls.items() if session_id in key}
+
+
+def _owned_keys(fake: _FakeRedis, session_id: str) -> set[str]:
+    return {key for key in fake.data if session_id in key and not key.endswith("-lock")}
+
+
+@pytest.mark.anyio
+async def test_every_session_route_refreshes_all_of_the_sessions_keys() -> None:
+    """Any request on a session renews its turns and its reports together."""
+    fake = _FakeRedis()
+    application = create_app(
+        AppSettings(langfuse_enabled=False),
+        session_store=RedisSessionStore(fake, idle_ttl_seconds=_TTL),
+        report_store=RedisReportStore(
+            fake, max_reports_per_session=3, idle_ttl_seconds=_TTL
+        ),
+        agent=_Agent(),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://testserver"
+    ) as client:
+        session_id = (await client.post("/api/v1/sessions")).json()["session_id"]
+        base = f"/api/v1/sessions/{session_id}"
+        upload = {"file": ("r.md", b"# Report\n\nBody.", "text/markdown")}
+        file_id = (await client.post(f"{base}/files", files=upload)).json()["file_id"]
+        await client.post(f"{base}/files", files=upload)
+        assert len(_owned_keys(fake, session_id)) == 4
+
+        requests = (
+            lambda: client.get(base),
+            lambda: client.get(f"{base}/files"),
+            lambda: client.post(f"{base}/messages", json={"message": "hi"}),
+            lambda: client.get(f"{base}/export"),
+            lambda: client.delete(f"{base}/files/{file_id}"),
+            lambda: client.post(f"{base}/files", files=upload),
+        )
+        for send in requests:
+            for key in _expiring_keys(fake, session_id):
+                fake.ttls[key] = 5
+            response = await send()
+            assert response.status_code < 300, response.text
+            assert _expiring_keys(fake, session_id) == dict.fromkeys(
+                _owned_keys(fake, session_id), _TTL
+            )
+
+
+@pytest.mark.anyio
+async def test_demo_session_requests_never_add_a_ttl() -> None:
+    fake = _FakeRedis()
+    application = create_app(
+        AppSettings(langfuse_enabled=False),
+        session_store=RedisSessionStore(fake, idle_ttl_seconds=_TTL),
+        report_store=RedisReportStore(
+            fake, max_reports_per_session=3, idle_ttl_seconds=_TTL
+        ),
+        agent=_Agent(),
+    )
+    with TestClient(application) as client:
+        demo_ids = {
+            key.split(":")[2] for key in fake.data if key.split(":")[1] == "session"
+        }
+        assert demo_ids
+        for demo_id in demo_ids:
+            base = f"/api/v1/sessions/{demo_id}"
+            assert client.get(base).json()["read_only"] is True
+            assert client.get(f"{base}/files").status_code == 200
+            assert client.get(f"{base}/export").status_code == 200
+    assert fake.ttls == {}

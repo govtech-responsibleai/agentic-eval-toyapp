@@ -136,6 +136,10 @@ class ReportStore(Protocol):
         """Resolve selected reports only for their owning session."""
         ...
 
+    async def touch(self, session_id: UUID) -> None:
+        """Renew the idle expiry of every report the session owns."""
+        ...
+
 
 class ReportProcessor:
     """Validate untrusted report bytes and deterministically extract text."""
@@ -394,6 +398,10 @@ class InMemoryReportStore:
                 resolved.append(self._records[file_id])
             return tuple(resolved)
 
+    async def touch(self, session_id: UUID) -> None:
+        """Process-local reports have no idle expiry to renew."""
+        del session_id
+
     def seed(
         self,
         session_id: UUID,
@@ -433,8 +441,12 @@ class _RedisReportLock(Protocol):
 class _RedisReportPipeline(Protocol):
     """Subset of a redis.asyncio MULTI/EXEC pipeline; commands buffer locally."""
 
-    def set(self, name: str, value: str) -> object:
-        """Queue one string write."""
+    def set(self, name: str, value: str, *, ex: int | None = None) -> object:
+        """Queue one string write, with an expiry in seconds when given."""
+        ...
+
+    def expire(self, name: str, time: int) -> object:
+        """Queue a TTL reset; Redis ignores it when the key does not exist."""
         ...
 
     def delete(self, *names: str) -> object:
@@ -519,6 +531,10 @@ class RedisReportStore:
     request never loads reports it does not use. Mutations hold a per-session
     distributed lock and write their keys in one MULTI/EXEC transaction.
 
+    Every write of a session's report keys sets the idle TTL with `SET ... EX`
+    and `touch` renews all of them together. Seeded demo reports are written
+    without a TTL; callers do not touch read-only sessions.
+
     Redis calls and lock waits are awaited on the event loop. Only the JSON
     and base64 work on content values, which can reach several megabytes, runs
     in a worker thread. Content loads are bounded by `report_load_concurrency`
@@ -539,6 +555,7 @@ class RedisReportStore:
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
         report_load_concurrency: int = 4,
+        idle_ttl_seconds: int = 2_592_000,
         id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         if (client is None) == (client_factory is None):
@@ -554,6 +571,8 @@ class RedisReportStore:
             raise ValueError("lock_blocking_timeout_seconds must not be negative")
         if report_load_concurrency < 1:
             raise ValueError("report_load_concurrency must be at least 1")
+        if idle_ttl_seconds < 1:
+            raise ValueError("idle_ttl_seconds must be at least 1")
         self._client = client
         self._client_factory = client_factory
         self._owns_client = False
@@ -561,6 +580,7 @@ class RedisReportStore:
         self._key_prefix = normalised_key_prefix
         self._lock_timeout_seconds = lock_timeout_seconds
         self._lock_blocking_timeout_seconds = lock_blocking_timeout_seconds
+        self._idle_ttl_seconds = idle_ttl_seconds
         self._id_factory = id_factory
         # anyio's semaphore binds to an event loop on first use, so building it
         # here does not require a running loop.
@@ -577,6 +597,7 @@ class RedisReportStore:
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
         report_load_concurrency: int = 4,
+        idle_ttl_seconds: int = 2_592_000,
     ) -> "RedisReportStore":
         """Describe a Redis client that `open()` creates on the running loop."""
 
@@ -596,6 +617,7 @@ class RedisReportStore:
             lock_timeout_seconds=lock_timeout_seconds,
             lock_blocking_timeout_seconds=lock_blocking_timeout_seconds,
             report_load_concurrency=report_load_concurrency,
+            idle_ttl_seconds=idle_ttl_seconds,
         )
 
     @property
@@ -679,9 +701,15 @@ class RedisReportStore:
             )
             content = await to_thread.run_sync(self._serialize_content, stored)
             pipeline = self._require_client().pipeline(transaction=True)
-            pipeline.set(self._content_key(session_id, file_id), content)
             pipeline.set(
-                self._index_key(session_id), self._serialize_index((*index, metadata))
+                self._content_key(session_id, file_id),
+                content,
+                ex=self._idle_ttl_seconds,
+            )
+            pipeline.set(
+                self._index_key(session_id),
+                self._serialize_index((*index, metadata)),
+                ex=self._idle_ttl_seconds,
             )
             await self._execute(pipeline)
             return metadata
@@ -705,7 +733,9 @@ class RedisReportStore:
             pipeline.delete(self._content_key(session_id, file_id))
             if retained:
                 pipeline.set(
-                    self._index_key(session_id), self._serialize_index(retained)
+                    self._index_key(session_id),
+                    self._serialize_index(retained),
+                    ex=self._idle_ttl_seconds,
                 )
             else:
                 pipeline.delete(self._index_key(session_id))
@@ -732,6 +762,25 @@ class RedisReportStore:
                     session_id, metadata_by_id[file_id]
                 )
         return tuple(loaded[file_id] for file_id in file_ids)
+
+    async def touch(self, session_id: UUID) -> None:
+        """Renew the idle TTL of the index and every content key in one EXEC.
+
+        Only the small index is read. `EXPIRE` never creates a key, so a report
+        removed concurrently is not resurrected; a concurrent `add` writes its
+        own keys with the TTL.
+        """
+        index = await self._read_index(session_id)
+        if not index:
+            return
+        pipeline = self._require_client().pipeline(transaction=True)
+        pipeline.expire(self._index_key(session_id), self._idle_ttl_seconds)
+        for metadata in index:
+            pipeline.expire(
+                self._content_key(session_id, metadata.file_id),
+                self._idle_ttl_seconds,
+            )
+        await self._execute(pipeline)
 
     async def seed(
         self,

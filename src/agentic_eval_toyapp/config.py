@@ -113,6 +113,7 @@ class AppSettings(BaseSettings):
     langfuse_flush_on_turn: bool = True
     langfuse_include_report_text: bool = False
     session_max_turns: int = Field(default=10, ge=1, le=100)
+    session_idle_ttl_seconds: int = Field(default=30 * 24 * 60 * 60, ge=60)
     session_store_backend: SessionStoreBackend = SessionStoreBackend.MEMORY
     redis_url: SecretStr | None = Field(
         default=None,

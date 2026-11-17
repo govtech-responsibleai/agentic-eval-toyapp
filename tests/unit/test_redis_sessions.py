@@ -81,8 +81,15 @@ class _FakeLock:
 
 
 class _FakeRedisClient:
+    """Model the Redis TTL rules the store relies on.
+
+    A plain `SET` clears a key's TTL, `SET ... EX` replaces it, and `EXPIRE`
+    on a missing key changes nothing and returns 0.
+    """
+
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
         self.available = True
         self.lock_available = True
         self.locks: list[_FakeLock] = []
@@ -96,12 +103,26 @@ class _FakeRedisClient:
         self.ensure_available()
         return True
 
-    async def set(self, name: str, value: str, *, nx: bool = False) -> object:
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> object:
         self.ensure_available()
         await asyncio.sleep(0)
         if nx and name in self.data:
             return False
         self.data[name] = value
+        if ex is None:
+            self.ttls.pop(name, None)
+        else:
+            self.ttls[name] = ex
+        return True
+
+    async def expire(self, name: str, time: int) -> bool:
+        self.ensure_available()
+        await asyncio.sleep(0)
+        if name not in self.data:
+            return False
+        self.ttls[name] = time
         return True
 
     async def get(self, name: str) -> str | bytes | None:
@@ -235,6 +256,8 @@ async def test_redis_store_retries_uuid_collisions_and_validates_configuration()
         RedisSessionStore(_FakeRedisClient(), key_prefix="  ")
     with pytest.raises(ValueError, match="lock_timeout_seconds"):
         RedisSessionStore(_FakeRedisClient(), lock_timeout_seconds=0)
+    with pytest.raises(ValueError, match="idle_ttl_seconds"):
+        RedisSessionStore(_FakeRedisClient(), idle_ttl_seconds=0)
 
 
 class _BlockingLock(_FakeLock):
@@ -488,3 +511,91 @@ async def test_redis_v1_payload_loads_as_mutable() -> None:
     snapshot = await store.get(session_id)
     assert snapshot.read_only is False
     assert snapshot.retained_turns == 1
+
+
+_TTL = 3_600
+
+
+def _session_key(session_id: UUID) -> str:
+    return f"agentic-eval-toyapp:session:{session_id}"
+
+
+def _pair() -> tuple[ConversationMessage, ConversationMessage]:
+    return (
+        ConversationMessage(role=ConversationRole.USER, content="hi"),
+        ConversationMessage(role=ConversationRole.ASSISTANT, content="hello"),
+    )
+
+
+@pytest.mark.anyio
+async def test_create_sets_the_idle_ttl_on_the_session_key() -> None:
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+
+    session = await store.create()
+
+    assert client.ttls == {_session_key(session.session_id): _TTL}
+
+
+@pytest.mark.anyio
+async def test_every_turn_rewrites_the_session_with_the_idle_ttl() -> None:
+    """A plain SET would clear the TTL; every turn must write it again."""
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+    session_id = (await store.create()).session_id
+    key = _session_key(session_id)
+
+    for message in ("one", "two"):
+        client.ttls[key] = 5  # as if the session had been idle for a while
+        await store.run_turn(session_id, message, agent=_RecordingAgent())
+        assert client.ttls[key] == _TTL
+
+
+@pytest.mark.anyio
+async def test_get_refreshes_the_idle_ttl_of_a_mutable_session() -> None:
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+    session_id = (await store.create()).session_id
+    client.ttls[_session_key(session_id)] = 5
+
+    await store.get(session_id)
+
+    assert client.ttls[_session_key(session_id)] == _TTL
+
+
+@pytest.mark.anyio
+async def test_a_seeded_read_only_session_never_gains_a_ttl() -> None:
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+    session_id = UUID("00000000-0000-0000-0000-0000000000d0")
+
+    assert await store.seed(session_id, (_pair(),), read_only=True) is True
+    await store.get(session_id)
+
+    assert client.ttls == {}
+
+
+@pytest.mark.anyio
+async def test_unseed_leaves_an_expiring_empty_session() -> None:
+    """A rolled-back demo is an ordinary session, so it must expire."""
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+    session_id = UUID("00000000-0000-0000-0000-0000000000d1")
+    await store.seed(session_id, (_pair(),), read_only=True)
+
+    await store.unseed(session_id)
+
+    assert client.ttls == {_session_key(session_id): _TTL}
+    assert (await store.get(session_id)).retained_turns == 0
+
+
+@pytest.mark.anyio
+async def test_get_of_a_missing_session_creates_no_key() -> None:
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+
+    with pytest.raises(SessionNotFoundError):
+        await store.get(uuid4())
+
+    assert client.data == {}
+    assert client.ttls == {}

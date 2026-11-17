@@ -267,8 +267,14 @@ class _RedisClient(Protocol):
         """Check connectivity to the Redis service."""
         ...
 
-    async def set(self, name: str, value: str, *, nx: bool = False) -> object:
-        """Set a string value, optionally only when the key is absent."""
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> object:
+        """Set a string value, optionally only when absent and with an expiry."""
+        ...
+
+    async def expire(self, name: str, time: int) -> bool:
+        """Reset one key's TTL; return False when the key does not exist."""
         ...
 
     async def get(self, name: str) -> str | bytes | None:
@@ -298,6 +304,10 @@ class RedisSessionStore:
     is bound to one event loop, so a store built by `from_url` creates its
     client in `open()` (the application lifespan) and closes it in `aclose()`.
     A client passed to the constructor is owned by the caller and never closed.
+
+    Every write of a mutable session sets the idle TTL with `SET ... EX`, so
+    no write path can strip it, and `get` refreshes it. Seeded read-only demo
+    sessions are written without a TTL and are never refreshed.
     """
 
     _PAYLOAD_VERSION = 2
@@ -311,6 +321,7 @@ class RedisSessionStore:
         key_prefix: str = "agentic-eval-toyapp",
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
+        idle_ttl_seconds: int = 2_592_000,
         id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
         if (client is None) == (client_factory is None):
@@ -324,6 +335,8 @@ class RedisSessionStore:
             raise ValueError("lock_timeout_seconds must be positive")
         if lock_blocking_timeout_seconds < 0:
             raise ValueError("lock_blocking_timeout_seconds must not be negative")
+        if idle_ttl_seconds < 1:
+            raise ValueError("idle_ttl_seconds must be at least 1")
         self._client = client
         self._client_factory = client_factory
         self._owns_client = False
@@ -331,6 +344,7 @@ class RedisSessionStore:
         self._key_prefix = normalised_key_prefix
         self._lock_timeout_seconds = lock_timeout_seconds
         self._lock_blocking_timeout_seconds = lock_blocking_timeout_seconds
+        self._idle_ttl_seconds = idle_ttl_seconds
         self._id_factory = id_factory
 
     @classmethod
@@ -343,6 +357,7 @@ class RedisSessionStore:
         socket_timeout_seconds: float = 5.0,
         lock_timeout_seconds: float = 1_800.0,
         lock_blocking_timeout_seconds: float = 10.0,
+        idle_ttl_seconds: int = 2_592_000,
     ) -> "RedisSessionStore":
         """Describe a Redis client that `open()` creates on the running loop."""
 
@@ -361,6 +376,7 @@ class RedisSessionStore:
             key_prefix=key_prefix,
             lock_timeout_seconds=lock_timeout_seconds,
             lock_blocking_timeout_seconds=lock_blocking_timeout_seconds,
+            idle_ttl_seconds=idle_ttl_seconds,
         )
 
     @property
@@ -417,6 +433,7 @@ class RedisSessionStore:
                     self._session_key(session_id),
                     self._serialize(()),
                     nx=True,
+                    ex=self._idle_ttl_seconds,
                 )
             except RedisError as error:
                 raise SessionStoreUnavailableError("Redis is unavailable") from error
@@ -457,8 +474,10 @@ class RedisSessionStore:
         await self._write_turns(session_id, [])
 
     async def get(self, session_id: UUID) -> SessionResponse:
-        """Return one atomically read persistent session snapshot."""
+        """Return one session snapshot and renew a mutable session's idle TTL."""
         turns, read_only = await self._read_session(session_id)
+        if not read_only:
+            await self._refresh_ttl(session_id)
         return SessionResponse(
             session_id=session_id,
             messages=_flatten_turns(turns),
@@ -523,11 +542,22 @@ class RedisSessionStore:
             stored = await client.set(
                 self._session_key(session_id),
                 self._serialize(turns),
+                ex=self._idle_ttl_seconds,
             )
         except RedisError as error:
             raise SessionStoreUnavailableError("Redis is unavailable") from error
         if not stored:
             raise SessionStoreUnavailableError("Redis did not persist the session")
+
+    async def _refresh_ttl(self, session_id: UUID) -> None:
+        # A key that expired since the read is not recreated; the next request
+        # simply finds the session missing.
+        try:
+            await self._require_client().expire(
+                self._session_key(session_id), self._idle_ttl_seconds
+            )
+        except RedisError as error:
+            raise SessionStoreUnavailableError("Redis is unavailable") from error
 
     @asynccontextmanager
     async def _session_lock(self, session_id: UUID) -> AsyncGenerator[None, None]:

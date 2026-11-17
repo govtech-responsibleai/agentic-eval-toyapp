@@ -227,6 +227,7 @@ def test_redis_backend_configuration_builds_the_persistent_stores() -> None:
         socket_timeout_seconds=5.0,
         lock_timeout_seconds=1_800.0,
         lock_blocking_timeout_seconds=10.0,
+        idle_ttl_seconds=2_592_000,
     )
     report_from_url.assert_called_once_with(
         "rediss://user:private@redis.example:6380/0",
@@ -236,6 +237,7 @@ def test_redis_backend_configuration_builds_the_persistent_stores() -> None:
         lock_timeout_seconds=1_800.0,
         lock_blocking_timeout_seconds=10.0,
         report_load_concurrency=4,
+        idle_ttl_seconds=2_592_000,
     )
 
 

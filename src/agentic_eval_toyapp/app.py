@@ -455,6 +455,7 @@ def _build_session_store(settings: AppSettings) -> SessionStore:
         socket_timeout_seconds=settings.redis_socket_timeout_seconds,
         lock_timeout_seconds=settings.redis_lock_timeout_seconds,
         lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
+        idle_ttl_seconds=settings.session_idle_ttl_seconds,
     )
 
 
@@ -472,6 +473,7 @@ def _build_report_store(settings: AppSettings) -> ReportStore:
         lock_timeout_seconds=settings.redis_lock_timeout_seconds,
         lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
         report_load_concurrency=settings.report_load_concurrency,
+        idle_ttl_seconds=settings.session_idle_ttl_seconds,
     )
 
 
@@ -669,6 +671,14 @@ def create_app(
     )
     resolved_report_store = report_store or _build_report_store(resolved_settings)
     demos = load_demos()
+
+    async def access_session(session_id: UUID) -> SessionResponse:
+        """Load a session and renew the idle expiry of everything it owns."""
+        session = await resolved_store.get(session_id)
+        if not session.read_only:
+            await resolved_report_store.touch(session_id)
+        return session
+
     admission = TurnAdmission(resolved_settings.max_pending_turns)
     resolver: _AgentResolver
 
@@ -957,7 +967,7 @@ def create_app(
     )
     async def get_session(session_id: UUID) -> SessionResponse:
         """Return safe public messages for one existing session."""
-        return await resolved_store.get(session_id)
+        return await access_session(session_id)
 
     @application.post(
         f"{API_PREFIX}/sessions/{{session_id}}/files",
@@ -979,7 +989,7 @@ def create_app(
     ) -> ReportUploadResponse:
         """Validate and retain one report without invoking an agent turn."""
         with diagnostic_context(session_id):
-            session = await resolved_store.get(session_id)
+            session = await access_session(session_id)
             if session.read_only:
                 raise SessionReadOnlyError
             try:
@@ -1040,7 +1050,7 @@ def create_app(
     )
     async def list_reports(session_id: UUID) -> ReportListResponse:
         """List safe metadata for reports retained by this session."""
-        await resolved_store.get(session_id)
+        await access_session(session_id)
         return ReportListResponse(
             files=await resolved_report_store.list_for_session(session_id)
         )
@@ -1057,7 +1067,7 @@ def create_app(
     )
     async def delete_report(session_id: UUID, file_id: UUID) -> Response:
         """Remove one owned report without changing past conversation turns."""
-        session = await resolved_store.get(session_id)
+        session = await access_session(session_id)
         if session.read_only:
             raise SessionReadOnlyError
         await resolved_report_store.delete(session_id, file_id)
@@ -1080,7 +1090,7 @@ def create_app(
     ) -> SessionMessageResponse:
         """Execute and retain one bounded agent turn."""
         with diagnostic_context(session_id, turn=True):
-            session = await resolved_store.get(session_id)
+            session = await access_session(session_id)
             if session.read_only:
                 raise SessionReadOnlyError
             if len(request.file_ids) > resolved_settings.upload_max_files_per_message:
@@ -1139,6 +1149,7 @@ def create_app(
     )
     async def export_session_endpoint(session_id: UUID) -> Response:
         """Export one session as a portable JSON or ZIP file."""
+        await access_session(session_id)
         content, content_type, filename = await export_session(
             session_id, resolved_store, resolved_report_store
         )

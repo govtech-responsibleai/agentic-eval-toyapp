@@ -115,6 +115,9 @@ class _StubReportStore:
         by_id = {r.metadata.file_id: r for r in self._reports.get(session_id, [])}
         return tuple(by_id[fid] for fid in file_ids)
 
+    async def touch(self, session_id: UUID) -> None:
+        del session_id
+
 
 def _make_text_report(
     file_id: UUID | None = None,

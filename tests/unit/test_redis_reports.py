@@ -90,14 +90,18 @@ class _FakePipeline:
         if not transaction:
             raise AssertionError("report writes must use a MULTI/EXEC pipeline")
         self._client = client
-        self._commands: list[tuple[str, tuple[str, ...]]] = []
+        self._commands: list[tuple[str, tuple[str, ...], int | None]] = []
 
-    def set(self, name: str, value: str) -> object:
-        self._commands.append(("set", (name, value)))
+    def set(self, name: str, value: str, *, ex: int | None = None) -> object:
+        self._commands.append(("set", (name, value), ex))
+        return self
+
+    def expire(self, name: str, time: int) -> object:
+        self._commands.append(("expire", (name,), time))
         return self
 
     def delete(self, *names: str) -> object:
-        self._commands.append(("delete", names))
+        self._commands.append(("delete", names, None))
         return self
 
     async def execute(self) -> list[object]:
@@ -108,15 +112,28 @@ class _FakePipeline:
             raise ConnectionError("fake EXEC failure")
         self._client.executed += 1
         results: list[object] = []
-        for command, arguments in self._commands:
+        data, ttls = self._client.data, self._client.ttls
+        for command, arguments, seconds in self._commands:
             if command == "set":
                 name, value = arguments
-                self._client.data[name] = value
+                data[name] = value
+                # Like Redis, a SET without EX clears any existing TTL.
+                if seconds is None:
+                    ttls.pop(name, None)
+                else:
+                    ttls[name] = seconds
                 results.append(True)
+            elif command == "expire":
+                (name,) = arguments
+                assert seconds is not None
+                if name in data:
+                    ttls[name] = seconds
+                results.append(name in data)
             else:
-                removed = [name for name in arguments if name in self._client.data]
+                removed = [name for name in arguments if name in data]
                 for name in removed:
-                    del self._client.data[name]
+                    del data[name]
+                    ttls.pop(name, None)
                 results.append(len(removed))
         return results
 
@@ -124,6 +141,7 @@ class _FakePipeline:
 class _FakeRedisClient:
     def __init__(self) -> None:
         self.data: dict[str, str | bytes] = {}
+        self.ttls: dict[str, int] = {}
         self.reads: list[str] = []
         self.available = True
         self.lock_available = True
@@ -362,6 +380,8 @@ def test_redis_report_store_validates_configuration() -> None:
         RedisReportStore(max_reports_per_session=1)
     with pytest.raises(ValueError, match="report_load_concurrency"):
         RedisReportStore(client, max_reports_per_session=1, report_load_concurrency=0)
+    with pytest.raises(ValueError, match="idle_ttl_seconds"):
+        RedisReportStore(client, max_reports_per_session=1, idle_ttl_seconds=0)
 
 
 def _stored(
@@ -825,3 +845,120 @@ async def test_content_loads_are_bounded_by_report_load_concurrency() -> None:
 
     assert peak == 2
     assert [result[0].metadata.file_id for result in results] == file_ids
+
+
+_TTL = 3_600
+
+
+@pytest.mark.anyio
+async def test_add_writes_every_report_key_with_the_idle_ttl() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2, idle_ttl_seconds=_TTL)
+    session_id = uuid4()
+    first = await store.add(session_id, _processed_report("first"))
+    client.ttls[_index_key(session_id)] = 5
+    second = await store.add(session_id, _pdf_report())
+
+    assert client.ttls == {
+        _index_key(session_id): _TTL,
+        _content_key(session_id, first.file_id): _TTL,
+        _content_key(session_id, second.file_id): _TTL,
+    }
+
+
+@pytest.mark.anyio
+async def test_delete_rewrites_the_index_with_the_idle_ttl() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2, idle_ttl_seconds=_TTL)
+    session_id = uuid4()
+    first = await store.add(session_id, _processed_report("first"))
+    second = await store.add(session_id, _processed_report("second"))
+    client.ttls[_index_key(session_id)] = 5
+
+    await store.delete(session_id, first.file_id)
+
+    assert client.ttls == {
+        _index_key(session_id): _TTL,
+        _content_key(session_id, second.file_id): _TTL,
+    }
+
+
+@pytest.mark.anyio
+async def test_touch_refreshes_the_index_and_every_content_key() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=3, idle_ttl_seconds=_TTL)
+    session_id = uuid4()
+    other = uuid4()
+    reports = [await store.add(session_id, _processed_report(t)) for t in "ab"]
+    foreign = await store.add(other, _processed_report("c"))
+    for key in client.ttls:
+        client.ttls[key] = 5
+    client.reads.clear()
+
+    await store.touch(session_id)
+
+    assert client.ttls == {
+        _index_key(session_id): _TTL,
+        _content_key(session_id, reports[0].file_id): _TTL,
+        _content_key(session_id, reports[1].file_id): _TTL,
+        _index_key(other): 5,
+        _content_key(other, foreign.file_id): 5,
+    }
+    # Refreshing reads the small index only, never report content.
+    assert client.reads == [_index_key(session_id)]
+
+
+@pytest.mark.anyio
+async def test_touch_of_a_session_without_reports_writes_nothing() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1, idle_ttl_seconds=_TTL)
+
+    await store.touch(uuid4())
+
+    assert client.data == {}
+    assert client.executed == 0
+
+
+@pytest.mark.anyio
+async def test_touch_ignores_a_missing_content_key_and_creates_nothing() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=2, idle_ttl_seconds=_TTL)
+    session_id = uuid4()
+    gone = await store.add(session_id, _processed_report("gone"))
+    kept = await store.add(session_id, _processed_report("kept"))
+    del client.data[_content_key(session_id, gone.file_id)]
+    del client.ttls[_content_key(session_id, gone.file_id)]
+
+    await store.touch(session_id)
+
+    assert set(client.data) == {
+        _index_key(session_id),
+        _content_key(session_id, kept.file_id),
+    }
+    assert set(client.ttls) == set(client.data)
+
+
+@pytest.mark.anyio
+async def test_touch_reports_an_outage_as_unavailable() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1, idle_ttl_seconds=_TTL)
+    session_id = uuid4()
+    await store.add(session_id, _processed_report("first"))
+    client.fail_next_execute = True
+
+    with pytest.raises(ReportStoreUnavailableError):
+        await store.touch(session_id)
+
+
+@pytest.mark.anyio
+async def test_seeded_demo_reports_have_no_ttl() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1, idle_ttl_seconds=_TTL)
+    session_id = uuid4()
+
+    await store.seed(
+        session_id, (_stored(session_id, _processed_report("demo"), UUID(int=1)),)
+    )
+
+    assert len(client.data) == 2
+    assert client.ttls == {}
