@@ -49,6 +49,7 @@ from agentic_eval_toyapp.diagnostics import (
     classify_external_error,
     diagnostic_context,
     log_failure,
+    log_storage_event,
 )
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
 from agentic_eval_toyapp.models import (
@@ -720,9 +721,32 @@ def create_app(
     )
     demos = load_demos()
 
+    async def _purge_leftover_reports(session_id: UUID) -> None:
+        try:
+            removed = await resolved_report_store.purge(session_id)
+        except ReportStoreUnavailableError:
+            # Cleanup is best effort; the leftovers keep their idle TTL.
+            return
+        if removed:
+            log_storage_event(
+                event="orphan_cleanup",
+                session_id=str(session_id),
+                reason="session_missing",
+                bytes_freed=0,
+                reports_removed=removed,
+            )
+
     async def access_session(session_id: UUID) -> SessionResponse:
-        """Load a session and renew the idle expiry of everything it owns."""
-        session = await resolved_store.get(session_id)
+        """Load a session and renew the idle expiry of everything it owns.
+
+        A missing session key means the session is gone, even when Redis kept
+        some of its report keys; those leftovers are removed before the 404.
+        """
+        try:
+            session = await resolved_store.get(session_id)
+        except SessionNotFoundError:
+            await _purge_leftover_reports(session_id)
+            raise
         if not session.read_only:
             await resolved_report_store.touch(session_id)
         return session

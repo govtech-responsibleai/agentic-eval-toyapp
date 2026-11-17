@@ -75,6 +75,10 @@ class BookkeepingPipeline(Protocol):
         """Queue removal of hash fields."""
         ...
 
+    def zrem(self, name: str, *values: str) -> object:
+        """Queue removal of sorted-set members."""
+        ...
+
     async def execute(self) -> list[object]:
         """Apply every queued command atomically, or raise and apply none."""
         ...
@@ -286,6 +290,12 @@ class RedisMemoryGuard:
     def forget_reports(self, pipeline: BookkeepingPipeline, session_id: UUID) -> None:
         """Queue removal of a session's report size after its last report."""
         pipeline.hdel(self.bytes_key, f"{session_id}:reports")
+
+    def forget_session(self, pipeline: BookkeepingPipeline, session_id: UUID) -> None:
+        """Queue removal of every bookkeeping entry for a session that is gone."""
+        member = str(session_id)
+        pipeline.zrem(self.lru_key, member)
+        pipeline.hdel(self.bytes_key, f"{member}:session", f"{member}:reports")
 
     async def usage(self, client: RedisMemoryClient) -> MemoryUsage:
         """Read `used_memory` and `maxmemory` and derive the budget."""

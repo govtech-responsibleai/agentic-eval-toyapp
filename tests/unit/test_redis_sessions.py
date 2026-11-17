@@ -99,6 +99,10 @@ class _FakeBookkeepingPipeline:
         self._commands.append(("hdel", (name, *keys)))
         return self
 
+    def zrem(self, name: str, *values: str) -> object:
+        self._commands.append(("zrem", (name, *values)))
+        return self
+
     async def execute(self) -> list[object]:
         self._client.ensure_available()
         await asyncio.sleep(0)

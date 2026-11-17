@@ -42,5 +42,7 @@ class FakeMemoryState:
         if command == "hset":
             self.sizes[str(arguments[1])] = str(arguments[2])
             return 1
+        if command == "zrem":
+            return sum(self.lru.pop(str(m), None) is not None for m in arguments[1:])
         assert command == "hdel"
         return sum(self.sizes.pop(str(key), None) is not None for key in arguments[1:])

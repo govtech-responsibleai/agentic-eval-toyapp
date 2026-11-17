@@ -80,6 +80,10 @@ class _RecordingPipeline:
         self.commands.append(("hdel", name, *keys))
         return self
 
+    def zrem(self, name: str, *values: str) -> object:
+        self.commands.append(("zrem", name, *values))
+        return self
+
     async def execute(self) -> list[object]:
         return []
 
@@ -322,6 +326,7 @@ def test_track_queues_access_time_and_only_the_sizes_given() -> None:
     guard.track(pipeline, _SESSION)
     guard.track(pipeline, _SESSION, session_bytes=10, reports_bytes=20)
     guard.forget_reports(pipeline, _SESSION)
+    guard.forget_session(pipeline, _SESSION)
 
     member = str(_SESSION)
     assert pipeline.commands == [
@@ -330,6 +335,8 @@ def test_track_queues_access_time_and_only_the_sizes_given() -> None:
         ("hset", "toy:sessions:bytes", f"{member}:session", "10"),
         ("hset", "toy:sessions:bytes", f"{member}:reports", "20"),
         ("hdel", "toy:sessions:bytes", f"{member}:reports"),
+        ("zrem", "toy:sessions:lru", member),
+        ("hdel", "toy:sessions:bytes", f"{member}:session", f"{member}:reports"),
     ]
 
 

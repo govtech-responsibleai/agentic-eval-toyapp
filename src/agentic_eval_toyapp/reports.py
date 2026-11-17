@@ -20,6 +20,7 @@ from pypdf import PdfReader
 from redis.asyncio import Redis
 from redis.exceptions import LockError, RedisError
 
+from agentic_eval_toyapp.diagnostics import log_storage_event
 from agentic_eval_toyapp.models import ReportMediaType, ReportUploadResponse
 from agentic_eval_toyapp.redis_memory import (
     KEY_OVERHEAD_BYTES,
@@ -144,6 +145,14 @@ class ReportStore(Protocol):
 
     async def touch(self, session_id: UUID) -> None:
         """Renew the idle expiry of every report the session owns."""
+        ...
+
+    async def resolve_available(self, session_id: UUID) -> tuple[StoredReport, ...]:
+        """Return every report whose content still exists, in upload order."""
+        ...
+
+    async def purge(self, session_id: UUID) -> int:
+        """Remove every report left behind by a session that no longer exists."""
         ...
 
 
@@ -408,6 +417,19 @@ class InMemoryReportStore:
         """Process-local reports have no idle expiry to renew."""
         del session_id
 
+    async def resolve_available(self, session_id: UUID) -> tuple[StoredReport, ...]:
+        """Process-local reports cannot lose their content independently."""
+        with self._lock:
+            return tuple(
+                self._records[file_id]
+                for file_id in self._session_file_ids.get(session_id, ())
+            )
+
+    async def purge(self, session_id: UUID) -> int:
+        """Process-local sessions and reports are never separated."""
+        del session_id
+        return 0
+
     def seed(
         self,
         session_id: UUID,
@@ -457,6 +479,10 @@ class _RedisReportPipeline(Protocol):
 
     def hdel(self, name: str, *keys: str) -> object:
         """Queue removal of hash fields."""
+        ...
+
+    def zrem(self, name: str, *values: str) -> object:
+        """Queue removal of sorted-set members."""
         ...
 
     def set(self, name: str, value: str, *, ex: int | None = None) -> object:
@@ -792,10 +818,76 @@ class RedisReportStore:
         loaded: dict[UUID, StoredReport] = {}
         for file_id in file_ids:
             if file_id not in loaded:
-                loaded[file_id] = await self._read_content(
-                    session_id, metadata_by_id[file_id]
-                )
+                report = await self._read_content(session_id, metadata_by_id[file_id])
+                if report is None:
+                    await self._prune(session_id, (file_id,))
+                    raise ReportNotFoundError from None
+                loaded[file_id] = report
         return tuple(loaded[file_id] for file_id in file_ids)
+
+    async def resolve_available(self, session_id: UUID) -> tuple[StoredReport, ...]:
+        """Load every report that still has content; prune the rest.
+
+        Used by export: one report Redis already removed must not cost the
+        user every other file in the session.
+        """
+        available: list[StoredReport] = []
+        missing: list[UUID] = []
+        for metadata in await self._read_index(session_id):
+            report = await self._read_content(session_id, metadata)
+            if report is None:
+                missing.append(metadata.file_id)
+            else:
+                available.append(report)
+        if missing:
+            await self._prune(session_id, tuple(missing))
+        return tuple(available)
+
+    async def purge(self, session_id: UUID) -> int:
+        """Delete the index, every listed content key, and the bookkeeping.
+
+        Called when the session key is gone. A corrupt index cannot list its
+        content keys; those keep their idle TTL and expire on their own.
+        """
+        try:
+            index = await self._read_index(session_id)
+        except ReportStoreUnavailableError:
+            index = ()
+        pipeline = self._require_client().pipeline(transaction=True)
+        pipeline.delete(
+            self._index_key(session_id),
+            *(self._content_key(session_id, m.file_id) for m in index),
+        )
+        if self._memory_guard is not None:
+            self._memory_guard.forget_session(pipeline, session_id)
+        await self._execute(pipeline)
+        return len(index)
+
+    async def _prune(self, session_id: UUID, file_ids: tuple[UUID, ...]) -> None:
+        """Drop index entries whose content Redis removed; treat them as deleted."""
+        async with self._session_lock(session_id):
+            index = await self._read_index(session_id)
+            retained = tuple(m for m in index if m.file_id not in file_ids)
+            if len(retained) == len(index):
+                return
+            pipeline = self._require_client().pipeline(transaction=True)
+            if retained:
+                pipeline.set(
+                    self._index_key(session_id),
+                    self._serialize_index(retained),
+                    ex=self._idle_ttl_seconds,
+                )
+            else:
+                pipeline.delete(self._index_key(session_id))
+            self._track_size(pipeline, session_id, retained)
+            await self._execute(pipeline)
+        log_storage_event(
+            event="report_pruned",
+            session_id=str(session_id),
+            reason="content_missing",
+            bytes_freed=0,
+            reports_removed=len(index) - len(retained),
+        )
 
     async def touch(self, session_id: UUID) -> None:
         """Renew the idle TTL of the index and every content key in one EXEC.
@@ -901,13 +993,12 @@ class RedisReportStore:
 
     async def _read_content(
         self, session_id: UUID, metadata: ReportUploadResponse
-    ) -> StoredReport:
+    ) -> StoredReport | None:
+        """Load one report, or None when its content key no longer exists."""
         async with self._load_semaphore:
             raw = await self._get(self._content_key(session_id, metadata.file_id))
             if raw is None:
-                # The index lists a report whose content key is gone; treat the
-                # report as deleted rather than failing the request.
-                raise ReportNotFoundError from None
+                return None
             return await to_thread.run_sync(self._deserialize_content, raw, metadata)
 
     @staticmethod

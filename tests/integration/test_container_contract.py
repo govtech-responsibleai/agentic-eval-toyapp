@@ -77,6 +77,11 @@ def test_compose_keeps_credentials_at_runtime_and_persists_sessions() -> None:
     assert 'command: ["redis-server", "--appendonly", "yes"' in compose
     assert "TOYAPP_SESSION_STORE_BACKEND: redis" in compose
     assert "TOYAPP_REDIS_URL: redis://redis:6379/0" in compose
+    # The bundled Redis has no maxmemory, so readiness needs a fallback budget.
+    assert (
+        "TOYAPP_REDIS_MEMORY_BUDGET_BYTES: ${TOYAPP_REDIS_MEMORY_BUDGET_BYTES:-"
+        in compose
+    )
     assert "condition: service_healthy" in compose
     assert "redis-data:/data" in compose
     assert "no-new-privileges:true" in compose

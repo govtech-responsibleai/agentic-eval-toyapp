@@ -278,6 +278,42 @@ def test_javascript_uses_the_versioned_api_and_safe_dom_rendering() -> None:
     assert "eval(" not in response.text
 
 
+def test_javascript_recovers_from_a_removed_session_in_every_flow() -> None:
+    """Send, upload, listing, and delete must restart a session that is gone."""
+    script = _build_client().get("/static/app.js").text
+
+    # Both request helpers expose the status and the API error code.
+    assert "constructor(message, status, code = null)" in script
+    assert "this.code = code" in script
+    assert script.count("throw new ApiRequestError(") >= 2
+    assert "payload.code ?? null" in script
+
+    assert "function isMissingSession(error)" in script
+    assert 'error.code === "session_not_found"' in script
+    assert 'async function recoverFromMissingSession(error, draft = "")' in script
+    assert "has expired or was removed to free space" in script
+    for flow in ("loadFiles", "uploadFile", "deleteFile", "submitMessage"):
+        body = script.split(f"async function {flow}(", 1)[1].split(
+            "\nasync function ", 1
+        )[0]
+        assert "recoverFromMissingSession(" in body, flow
+    # The unsent message is carried into the replacement session.
+    assert "recoverFromMissingSession(error, message)" in script
+    assert "messageInput.value = draft" in script
+    # createSession keeps the recovery notice instead of clearing it.
+    assert (
+        'async function createSession(resumeId = null, replaceUrl = false, notice = "")'
+        in script
+    )
+
+
+def test_javascript_explains_an_attachment_that_is_no_longer_available() -> None:
+    script = _build_client().get("/static/app.js").text
+
+    assert 'error.code === "report_not_found"' in script
+    assert "is no longer available and was removed from this session" in script
+
+
 def test_stylesheet_is_local_and_contains_responsive_layout() -> None:
     """The demo UI should not depend on a CDN or fixed desktop viewport."""
     response: Response = _build_client().get("/static/style.css")

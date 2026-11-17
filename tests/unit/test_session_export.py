@@ -118,6 +118,13 @@ class _StubReportStore:
     async def touch(self, session_id: UUID) -> None:
         del session_id
 
+    async def resolve_available(self, session_id: UUID) -> tuple[StoredReport, ...]:
+        return tuple(self._reports.get(session_id, []))
+
+    async def purge(self, session_id: UUID) -> int:
+        del session_id
+        return 0
+
 
 def _make_text_report(
     file_id: UUID | None = None,

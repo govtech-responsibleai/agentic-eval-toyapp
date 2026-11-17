@@ -1,6 +1,9 @@
 """HTTP-level proof that the Redis stores run on the loop and own their client."""
 
 import asyncio
+import io
+import json
+import zipfile
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
@@ -86,6 +89,10 @@ class _Pipeline:
 
     def hdel(self, name: str, *keys: str) -> object:
         self._bookkeeping.append(("hdel", (name, *keys)))
+        return self
+
+    def zrem(self, name: str, *values: str) -> object:
+        self._bookkeeping.append(("zrem", (name, *values)))
         return self
 
     async def execute(self) -> list[object]:
@@ -449,3 +456,122 @@ def test_ready_has_no_memory_check_on_the_memory_backend() -> None:
     with TestClient(application) as client:
         names = [c["name"] for c in client.get("/ready").json()["checks"]]
     assert "redis_memory_budget" not in names
+
+
+async def _session_with_reports(
+    client: AsyncClient, count: int
+) -> tuple[str, list[str]]:
+    session_id = (await client.post("/api/v1/sessions")).json()["session_id"]
+    file_ids: list[str] = []
+    for n in range(count):
+        uploaded = await client.post(
+            f"/api/v1/sessions/{session_id}/files",
+            files={"file": (f"r{n}.md", f"# Report {n}".encode(), "text/markdown")},
+        )
+        file_ids.append(uploaded.json()["file_id"])
+    return session_id, file_ids
+
+
+@pytest.mark.anyio
+async def test_a_missing_session_key_is_a_404_and_its_reports_are_purged() -> None:
+    """Under allkeys-* eviction a session can lose its key but keep its reports."""
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, _ = await _session_with_reports(client, 2)
+        del fake.data[f"agentic-eval-toyapp:session:{session_id}"]
+        base = f"/api/v1/sessions/{session_id}"
+
+        responses = [
+            await client.get(base),
+            await client.get(f"{base}/files"),
+            await client.post(f"{base}/messages", json={"message": "hi"}),
+            await client.post(
+                f"{base}/files", files={"file": ("x.md", b"# X", "text/markdown")}
+            ),
+            await client.get(f"{base}/export"),
+        ]
+
+    assert [r.status_code for r in responses] == [404] * 5
+    assert {r.json()["code"] for r in responses} == {"session_not_found"}
+    assert [key for key in fake.data if session_id in key] == []
+    assert session_id not in fake.memory.lru
+    assert all(not field.startswith(session_id) for field in fake.memory.sizes)
+
+
+@pytest.mark.anyio
+async def test_an_attachment_whose_content_is_gone_is_a_404_and_is_unlisted() -> None:
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, (gone, kept) = await _session_with_reports(client, 2)
+        del fake.data[f"agentic-eval-toyapp:report:{session_id}:{gone}"]
+        base = f"/api/v1/sessions/{session_id}"
+
+        sent = await client.post(
+            f"{base}/messages", json={"message": "hi", "file_ids": [gone]}
+        )
+        listed = (await client.get(f"{base}/files")).json()["files"]
+        retry = await client.post(f"{base}/messages", json={"message": "hi"})
+
+    assert sent.status_code == 404
+    assert sent.json()["code"] == "report_not_found"
+    assert [f["file_id"] for f in listed] == [kept]
+    assert retry.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_export_skips_a_report_whose_content_is_gone() -> None:
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, (gone, kept) = await _session_with_reports(client, 2)
+        del fake.data[f"agentic-eval-toyapp:report:{session_id}:{gone}"]
+
+        exported = await client.get(f"/api/v1/sessions/{session_id}/export")
+
+    assert exported.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        names = archive.namelist()
+        manifest = json.loads(archive.read("session.json"))
+    assert names == ["session.json", f"uploaded/{kept}"]
+    assert [f["file_id"] for f in manifest["files"]] == [kept]
+
+
+@pytest.mark.anyio
+async def test_export_with_every_report_gone_returns_plain_json() -> None:
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, (only,) = await _session_with_reports(client, 1)
+        del fake.data[f"agentic-eval-toyapp:report:{session_id}:{only}"]
+
+        exported = await client.get(f"/api/v1/sessions/{session_id}/export")
+
+    assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith("application/json")
+    assert exported.json()["files"] == []
+
+
+@pytest.mark.anyio
+async def test_a_missing_report_index_lists_no_files_and_upload_still_works() -> None:
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, _ = await _session_with_reports(client, 1)
+        del fake.data[f"agentic-eval-toyapp:reports:{session_id}:index"]
+        base = f"/api/v1/sessions/{session_id}"
+
+        listed = await client.get(f"{base}/files")
+        uploaded = await client.post(
+            f"{base}/files", files={"file": ("y.md", b"# Y", "text/markdown")}
+        )
+
+    assert listed.status_code == 200
+    assert listed.json()["files"] == []
+    assert uploaded.status_code == 201

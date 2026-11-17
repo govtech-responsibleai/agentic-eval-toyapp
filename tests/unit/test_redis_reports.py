@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from typing import cast
@@ -113,6 +114,10 @@ class _FakePipeline:
 
     def hdel(self, name: str, *keys: str) -> object:
         self._bookkeeping.append(("hdel", (name, *keys)))
+        return self
+
+    def zrem(self, name: str, *values: str) -> object:
+        self._bookkeeping.append(("zrem", (name, *values)))
         return self
 
     def delete(self, *names: str) -> object:
@@ -1071,3 +1076,103 @@ async def test_guarded_seed_does_not_track_demo_reports() -> None:
 
     assert client.memory.lru == {}
     assert client.memory.sizes == {}
+
+
+@pytest.mark.anyio
+async def test_resolve_prunes_an_index_entry_whose_content_is_gone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A report Redis removed is treated as deleted, not as a server error."""
+    client = _FakeRedisClient()
+    store = _guarded_store(client, budget=1 << 30)
+    session_id = uuid4()
+    gone = await store.add(session_id, _processed_report("gone"))
+    kept = await store.add(session_id, _processed_report("kept"))
+    del client.data[_content_key(session_id, gone.file_id)]
+
+    with (
+        caplog.at_level(logging.INFO, logger="uvicorn.error"),
+        pytest.raises(ReportNotFoundError),
+    ):
+        await store.resolve(session_id, (gone.file_id,))
+
+    assert await store.list_for_session(session_id) == (kept,)
+    assert client.ttls[_index_key(session_id)] == _TTL
+    assert "event=report_pruned" in caplog.text
+    assert "gone" not in caplog.text.replace(str(gone.file_id), "")
+    assert [lock.acquired for lock in client.locks][-1] is False
+
+
+@pytest.mark.anyio
+async def test_pruning_the_only_report_removes_the_index_and_its_size() -> None:
+    client = _FakeRedisClient()
+    store = _guarded_store(client, budget=1 << 30)
+    session_id = uuid4()
+    only = await store.add(session_id, _processed_report("only"))
+    del client.data[_content_key(session_id, only.file_id)]
+
+    with pytest.raises(ReportNotFoundError):
+        await store.resolve(session_id, (only.file_id,))
+
+    assert client.data == {}
+    assert f"{session_id}:reports" not in client.memory.sizes
+
+
+@pytest.mark.anyio
+async def test_resolve_available_skips_missing_content_for_export() -> None:
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=3)
+    session_id = uuid4()
+    first = await store.add(session_id, _processed_report("first"))
+    gone = await store.add(session_id, _processed_report("gone"))
+    third = await store.add(session_id, _processed_report("third"))
+    del client.data[_content_key(session_id, gone.file_id)]
+
+    available = await store.resolve_available(session_id)
+
+    assert [r.metadata for r in available] == [first, third]
+    assert await store.list_for_session(session_id) == (first, third)
+
+
+@pytest.mark.anyio
+async def test_purge_removes_every_report_key_and_the_bookkeeping() -> None:
+    client = _FakeRedisClient()
+    store = _guarded_store(client, budget=1 << 30)
+    session_id = uuid4()
+    other = uuid4()
+    for text in ("a", "b"):
+        await store.add(session_id, _processed_report(text))
+    kept = await store.add(other, _processed_report("c"))
+    client.memory.sizes[f"{session_id}:session"] = "10"
+
+    removed = await store.purge(session_id)
+
+    assert removed == 2
+    assert set(client.data) == {_index_key(other), _content_key(other, kept.file_id)}
+    assert set(client.memory.lru) == {str(other)}
+    assert all(not f.startswith(str(session_id)) for f in client.memory.sizes)
+
+
+@pytest.mark.anyio
+async def test_purge_of_a_session_without_reports_still_clears_bookkeeping() -> None:
+    client = _FakeRedisClient()
+    store = _guarded_store(client, budget=1 << 30)
+    session_id = uuid4()
+    client.memory.lru[str(session_id)] = 1.0
+    client.memory.sizes[f"{session_id}:session"] = "10"
+
+    assert await store.purge(session_id) == 0
+    assert client.memory.lru == {}
+    assert client.memory.sizes == {}
+
+
+@pytest.mark.anyio
+async def test_purge_tolerates_a_corrupt_index() -> None:
+    """Cleanup of leftovers must never itself fail the request."""
+    client = _FakeRedisClient()
+    store = RedisReportStore(client, max_reports_per_session=1)
+    session_id = uuid4()
+    client.data[_index_key(session_id)] = "not JSON"
+
+    assert await store.purge(session_id) == 0
+    assert client.data == {}

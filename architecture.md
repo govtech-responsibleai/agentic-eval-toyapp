@@ -470,6 +470,38 @@ and uses a Redis distributed lock for each session. That lock covers reading
 history, running the agent, and writing the resulting pair, so concurrent app
 workers cannot silently overwrite one another's turns.
 
+Every key a non-demo session owns carries the same idle TTL
+(`session_idle_ttl_seconds`, 30 days by default). Writes set it with
+`SET ... EX`, so no write path can strip it, and every request that touches the
+session renews the session key and all of its report keys together through the
+API's `access_session` helper. Seeded demo sessions have no TTL.
+
+Redis memory is bounded by the app rather than by Redis. `RedisMemoryGuard`
+derives a budget from `INFO memory` (`maxmemory × redis_memory_high_water`,
+or `redis_memory_budget_bytes`, whichever is smaller) and, before a write that
+grows Redis, evicts the longest-idle sessions until the write fits. It keeps
+two shared keys: the sorted set `<prefix>:sessions:lru` of last-access times and
+the hash `<prefix>:sessions:bytes` of estimated sizes. Eviction is one Lua
+script, so a session is removed completely or not at all, and concurrent app
+instances never evict the same session twice. Demo sessions, sessions holding a
+turn or report lock, and the requesting session are exempt. When nothing can be
+evicted, the request fails with the capacity `503`.
+
+```text
+<prefix>:session:<sid>               turns                 idle TTL
+<prefix>:reports:<sid>:index         report metadata       idle TTL
+<prefix>:report:<sid>:<fid>          one report's content  idle TTL
+<prefix>:sessions:lru                sid -> last access    shared, no TTL
+<prefix>:sessions:bytes              sid fields -> bytes   shared, no TTL
+```
+
+Keys can still disappear outside the app's control, through expiry or an
+`allkeys-*` Redis eviction policy. A missing session key is a missing session
+(`404`), and its leftover report keys are purged. A missing report index lists
+no files, and a missing report content key is treated as a deleted report: it
+is dropped from the index, a message attaching it returns `404`, and export
+omits it.
+
 The configured `session_max_turns` value is a retention bound, not a lifetime
 message limit. Users can continue beyond ten turns by default; the oldest
 complete user/assistant pair is removed when a new pair is appended. Failed and
@@ -519,9 +551,11 @@ closed. OCR is not performed.
 
 The `ReportStore` boundary has in-memory and Redis implementations. Both retain
 immutable original bytes, extracted text, PDF page boundaries, and public
-metadata under the owning application session. `RedisReportStore` serializes a
-versioned, integrity-checked session report collection and protects mutations
-with a per-session distributed lock. Missing and cross-session IDs produce the
+metadata under the owning application session. `RedisReportStore` keeps a
+metadata index per session and one integrity-checked content key per report,
+and protects mutations with a per-session distributed lock. Listing reads only
+the index, and a message reads only the content of the reports it attaches;
+concurrent content loads are bounded by `report_load_concurrency`. Missing and cross-session IDs produce the
 same public error so callers cannot discover another session's files. Listing
 returns only owned metadata in upload order. Deletion removes the complete
 stored report and releases that session's capacity; it does not rewrite prior
@@ -1241,6 +1275,12 @@ excluded from `make ci`.
 - The in-memory backend loses bounded session history on restart. Redis makes
   session history persistent and worker-shared, but Redis operation and backup
   remain deployment responsibilities.
+- Redis memory is bounded by app-side eviction of idle sessions, so under load
+  the longest-idle sessions are removed and their users start new sessions.
+  Eviction requires a single Redis node; Redis Cluster is not supported. A
+  session key that disappears in the instant between an upload's ownership
+  check and its write can leave report keys behind; they expire with the idle
+  TTL.
 - The in-memory report backend loses uploads on restart. Redis makes original
   bytes, metadata, extracted text, and PDF page boundaries persistent and
   worker-shared, but Redis operation, data protection, retention, and backup
