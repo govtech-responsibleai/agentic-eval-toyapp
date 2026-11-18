@@ -11,28 +11,30 @@ to demonstrate and regression-test METIS agent evaluation metrics.
 
 ## What it does
 
-You can use the assistant through a web chat page or call it directly through a
-REST API. It does two separate jobs, and each message uses only one of them:
-
-| Route | Answers from | Example |
-|---|---|---|
-| **Policy Q&A** | The built-in Northstar policy documents only, with chunk citations | "What is the lodging limit for domestic travel?" |
-| **Report analysis** | The report you upload only, with page or section references | "Summarise this report" or "What risks does it flag?" |
+Northstar Policy & Report Assistant is a small assistant you can use through a
+web chat page or call directly through a REST API. It does two separate jobs,
+and each message you send is handled by only one of them. The first is policy
+Q&A: ask about Northstar Services' employee policies, such as "What is the
+lodging limit for domestic travel?", and a policy specialist searches the
+built-in policy documents and answers only from the passages it retrieved,
+citing each one. The second is report analysis: upload a text, Markdown, or
+text-based PDF report and ask for a summary or its key findings, such as "What
+risks does this report flag?", and a report specialist reads the whole report
+and answers only from it, pointing back to the pages or sections it used.
 
 ```text
-                              ┌──▶ Policy Q&A ───────▶ Northstar policy documents
-  your message ──▶ coordinator┤
-                              └──▶ Report analysis ──▶ the report you selected
+                                ┌──▶ Policy Q&A ───────▶ Northstar policy documents
+  your message ──▶ coordinator──┤
+                                └──▶ Report analysis ──▶ the report you selected
 
   One route per message. The two specialists never see each other's evidence.
 ```
 
-A coordinator reads each message and decides how to handle it. It replies
-itself (greetings, questions about the app, out-of-scope requests), asks a
-clarifying question, or hands the message to exactly one specialist. The policy
-specialist searches the policy documents and answers only from the passages it
-retrieved. The report specialist reads the whole selected report and answers
-only from it. Optional Langfuse instrumentation exports each turn as a trace.
+A coordinator sits in front of both specialists and decides what to do with
+each message. It replies itself to greetings, questions about the app, and
+out-of-scope requests, asks a clarifying question when the task or report is
+unclear, and otherwise hands the message to exactly one specialist. Optional
+Langfuse instrumentation exports each turn as a trace.
 
 ### What it can't do
 

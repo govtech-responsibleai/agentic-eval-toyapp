@@ -1,5 +1,6 @@
 # Local design notes; this file must never be committed.
 design.md
+docs/superpowers/
 
 # Local configuration and Python build/test output.
 .env
