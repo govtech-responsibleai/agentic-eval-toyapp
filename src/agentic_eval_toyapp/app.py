@@ -49,6 +49,7 @@ from agentic_eval_toyapp.diagnostics import (
     classify_external_error,
     diagnostic_context,
     log_failure,
+    log_process_memory,
     log_storage_event,
 )
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
@@ -108,6 +109,7 @@ from agentic_eval_toyapp.retrieval import (
     load_corpus,
 )
 from agentic_eval_toyapp.session_export import export_session
+from agentic_eval_toyapp.session_memory import SessionMemoryLedger
 from agentic_eval_toyapp.sessions import (
     AgentRunner,
     InMemorySessionStore,
@@ -461,11 +463,13 @@ def _build_memory_guard(settings: AppSettings) -> RedisMemoryGuard:
 
 
 def _build_session_store(
-    settings: AppSettings, memory_guard: RedisMemoryGuard
+    settings: AppSettings,
+    memory_guard: RedisMemoryGuard,
+    ledger: SessionMemoryLedger | None,
 ) -> SessionStore:
     """Construct the explicitly selected conversation-session backend."""
     if settings.session_store_backend is SessionStoreBackend.MEMORY:
-        return InMemorySessionStore(max_turns=settings.session_max_turns)
+        return InMemorySessionStore(max_turns=settings.session_max_turns, ledger=ledger)
     return RedisSessionStore.from_url(
         settings.require_redis_configuration(),
         max_turns=settings.session_max_turns,
@@ -479,12 +483,15 @@ def _build_session_store(
 
 
 def _build_report_store(
-    settings: AppSettings, memory_guard: RedisMemoryGuard
+    settings: AppSettings,
+    memory_guard: RedisMemoryGuard,
+    ledger: SessionMemoryLedger | None,
 ) -> ReportStore:
     """Construct the report backend selected with conversation persistence."""
     if settings.session_store_backend is SessionStoreBackend.MEMORY:
         return InMemoryReportStore(
-            max_reports_per_session=settings.upload_max_reports_per_session
+            max_reports_per_session=settings.upload_max_reports_per_session,
+            ledger=ledger,
         )
     return RedisReportStore.from_url(
         settings.require_redis_configuration(),
@@ -708,8 +715,20 @@ def create_app(
     """Construct an application with explicit, injectable dependencies."""
     resolved_settings = settings or get_settings()
     memory_guard = _build_memory_guard(resolved_settings)
+    # One ledger counts a process-local session's turns and reports together,
+    # expires sessions past the idle TTL, and evicts idle sessions to stay
+    # under the in-memory budget.
+    memory_ledger = SessionMemoryLedger(
+        budget_bytes=resolved_settings.session_memory_budget_bytes,
+        idle_ttl_seconds=resolved_settings.session_idle_ttl_seconds,
+    )
+    # Eviction must remove a session from both stores, so the ledger is only
+    # used when the app builds both; an injected store opts out entirely.
+    shared_ledger = (
+        memory_ledger if session_store is None and report_store is None else None
+    )
     resolved_store = session_store or _build_session_store(
-        resolved_settings, memory_guard
+        resolved_settings, memory_guard, shared_ledger
     )
     resolved_report_processor = report_processor or ReportProcessor(
         max_bytes=resolved_settings.upload_max_bytes,
@@ -717,7 +736,7 @@ def create_app(
         max_extracted_characters=(resolved_settings.upload_max_extracted_characters),
     )
     resolved_report_store = report_store or _build_report_store(
-        resolved_settings, memory_guard
+        resolved_settings, memory_guard, shared_ledger
     )
     demos = load_demos()
 
@@ -792,6 +811,11 @@ def create_app(
                 resolved_settings.generation_provider.value,
                 str(resolved_settings.langfuse_enabled).lower(),
             )
+            if isinstance(resolved_store, InMemorySessionStore):
+                # Baseline RAM before any participant session exists.
+                log_process_memory(
+                    event="startup", ledger_bytes=memory_ledger.total_bytes
+                )
             try:
                 yield
             finally:
@@ -803,6 +827,8 @@ def create_app(
         description="Controlled RAG target application for METIS evaluations.",
         lifespan=lifespan,
     )
+    # Internal handle for tests; empty unless the built-in memory stores use it.
+    application.state.session_memory_ledger = memory_ledger
     application.mount(
         "/static",
         StaticFiles(directory=STATIC_DIRECTORY),
@@ -1133,6 +1159,7 @@ def create_app(
             except (
                 ReportStoreUnavailableError,
                 ReportStoreBusyError,
+                SessionNotFoundError,
                 StorageCapacityError,
                 StorageUnavailableError,
             ):

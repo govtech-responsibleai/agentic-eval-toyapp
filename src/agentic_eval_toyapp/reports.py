@@ -28,6 +28,11 @@ from agentic_eval_toyapp.redis_memory import (
     RedisMemoryGuard,
     estimate_report_bytes,
 )
+from agentic_eval_toyapp.session_memory import (
+    SessionMemoryLedger,
+    SessionNotFoundError,
+    report_footprint,
+)
 
 
 class UnsupportedReportTypeError(ValueError):
@@ -304,14 +309,30 @@ class ReportProcessor:
         return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
+def _stored_report_bytes(report: StoredReport) -> int:
+    return report_footprint(
+        report.original_bytes,
+        report.extracted_text,
+        (page.text for page in report.pages),
+    )
+
+
 class InMemoryReportStore:
-    """Retain bounded complete reports and enforce session ownership."""
+    """Retain bounded complete reports and enforce session ownership.
+
+    With a ledger, each added report's original bytes, extracted text and page
+    text count towards its session's size, and a deletion subtracts the same
+    amount. Adding a report first makes room under the ledger's budget, and
+    evicting a session removes all of its reports. Seeded reports are never
+    counted.
+    """
 
     def __init__(
         self,
         *,
         max_reports_per_session: int,
         id_factory: Callable[[], UUID] = uuid4,
+        ledger: SessionMemoryLedger | None = None,
     ) -> None:
         if max_reports_per_session < 1:
             raise ValueError("max_reports_per_session must be at least 1")
@@ -321,6 +342,9 @@ class InMemoryReportStore:
         self._owners: dict[UUID, UUID] = {}
         self._session_file_ids: dict[UUID, list[UUID]] = defaultdict(list)
         self._lock = Lock()
+        self._ledger = ledger
+        if ledger is not None:
+            ledger.bind_report_store(self._remove_session_reports)
 
     @property
     def max_reports_per_session(self) -> int:
@@ -347,10 +371,25 @@ class InMemoryReportStore:
         self, session_id: UUID, report: ProcessedReport
     ) -> ReportUploadResponse:
         """Allocate a globally unique file ID and retain the complete report."""
+        if self._ledger is not None:
+            with self._lock:
+                self._check_capacity(session_id)
+            # Extraction ran without a lock, so the session may have been
+            # evicted meanwhile; storing now would leave unowned reports.
+            if not self._ledger.is_tracked(session_id):
+                raise SessionNotFoundError
+            # Make room without this store's lock; eviction takes it.
+            self._ledger.ensure_room(
+                report_footprint(
+                    report.original_bytes,
+                    report.extracted_text,
+                    (page.text for page in report.pages),
+                ),
+                current_session=session_id,
+            )
         with self._lock:
+            self._check_capacity(session_id)
             session_file_ids = self._session_file_ids[session_id]
-            if len(session_file_ids) >= self._max_reports_per_session:
-                raise ReportCapacityError("session report capacity reached")
 
             file_id: UUID | None = None
             for _ in range(100):
@@ -370,15 +409,35 @@ class InMemoryReportStore:
                 sha256=report.sha256,
                 page_count=report.page_count,
             )
-            self._records[file_id] = StoredReport(
+            stored = StoredReport(
                 metadata=metadata,
                 original_bytes=report.original_bytes,
                 extracted_text=report.extracted_text,
                 pages=report.pages,
             )
+            self._records[file_id] = stored
             self._owners[file_id] = session_id
             session_file_ids.append(file_id)
+            if self._ledger is not None:
+                self._ledger.adjust(
+                    session_id, report_delta=_stored_report_bytes(stored)
+                )
             return metadata
+
+    def _check_capacity(self, session_id: UUID) -> None:
+        if len(self._session_file_ids.get(session_id, ())) >= (
+            self._max_reports_per_session
+        ):
+            raise ReportCapacityError("session report capacity reached")
+
+    def _remove_session_reports(self, session_id: UUID) -> int:
+        """Drop every report a session owns and return how many there were."""
+        with self._lock:
+            file_ids = self._session_file_ids.pop(session_id, [])
+            for file_id in file_ids:
+                del self._records[file_id]
+                del self._owners[file_id]
+            return len(file_ids)
 
     async def list_for_session(
         self, session_id: UUID
@@ -395,8 +454,12 @@ class InMemoryReportStore:
         with self._lock:
             if self._owners.get(file_id) != session_id:
                 raise ReportNotFoundError from None
-            del self._records[file_id]
+            removed = self._records.pop(file_id)
             del self._owners[file_id]
+            if self._ledger is not None:
+                self._ledger.adjust(
+                    session_id, report_delta=-_stored_report_bytes(removed)
+                )
             self._session_file_ids[session_id].remove(file_id)
 
     async def resolve(
@@ -426,9 +489,12 @@ class InMemoryReportStore:
             )
 
     async def purge(self, session_id: UUID) -> int:
-        """Process-local sessions and reports are never separated."""
-        del session_id
-        return 0
+        """Remove reports left by a session that no longer exists.
+
+        Eviction removes a session's reports with it, so this normally finds
+        nothing; it guards against reports outliving their session.
+        """
+        return self._remove_session_reports(session_id)
 
     def seed(
         self,

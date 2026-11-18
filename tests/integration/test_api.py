@@ -5,12 +5,13 @@ import logging
 from collections.abc import Callable, Sequence
 from datetime import date
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from anyio import CapacityLimiter
 from httpx2 import Client, Response
 from starlette.testclient import TestClient
+from tests.support.fake_clock import FakeClock
 
 from agentic_eval_toyapp.agent import RagAgent, RagSpecialistAdapter
 from agentic_eval_toyapp.analysis import (
@@ -26,6 +27,7 @@ from agentic_eval_toyapp.coordinator import (
     ScriptedCoordinatorGenerationProvider,
     load_coordinator_prompt,
 )
+from agentic_eval_toyapp.demo import load_demos
 from agentic_eval_toyapp.models import (
     AgentAction,
     AgentActionKind,
@@ -48,6 +50,10 @@ from agentic_eval_toyapp.providers import (
 )
 from agentic_eval_toyapp.reports import StoredReport
 from agentic_eval_toyapp.retrieval import AsyncRetriever
+from agentic_eval_toyapp.session_memory import (
+    SESSION_ALLOWANCE_BYTES,
+    SessionMemoryLedger,
+)
 from agentic_eval_toyapp.sessions import AgentRunner, InMemorySessionStore
 
 
@@ -1122,3 +1128,180 @@ def test_default_application_fails_without_live_provider_configuration() -> None
     cause = exc_info.value.__cause__
     assert isinstance(cause, ValueError)
     assert str(cause) == "invalid agent configuration"
+
+
+def test_memory_backend_shares_one_ledger_across_both_stores() -> None:
+    """Turns and reports of one session are counted in the same ledger."""
+    application = create_app(AppSettings(), agent=_CountingAgent())
+    ledger = cast(SessionMemoryLedger, application.state.session_memory_ledger)
+    with TestClient(application) as raw_client:
+        client = cast(Client, raw_client)
+        session_id = client.post("/api/v1/sessions").json()["session_id"]
+        key = UUID(session_id)
+        assert ledger.total_bytes == SESSION_ALLOWANCE_BYTES
+
+        uploaded = client.post(
+            f"/api/v1/sessions/{session_id}/files",
+            files={"file": ("notes.txt", b"Finding B", "text/plain")},
+        ).json()
+        report_bytes = len(b"Finding B") + len("Finding B")
+        assert ledger.total_bytes == SESSION_ALLOWANCE_BYTES + report_bytes
+
+        client.post(f"/api/v1/sessions/{session_id}/messages", json={"message": "Hi"})
+        turn_bytes = len("Hi") + len("Clarify: Hi")
+        footprint = ledger.footprint(key)
+        assert footprint is not None
+        assert footprint.session_bytes == SESSION_ALLOWANCE_BYTES + turn_bytes
+        assert footprint.report_bytes == report_bytes
+
+        client.delete(f"/api/v1/sessions/{session_id}/files/{uploaded['file_id']}")
+        assert ledger.total_bytes == SESSION_ALLOWANCE_BYTES + turn_bytes
+        assert ledger.idle_order() == (key,)
+
+
+def test_injected_stores_leave_the_app_ledger_empty() -> None:
+    """A caller-supplied store keeps today's behaviour and is not counted."""
+    application = create_app(
+        AppSettings(),
+        session_store=InMemorySessionStore(),
+        agent=_CountingAgent(),
+    )
+    ledger = cast(SessionMemoryLedger, application.state.session_memory_ledger)
+    client = cast(Client, TestClient(application))
+
+    client.post("/api/v1/sessions")
+
+    assert ledger.total_bytes == 0
+
+
+def _budget_client(budget_bytes: int, agent: AgentRunner | None = None) -> Client:
+    application = create_app(
+        AppSettings(session_memory_budget_bytes=budget_bytes),
+        agent=agent or _CountingAgent(),
+    )
+    return cast(Client, TestClient(application))
+
+
+def _assert_server_busy(response: Response) -> None:
+    assert response.status_code == 503
+    assert response.json()["code"] == "server_busy"
+    assert response.headers["Retry-After"] == "10"
+
+
+def test_new_session_evicts_the_idle_one_when_the_budget_is_full() -> None:
+    """A full budget evicts the longest-idle session instead of refusing."""
+    client = _budget_client(SESSION_ALLOWANCE_BYTES)
+    owner = client.post("/api/v1/sessions").json()["session_id"]
+
+    # Creating another evicts the idle first one rather than refusing.
+    second = client.post("/api/v1/sessions")
+    assert second.status_code == 201
+    assert client.get(f"/api/v1/sessions/{owner}").json()["code"] == (
+        "session_not_found"
+    )
+
+
+def test_upload_larger_than_the_budget_returns_server_busy() -> None:
+    """A single report bigger than the whole budget is refused cleanly."""
+    client = _budget_client(SESSION_ALLOWANCE_BYTES + 100)
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+
+    response = client.post(
+        f"/api/v1/sessions/{session_id}/files",
+        files={"file": ("big.txt", b"x" * 200, "text/plain")},
+    )
+
+    _assert_server_busy(response)
+    assert client.get(f"/api/v1/sessions/{session_id}/files").json() == {"files": []}
+
+
+def test_refused_message_returns_server_busy_without_running_the_agent() -> None:
+    """The turn is refused before any model call or stored turn."""
+    agent = _CountingAgent()
+    client = _budget_client(SESSION_ALLOWANCE_BYTES + 100, agent)
+    session_id = client.post("/api/v1/sessions").json()["session_id"]
+
+    response = client.post(
+        f"/api/v1/sessions/{session_id}/messages", json={"message": "Hi"}
+    )
+
+    _assert_server_busy(response)
+    assert agent.calls == 0
+    assert client.get(f"/api/v1/sessions/{session_id}").json()["messages"] == []
+
+
+def test_evicted_session_is_not_found_on_every_route() -> None:
+    """After eviction, the session and its reports are unreachable."""
+    client = _budget_client(SESSION_ALLOWANCE_BYTES + 200)
+    victim = client.post("/api/v1/sessions").json()["session_id"]
+    uploaded = client.post(
+        f"/api/v1/sessions/{victim}/files",
+        files={"file": ("notes.txt", b"Finding B", "text/plain")},
+    ).json()
+
+    client.post("/api/v1/sessions")
+
+    file_id = uploaded["file_id"]
+    responses = [
+        client.get(f"/api/v1/sessions/{victim}"),
+        client.post(f"/api/v1/sessions/{victim}/messages", json={"message": "Hi"}),
+        client.post(
+            f"/api/v1/sessions/{victim}/files",
+            files={"file": ("again.txt", b"Again", "text/plain")},
+        ),
+        client.get(f"/api/v1/sessions/{victim}/files"),
+        client.delete(f"/api/v1/sessions/{victim}/files/{file_id}"),
+        client.get(f"/api/v1/sessions/{victim}/export"),
+    ]
+    for response in responses:
+        assert response.status_code == 404
+        assert response.json()["code"] == "session_not_found"
+
+
+def test_demo_session_survives_eviction_through_the_api() -> None:
+    """The seeded demo is never counted, so eviction never reaches it."""
+    application = create_app(
+        AppSettings(session_memory_budget_bytes=SESSION_ALLOWANCE_BYTES),
+        agent=_CountingAgent(),
+    )
+    demo_id = load_demos()[0].session_id
+    with TestClient(application) as raw_client:
+        client = cast(Client, raw_client)
+        first = client.post("/api/v1/sessions").json()["session_id"]
+        client.post("/api/v1/sessions")
+
+        assert client.get(f"/api/v1/sessions/{first}").status_code == 404
+        demo = client.get(f"/api/v1/sessions/{demo_id}")
+        assert demo.status_code == 200
+        assert demo.json()["read_only"] is True
+        assert client.get(f"/api/v1/sessions/{demo_id}/files").status_code == 200
+
+
+def test_idle_session_expires_through_the_api() -> None:
+    """A session idle past the TTL is gone after the next create."""
+    application = create_app(
+        AppSettings(session_idle_ttl_seconds=60), agent=_CountingAgent()
+    )
+    ledger = cast(SessionMemoryLedger, application.state.session_memory_ledger)
+    clock = FakeClock()
+    ledger._clock = clock  # pyright: ignore[reportPrivateUsage]
+    client = cast(Client, TestClient(application))
+    idle = client.post("/api/v1/sessions").json()["session_id"]
+    client.post(
+        f"/api/v1/sessions/{idle}/files",
+        files={"file": ("notes.txt", b"Finding B", "text/plain")},
+    )
+    clock.advance(59)
+    client.post("/api/v1/sessions")
+    assert client.get(f"/api/v1/sessions/{idle}").status_code == 200
+
+    clock.advance(60)
+    client.post("/api/v1/sessions")
+
+    for response in (
+        client.get(f"/api/v1/sessions/{idle}"),
+        client.get(f"/api/v1/sessions/{idle}/files"),
+        client.post(f"/api/v1/sessions/{idle}/messages", json={"message": "Hi"}),
+    ):
+        assert response.status_code == 404
+        assert response.json()["code"] == "session_not_found"

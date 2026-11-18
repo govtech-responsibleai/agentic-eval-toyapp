@@ -78,5 +78,69 @@ authentication or rate limiting, so keep the deterministic provider on an
 unrestricted public deployment unless access control and model cost have been
 explicitly accepted.
 
+## Session memory on b.small
+
+Airbase runs one uvicorn process with the in-memory backend, so every session
+and uploaded report lives in that process. The app keeps their estimated size
+under `TOYAPP_SESSION_MEMORY_BUDGET_BYTES` by evicting the longest-idle
+sessions; see [In-memory backend limits](configuration.md#in-memory-backend-limits).
+The budget is only part of the process's memory:
+
+```text
+2048 MiB  instance memory (assumed for b.small; confirm below)
+ ~700     baseline: Python, torch, embedding model, FAISS index, FastAPI  (to be measured)
+ ~500     headroom: PDF parsing, report loading per turn, concurrent model calls,
+          Python object overhead the estimate does not count
+ ~768     session budget (default)
+```
+
+These figures are provisional until measured on the instance. To confirm them:
+
+1. Read the container's memory limit from `/sys/fs/cgroup/memory.max` in an
+   Airbase console session, if one is available. This is the limit at which the
+   container is killed; `max` means no cgroup limit, and the instance memory
+   applies.
+2. Deploy and read the `toyapp_memory event=startup` line from the
+   application logs. Its `rss_bytes` is the baseline with no sessions stored,
+   before the first turn and PDF upload allocate the model's and parser's
+   working memory.
+3. Run a load test at the intended budget: many sessions uploading PDFs until
+   the budget is full and eviction starts, with turns running at the same
+   time. Every eviction pass logs a `toyapp_memory event=evict` line. Record
+   the highest `peak_rss_bytes`; it includes the baseline, the stored
+   sessions, the overhead the estimate omits, and temporary parsing memory.
+   The process should stay up, memory should level off, and evicted sessions
+   should return `404 session_not_found`.
+4. Keep the budget if that peak stays below about 90% of the memory limit.
+   Otherwise lower the budget by the excess and repeat the load test.
+
+Memory levels off rather than falling after eviction, because CPython keeps
+freed small objects for reuse; large report buffers are returned to the
+operating system.
+
+Recommended values for a one-day workshop, until the measurements above
+confirm or replace them:
+
+```dotenv
+TOYAPP_SESSION_STORE_BACKEND=memory
+# Provisional: confirm against the measured baseline and peak.
+TOYAPP_SESSION_MEMORY_BUDGET_BYTES=805306368
+# The default 30 days never applies within a day; it clears old sessions
+# from a long-running instance between events.
+TOYAPP_SESSION_IDLE_TTL_SECONDS=2592000
+```
+
+To check eviction on staging without generating 768 MiB of uploads, deploy
+once with a small budget, such as `TOYAPP_SESSION_MEMORY_BUDGET_BYTES=20971520`
+(20 MiB), upload a few reports from several sessions, and confirm the
+`toyapp_storage event=evict` lines and the browser's new-session notice.
+Restore the workshop value before the event.
+
+If the measured headroom is too small and there is no time to change the
+budget, lower `TOYAPP_UPLOAD_MAX_BYTES` and
+`TOYAPP_UPLOAD_MAX_REPORTS_PER_SESSION`, which shrink both the largest session
+and the temporary memory a single upload needs, or deploy on a larger instance
+than `b.small`.
+
 See [Airbase deployment evidence](airbase-deployment.md) for the verified
 environments, load-test results, Langfuse checks, and runtime limitations.

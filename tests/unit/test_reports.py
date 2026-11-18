@@ -8,9 +8,11 @@ from uuid import UUID, uuid4
 import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from tests.support.fake_clock import FakeClock
 
 from agentic_eval_toyapp.models import ReportMediaType
 from agentic_eval_toyapp.reports import (
+    ExtractedPage,
     InMemoryReportStore,
     ProcessedReport,
     ReportCapacityError,
@@ -20,6 +22,7 @@ from agentic_eval_toyapp.reports import (
     ReportTooLargeError,
     UnsupportedReportTypeError,
 )
+from agentic_eval_toyapp.session_memory import SessionMemoryLedger, report_footprint
 
 
 def _processor(
@@ -292,3 +295,118 @@ async def test_store_lists_and_deletes_only_owned_reports() -> None:
         await store.delete(owner, first.file_id)
     third = await store.add(owner, _processed_report("third"))
     assert await store.list_for_session(owner) == (second, third)
+
+
+def _pdf_like_report() -> ProcessedReport:
+    pages = (
+        ExtractedPage(page_number=1, text="alpha"),
+        ExtractedPage(page_number=3, text="gamma!"),
+    )
+    content = b"%PDF-fake-original-bytes"
+    return ProcessedReport(
+        filename="report.pdf",
+        media_type=ReportMediaType.PDF,
+        byte_size=len(content),
+        original_bytes=content,
+        extracted_text="alpha\n\ngamma!",
+        sha256=hashlib.sha256(content).hexdigest(),
+        page_count=3,
+        pages=pages,
+    )
+
+
+def _tracked_report_store() -> tuple[InMemoryReportStore, SessionMemoryLedger, UUID]:
+    ledger = SessionMemoryLedger(clock=FakeClock())
+    session_id = uuid4()
+    ledger.track(session_id)
+    return (
+        InMemoryReportStore(max_reports_per_session=10, ledger=ledger),
+        ledger,
+        session_id,
+    )
+
+
+def _report_bytes(ledger: SessionMemoryLedger, session_id: UUID) -> int:
+    footprint = ledger.footprint(session_id)
+    assert footprint is not None
+    return footprint.report_bytes
+
+
+@pytest.mark.anyio
+async def test_added_text_report_counts_original_bytes_and_text() -> None:
+    """A text report has no pages, so its text is counted once."""
+    store, ledger, session_id = _tracked_report_store()
+
+    await store.add(session_id, _processed_report("Findings"))
+
+    assert _report_bytes(ledger, session_id) == len(b"Findings") + len("Findings")
+
+
+@pytest.mark.anyio
+async def test_added_pdf_report_counts_page_text_on_top_of_extracted_text() -> None:
+    """A PDF stores joined text and every page, so both count."""
+    store, ledger, session_id = _tracked_report_store()
+    report = _pdf_like_report()
+
+    await store.add(session_id, report)
+
+    assert _report_bytes(ledger, session_id) == (
+        len(report.original_bytes)
+        + len(report.extracted_text)
+        + len("alpha")
+        + len("gamma!")
+    )
+
+
+@pytest.mark.anyio
+async def test_deleting_reports_returns_the_estimate_to_its_start() -> None:
+    """Add then delete subtracts exactly what was added."""
+    store, ledger, session_id = _tracked_report_store()
+    before = ledger.total_bytes
+    text = await store.add(session_id, _processed_report("Findings"))
+    pdf = await store.add(session_id, _pdf_like_report())
+
+    await store.delete(session_id, text.file_id)
+    assert _report_bytes(ledger, session_id) == report_footprint(
+        b"%PDF-fake-original-bytes", "alpha\n\ngamma!", ("alpha", "gamma!")
+    )
+    await store.delete(session_id, pdf.file_id)
+
+    assert _report_bytes(ledger, session_id) == 0
+    assert ledger.total_bytes == before
+
+
+@pytest.mark.anyio
+async def test_rejected_report_operations_leave_the_estimate_unchanged() -> None:
+    """A capacity refusal or a foreign delete changes nothing."""
+    ledger = SessionMemoryLedger(clock=FakeClock())
+    owner, other = uuid4(), uuid4()
+    ledger.track(owner)
+    ledger.track(other)
+    store = InMemoryReportStore(max_reports_per_session=1, ledger=ledger)
+    stored = await store.add(owner, _processed_report())
+    total = ledger.total_bytes
+
+    with pytest.raises(ReportCapacityError):
+        await store.add(owner, _processed_report())
+    with pytest.raises(ReportNotFoundError):
+        await store.delete(other, stored.file_id)
+
+    assert ledger.total_bytes == total
+    assert _report_bytes(ledger, other) == 0
+
+
+@pytest.mark.anyio
+async def test_seeded_reports_are_never_counted() -> None:
+    """Demo reports stay outside the ledger."""
+    ledger = SessionMemoryLedger(clock=FakeClock())
+    store = InMemoryReportStore(max_reports_per_session=10, ledger=ledger)
+    demo_id = uuid4()
+    source = InMemoryReportStore(max_reports_per_session=10)
+    await source.add(demo_id, _processed_report())
+    seeded = await source.resolve_available(demo_id)
+
+    store.seed(demo_id, seeded)
+
+    assert ledger.footprint(demo_id) is None
+    assert ledger.total_bytes == 0
