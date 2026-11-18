@@ -26,6 +26,10 @@ make docker-smoke-run IMAGE_TAG="$IMAGE_TAG"
 airbase deploy staging --image "$IMAGE_TAG" --yes
 ```
 
+Behind a TLS-intercepting proxy, the build uses the CA bundle from `CA_BUNDLE`,
+which defaults to `SSL_CERT_FILE`, and the image doesn't keep it. See
+[Behind a TLS-intercepting proxy](running.md#behind-a-tls-intercepting-proxy).
+
 The staging URL is
 `https://staging--metis-agentic-eval-toyapp.app.tc1.airbase.sg`. Verify
 `/health`, `/ready`, and `/api/v1/capabilities` before opening the browser.
