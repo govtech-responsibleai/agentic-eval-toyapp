@@ -54,8 +54,10 @@ answers or traces already produced from it. The file panel and paperclip are
 hidden in standalone policy-only RAG mode.
 
 The default upload limit is 5 MiB per file, with separate limits of 50 PDF
-pages and 100,000 extracted characters. These values are configurable in
-`.env`; only one file can be selected for a browser message at a time.
+pages and 100,000 extracted characters, and a session can hold up to 10 reports
+at once; delete one to upload another. These values are configurable in
+`.env` (see [Configuration](configuration.md#report-uploads)); only one file
+can be selected for a browser message at a time.
 
 For each completed turn, the right panel shows:
 

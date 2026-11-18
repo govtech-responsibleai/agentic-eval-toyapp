@@ -66,6 +66,27 @@ FAISS. A report analysis route uses the selected report content and returns
 `report_references` separately from policy citations. An upload without a
 message is not analysed.
 
+<a id="upload-errors"></a>
+
+### Upload and attachment errors
+
+Errors use the standard `{"code": ..., "message": ...}` body. Limits and
+accepted types are listed in [Configuration](configuration.md#report-uploads).
+
+| Status | Code | Cause |
+|---|---|---|
+| 404 | `session_not_found` | The session does not exist, has expired, or was evicted |
+| 404 | `report_not_found` | The file ID is unknown, belongs to another session, or its content was removed |
+| 409 | `report_capacity_reached` | The session already holds the maximum number of reports |
+| 409 | `session_read_only` | Uploads and deletes are refused for demo sessions |
+| 409 | `report_store_busy` | Another upload or delete on this session is in progress |
+| 413 | `report_too_large` | The file exceeds the byte, PDF page, or extracted-character limit |
+| 415 | `unsupported_file_type` | The extension and media type are not a supported pair, the PDF signature is missing, or the filename is invalid |
+| 422 | `report_processing_failed` | The file is empty, not valid UTF-8, encrypted, malformed, or has no extractable text |
+| 422 | `too_many_report_files` | A message attaches more files than the per-message limit |
+| 503 | `server_busy` | Redis is at its memory budget and no idle session could be evicted; retry after `Retry-After` |
+| 503 | `report_store_unavailable` | The report store cannot be reached |
+
 Retrieve the retained public conversation:
 
 ```bash
