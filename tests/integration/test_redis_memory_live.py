@@ -160,7 +160,9 @@ async def test_eviction_continues_until_enough_is_freed_in_idle_order() -> None:
     async with _stack() as stack:
         ids = [await stack.new_session(1_000.0 + n, reports=1) for n in range(4)]
 
-        records = await stack.evict(needed=5_000)
+        # One session with a 2,000-character report is estimated at about
+        # 6,200 bytes, so 8,000 needs exactly the two longest-idle sessions.
+        records = await stack.evict(needed=8_000)
 
         assert [r.session_id for r in records] == [str(ids[0]), str(ids[1])]
         for kept in ids[2:]:

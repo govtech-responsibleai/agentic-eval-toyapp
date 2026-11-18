@@ -84,7 +84,10 @@ async def test_allkeys_lru_eviction_never_returns_a_server_error() -> None:
         ),
         agent=_Agent(),
     )
-    body = b"# Report\n\n" + b"x" * 400_000
+    # Stay inside the default upload limits (100,000 extracted characters), or
+    # every upload is refused with 413 and Redis never fills up. 80 sessions of
+    # about 210 KB each is roughly twice the 8 MB maxmemory.
+    body = b"# Report\n\n" + b"x" * 90_000
     sessions: list[tuple[str, str]] = []
     statuses: list[tuple[str, int]] = []
 
@@ -95,7 +98,7 @@ async def test_allkeys_lru_eviction_never_returns_a_server_error() -> None:
         async with AsyncClient(
             transport=ASGITransport(app=application), base_url="http://testserver"
         ) as client:
-            for _ in range(40):
+            for _ in range(80):
                 created = await client.post("/api/v1/sessions")
                 record("create", created.status_code)
                 if created.status_code != 201:
@@ -133,6 +136,8 @@ async def test_allkeys_lru_eviction_never_returns_a_server_error() -> None:
 
     server_errors = [(r, s) for r, s in statuses if s >= 500 and s != 503]
     assert server_errors == []
+    uploads = [status for route, status in statuses if route == "upload"]
+    assert uploads.count(201) > len(uploads) // 2, f"uploads were refused: {uploads}"
     # The run is only meaningful if Redis actually removed some keys.
     assert any(status == 404 for _route, status in statuses), (
         "Redis evicted nothing; lower maxmemory"
