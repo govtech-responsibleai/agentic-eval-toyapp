@@ -5,7 +5,7 @@ import logging
 from collections.abc import Callable, Sequence
 from datetime import date
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from anyio import CapacityLimiter
@@ -48,6 +48,10 @@ from agentic_eval_toyapp.providers import (
 )
 from agentic_eval_toyapp.reports import StoredReport
 from agentic_eval_toyapp.retrieval import AsyncRetriever
+from agentic_eval_toyapp.session_memory import (
+    SESSION_ALLOWANCE_BYTES,
+    SessionMemoryLedger,
+)
 from agentic_eval_toyapp.sessions import AgentRunner, InMemorySessionStore
 
 
@@ -1122,3 +1126,47 @@ def test_default_application_fails_without_live_provider_configuration() -> None
     cause = exc_info.value.__cause__
     assert isinstance(cause, ValueError)
     assert str(cause) == "invalid agent configuration"
+
+
+def test_memory_backend_shares_one_ledger_across_both_stores() -> None:
+    """Turns and reports of one session are counted in the same ledger."""
+    application = create_app(AppSettings(), agent=_CountingAgent())
+    ledger = cast(SessionMemoryLedger, application.state.session_memory_ledger)
+    with TestClient(application) as raw_client:
+        client = cast(Client, raw_client)
+        session_id = client.post("/api/v1/sessions").json()["session_id"]
+        key = UUID(session_id)
+        assert ledger.total_bytes == SESSION_ALLOWANCE_BYTES
+
+        uploaded = client.post(
+            f"/api/v1/sessions/{session_id}/files",
+            files={"file": ("notes.txt", b"Finding B", "text/plain")},
+        ).json()
+        report_bytes = len(b"Finding B") + len("Finding B")
+        assert ledger.total_bytes == SESSION_ALLOWANCE_BYTES + report_bytes
+
+        client.post(f"/api/v1/sessions/{session_id}/messages", json={"message": "Hi"})
+        turn_bytes = len("Hi") + len("Clarify: Hi")
+        footprint = ledger.footprint(key)
+        assert footprint is not None
+        assert footprint.session_bytes == SESSION_ALLOWANCE_BYTES + turn_bytes
+        assert footprint.report_bytes == report_bytes
+
+        client.delete(f"/api/v1/sessions/{session_id}/files/{uploaded['file_id']}")
+        assert ledger.total_bytes == SESSION_ALLOWANCE_BYTES + turn_bytes
+        assert ledger.idle_order() == (key,)
+
+
+def test_injected_stores_leave_the_app_ledger_empty() -> None:
+    """A caller-supplied store keeps today's behaviour and is not counted."""
+    application = create_app(
+        AppSettings(),
+        session_store=InMemorySessionStore(),
+        agent=_CountingAgent(),
+    )
+    ledger = cast(SessionMemoryLedger, application.state.session_memory_ledger)
+    client = cast(Client, TestClient(application))
+
+    client.post("/api/v1/sessions")
+
+    assert ledger.total_bytes == 0

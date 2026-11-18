@@ -28,6 +28,7 @@ from agentic_eval_toyapp.redis_memory import (
     RedisMemoryGuard,
     estimate_report_bytes,
 )
+from agentic_eval_toyapp.session_memory import SessionMemoryLedger, report_footprint
 
 
 class UnsupportedReportTypeError(ValueError):
@@ -304,19 +305,34 @@ class ReportProcessor:
         return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
+def _stored_report_bytes(report: StoredReport) -> int:
+    return report_footprint(
+        report.original_bytes,
+        report.extracted_text,
+        (page.text for page in report.pages),
+    )
+
+
 class InMemoryReportStore:
-    """Retain bounded complete reports and enforce session ownership."""
+    """Retain bounded complete reports and enforce session ownership.
+
+    With a ledger, each added report's original bytes, extracted text and page
+    text count towards its session's size, and a deletion subtracts the same
+    amount. Seeded reports are never counted.
+    """
 
     def __init__(
         self,
         *,
         max_reports_per_session: int,
         id_factory: Callable[[], UUID] = uuid4,
+        ledger: SessionMemoryLedger | None = None,
     ) -> None:
         if max_reports_per_session < 1:
             raise ValueError("max_reports_per_session must be at least 1")
         self._max_reports_per_session = max_reports_per_session
         self._id_factory = id_factory
+        self._ledger = ledger
         self._records: dict[UUID, StoredReport] = {}
         self._owners: dict[UUID, UUID] = {}
         self._session_file_ids: dict[UUID, list[UUID]] = defaultdict(list)
@@ -370,14 +386,19 @@ class InMemoryReportStore:
                 sha256=report.sha256,
                 page_count=report.page_count,
             )
-            self._records[file_id] = StoredReport(
+            stored = StoredReport(
                 metadata=metadata,
                 original_bytes=report.original_bytes,
                 extracted_text=report.extracted_text,
                 pages=report.pages,
             )
+            self._records[file_id] = stored
             self._owners[file_id] = session_id
             session_file_ids.append(file_id)
+            if self._ledger is not None:
+                self._ledger.adjust(
+                    session_id, report_delta=_stored_report_bytes(stored)
+                )
             return metadata
 
     async def list_for_session(
@@ -395,8 +416,12 @@ class InMemoryReportStore:
         with self._lock:
             if self._owners.get(file_id) != session_id:
                 raise ReportNotFoundError from None
-            del self._records[file_id]
+            removed = self._records.pop(file_id)
             del self._owners[file_id]
+            if self._ledger is not None:
+                self._ledger.adjust(
+                    session_id, report_delta=-_stored_report_bytes(removed)
+                )
             self._session_file_ids[session_id].remove(file_id)
 
     async def resolve(

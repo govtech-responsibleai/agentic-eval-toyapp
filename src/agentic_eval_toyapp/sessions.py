@@ -30,6 +30,7 @@ from agentic_eval_toyapp.redis_memory import (
     RedisMemoryGuard,
 )
 from agentic_eval_toyapp.reports import StoredReport
+from agentic_eval_toyapp.session_memory import SessionMemoryLedger, turn_footprint
 
 
 class SessionNotFoundError(LookupError):
@@ -125,19 +126,30 @@ def _flatten_turns(turns: Iterable[_StoredTurn]) -> tuple[ConversationMessage, .
     return tuple(message for turn in turns for message in (turn.user, turn.assistant))
 
 
+def _stored_turn_bytes(turn: _StoredTurn) -> int:
+    return turn_footprint(turn.user.content, turn.assistant.content)
+
+
 class InMemorySessionStore:
-    """Retain a bounded number of complete turns for each process-local session."""
+    """Retain a bounded number of complete turns for each process-local session.
+
+    With a ledger, every created session is counted at a fixed allowance plus
+    its retained turn text, and every access records its last-access time.
+    Seeded sessions are never tracked.
+    """
 
     def __init__(
         self,
         *,
         max_turns: int = 10,
         id_factory: Callable[[], UUID] = uuid4,
+        ledger: SessionMemoryLedger | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least 1")
         self._max_turns = max_turns
         self._id_factory = id_factory
+        self._ledger = ledger
         self._records: dict[UUID, _SessionRecord] = {}
         self._records_lock = Lock()
 
@@ -174,13 +186,18 @@ class InMemorySessionStore:
                     break
             if session_id is None:
                 raise RuntimeError("could not allocate a unique session ID")
+        if self._ledger is not None:
+            self._ledger.track(session_id)
         return SessionResponse(session_id=session_id, retained_turns=0)
 
     async def get(self, session_id: UUID) -> SessionResponse:
         """Return a consistent public snapshot of one session."""
         # No await occurs here, so the snapshot is atomic on the event loop and
         # needs no turn lock; callers must therefore run on the loop thread.
-        return self._snapshot(session_id, self._get_record(session_id))
+        snapshot = self._snapshot(session_id, self._get_record(session_id))
+        if self._ledger is not None:
+            self._ledger.touch(session_id)
+        return snapshot
 
     async def run_turn(
         self,
@@ -209,7 +226,22 @@ class InMemorySessionStore:
                 role=ConversationRole.ASSISTANT,
                 content=result.message,
             )
-            record.turns.append(_StoredTurn(user=user, assistant=assistant))
+            turn = _StoredTurn(user=user, assistant=assistant)
+            # A full deque silently drops its oldest turn on append, so size
+            # that turn first to keep the estimate exact.
+            dropped_bytes = (
+                _stored_turn_bytes(record.turns[0])
+                if len(record.turns) == record.turns.maxlen
+                else 0
+            )
+            record.turns.append(turn)
+            if self._ledger is not None:
+                self._ledger.adjust(
+                    session_id,
+                    session_delta=_stored_turn_bytes(turn) - dropped_bytes,
+                )
+                # A turn can take minutes, so it also counts as an access.
+                self._ledger.touch(session_id)
             return result
 
     def _get_record(self, session_id: UUID) -> _SessionRecord:
