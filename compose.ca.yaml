@@ -1,0 +1,11 @@
+# Trust a TLS-intercepting proxy's CA for a local run, without putting it in the image.
+# `make docker-up` adds this file only when CA_BUNDLE is set, and passes its absolute path.
+# Compose cannot mount a file only when a variable is set, hence this separate file.
+services:
+  toyapp:
+    volumes:
+      - ${CA_BUNDLE:?CA_BUNDLE must name a CA bundle file}:/run/toyapp-ca.pem:ro
+    environment:
+      SSL_CERT_FILE: /run/toyapp-ca.pem
+      REQUESTS_CA_BUNDLE: /run/toyapp-ca.pem
+      CURL_CA_BUNDLE: /run/toyapp-ca.pem

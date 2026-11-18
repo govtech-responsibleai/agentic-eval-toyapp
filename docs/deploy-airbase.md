@@ -21,10 +21,8 @@ test, and deploy that same local image to the named staging environment:
 
 ```bash
 IMAGE_TAG="metis-agentic-eval-toyapp:$(git rev-parse --short HEAD)"
-make docker-build \
-  DOCKER_PLATFORM=linux/amd64 \
-  DOCKER_IMAGE="$IMAGE_TAG"
-make docker-smoke-run DOCKER_IMAGE="$IMAGE_TAG"
+make docker-build PLATFORM=linux/amd64 IMAGE_TAG="$IMAGE_TAG"
+make docker-smoke-run IMAGE_TAG="$IMAGE_TAG"
 airbase deploy staging --image "$IMAGE_TAG" --yes
 ```
 

@@ -14,7 +14,7 @@ services:
       - no-new-privileges:true
 
   toyapp:
-    image: ${TOYAPP_DOCKER_IMAGE:-agentic-eval-toyapp:local}
+    image: ${IMAGE_TAG:-agentic-eval-toyapp:local}
     env_file:
       - .env
     environment:
