@@ -1,7 +1,7 @@
-# Agentic Eval Toy App
+# Northstar Policy & Report Assistant
 
-A lightweight multi-agent application for demonstrating and regression-testing
-METIS agent evaluation metrics.
+A small multi-agent assistant for a fictional company, Northstar Services, used
+to demonstrate and regression-test METIS agent evaluation metrics.
 
 > [!WARNING]
 > **This is an experimental evaluation target, not a production-ready
@@ -11,18 +11,40 @@ METIS agent evaluation metrics.
 
 ## What it does
 
-Agentic Eval Toy App is a small assistant you can use through a web chat page
-or call directly through a REST API. In either one you can ask questions about
-an employee-policy corpus, or upload a report and ask for a summary or its key
-findings. Behind the chat sits a coordinator that reads each message and
-decides how to handle it: it answers directly, asks you a clarifying question,
-or delegates the task to a specialist agent. There are two specialists, and each
-has one job. The policy RAG agent handles questions about the policy corpus: it
-retrieves the relevant passages first, then answers using only those and cites
-them. The report-analysis agent handles uploaded reports: it reads the whole
-document, answers from it alone, and points back to the pages or sections it
-relied on. Langfuse instrumentation is optional; when enabled, each turn is
-exported as a trace.
+Northstar Policy & Report Assistant is a small assistant you can use through a
+web chat page or call directly through a REST API. It does two separate jobs,
+and each message you send is handled by only one of them. The first is policy
+Q&A: ask about Northstar Services' employee policies, such as "What is the
+lodging limit for domestic travel?", and a policy specialist searches the
+built-in policy documents and answers only from the passages it retrieved,
+citing each one. The second is report analysis: upload a text, Markdown, or
+text-based PDF report and ask for a summary or its key findings, such as "What
+risks does this report flag?", and a report specialist reads the whole report
+and answers only from it, pointing back to the pages or sections it used.
+
+```text
+                                ┌──▶ Policy Q&A ───────▶ Northstar policy documents
+  your message ──▶ coordinator──┤
+                                └──▶ Report analysis ──▶ the report you selected
+
+  One route per message. The two specialists never see each other's evidence.
+```
+
+A coordinator sits in front of both specialists and decides what to do with
+each message. It replies itself to greetings, questions about the app, and
+out-of-scope requests, asks a clarifying question when the task or report is
+unclear, and otherwise hands the message to exactly one specialist. Optional
+Langfuse instrumentation exports each turn as a trace.
+
+### What it can't do
+
+The two routes are independent, so no answer can draw on both the policy
+documents and your report. Questions such as "Does this report's expense claim
+comply with our policy?" or "Which policy covers the issue on page 3?" need both
+sources. The assistant will answer only one half of them, or ask you to narrow
+the question. Follow-up messages share the conversation history, but that does
+not give one specialist access to the other's evidence. To compare a report
+with policy, ask each question separately and compare the answers yourself.
 
 ### How a turn flows
 

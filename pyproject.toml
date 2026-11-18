@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agentic-eval-toyapp"
 version = "0.1.0"
-description = "A controlled RAG target application for agentic evaluation"
+description = "A two-route assistant (policy Q&A or report analysis) used as a METIS evaluation target"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

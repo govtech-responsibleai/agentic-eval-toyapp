@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="A controlled RAG application for METIS evaluation demos.">
+    <meta name="description" content="Ask about Northstar policy or analyse an uploaded report. A METIS evaluation target.">
     <title>{{ app_name }}</title>
     <link rel="stylesheet" href="/static/style.css?v={{ browser_asset_version }}">
     <script src="/static/vendor/markdown-it.umd.min.js" defer></script>
@@ -18,18 +18,31 @@
           METIS evaluation target
         </p>
         <h1>{{ app_name }}</h1>
-        <p class="intro">
-          Ask about Northstar policies, or upload a report for a summary or its
-          key findings.
+        <ul class="route-cards" aria-label="What you can ask">
+          <li class="route-card">
+            <h2>Ask about Northstar policy</h2>
+            <p>Answers from the Northstar policy documents only, with citations.</p>
+            <p class="route-example">e.g. “What is the lodging limit for domestic travel?”</p>
+          </li>
+          <li class="route-card">
+            <h2>Analyse your report</h2>
+            <p>Summaries and findings from the report you upload, with page or section references.</p>
+            <p class="route-example">e.g. “What risks does this report flag?”</p>
+          </li>
+        </ul>
+        <p class="route-note">
+          Each answer uses one source only, so the assistant cannot check a
+          report against policy.
         </p>
         <details class="intro-details">
           <summary>How it works</summary>
           <p>
-            A coordinator answers directly, asks a clarifying question, or hands
-            the task to a specialist: a policy RAG agent that answers from
-            retrieved policy passages, or a report-analysis agent that answers
-            from your report. Responses show the agents involved and the
-            evidence they used.
+            For each message, a coordinator either replies itself, asks you a
+            clarifying question, or passes the message to one of two separate
+            assistants. The policy assistant searches only the policy documents.
+            The report assistant reads only the report you selected. They never
+            share evidence, and only one is used per message. Each reply shows
+            which assistant answered and the evidence it used.
           </p>
         </details>
       </div>

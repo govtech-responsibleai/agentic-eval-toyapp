@@ -1,6 +1,6 @@
-# Agentic Eval Toy App Architecture
+# Northstar Policy & Report Assistant Architecture
 
-This document describes the implemented architecture of the toy app. It is
+This document describes the implemented architecture of the Northstar Policy & Report Assistant. It is
 intended for contributors who need to understand how requests, retrieval,
 model actions, sessions, traces, and controlled evaluation cases fit together.
 

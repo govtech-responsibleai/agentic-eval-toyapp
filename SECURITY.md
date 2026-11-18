@@ -20,4 +20,4 @@ Include:
 
 ## Supported versions
 
-Agentic Eval Toy App is in pre-release. Only the latest release receives security updates.
+Northstar Policy & Report Assistant is in pre-release. Only the latest release receives security updates.

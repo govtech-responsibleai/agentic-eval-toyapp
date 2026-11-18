@@ -56,7 +56,7 @@ class AppSettings(BaseSettings):
         populate_by_name=True,
     )
 
-    app_name: str = "Agentic Eval Toy App"
+    app_name: str = "Northstar Policy & Report Assistant"
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     log_level: LogLevel = LogLevel.INFO

@@ -1,6 +1,6 @@
-# Contributing to Agentic Eval Toy App
+# Contributing to Northstar Policy & Report Assistant
 
-Thank you for contributing to Agentic Eval Toy App. This guide covers
+Thank you for contributing to Northstar Policy & Report Assistant. This guide covers
 expectations and best practices whether you are on the core team or
 contributing externally.
 

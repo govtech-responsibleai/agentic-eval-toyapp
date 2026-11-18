@@ -164,8 +164,48 @@ h3 {
   line-height: 1.55;
 }
 
+.route-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.route-card {
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.route-card h2 {
+  margin-bottom: 0.2rem;
+  color: var(--text);
+  font-size: 0.98rem;
+}
+
+.route-card p {
+  margin-bottom: 0;
+}
+
+.route-card .route-example {
+  margin-top: 0.3rem;
+  font-style: italic;
+}
+
+.route-note {
+  margin: 0.55rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .intro-details {
-  margin-top: 0.55rem;
+  margin-top: 0.35rem;
   color: var(--muted);
 }
 
@@ -1337,6 +1377,10 @@ h3 {
   .site-header {
     padding-right: 1rem;
     padding-left: 1rem;
+  }
+
+  .route-cards {
+    grid-template-columns: 1fr;
   }
 
   .app-shell {

@@ -1,6 +1,6 @@
 # GitHub Collaboration Workflow
 
-This is the day-to-day playbook for collaborating on Agentic Eval Toy App via
+This is the day-to-day playbook for collaborating on Northstar Policy & Report Assistant via
 GitHub. For coding standards and testing guidelines, see
 [CONTRIBUTING.md](../CONTRIBUTING.md).
 
