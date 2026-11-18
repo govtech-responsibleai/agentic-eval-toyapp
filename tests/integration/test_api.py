@@ -11,6 +11,7 @@ import pytest
 from anyio import CapacityLimiter
 from httpx2 import Client, Response
 from starlette.testclient import TestClient
+from tests.support.fake_clock import FakeClock
 
 from agentic_eval_toyapp.agent import RagAgent, RagSpecialistAdapter
 from agentic_eval_toyapp.analysis import (
@@ -1274,3 +1275,33 @@ def test_demo_session_survives_eviction_through_the_api() -> None:
         assert demo.status_code == 200
         assert demo.json()["read_only"] is True
         assert client.get(f"/api/v1/sessions/{demo_id}/files").status_code == 200
+
+
+def test_idle_session_expires_through_the_api() -> None:
+    """A session idle past the TTL is gone after the next create."""
+    application = create_app(
+        AppSettings(session_idle_ttl_seconds=60), agent=_CountingAgent()
+    )
+    ledger = cast(SessionMemoryLedger, application.state.session_memory_ledger)
+    clock = FakeClock()
+    ledger._clock = clock  # pyright: ignore[reportPrivateUsage]
+    client = cast(Client, TestClient(application))
+    idle = client.post("/api/v1/sessions").json()["session_id"]
+    client.post(
+        f"/api/v1/sessions/{idle}/files",
+        files={"file": ("notes.txt", b"Finding B", "text/plain")},
+    )
+    clock.advance(59)
+    client.post("/api/v1/sessions")
+    assert client.get(f"/api/v1/sessions/{idle}").status_code == 200
+
+    clock.advance(60)
+    client.post("/api/v1/sessions")
+
+    for response in (
+        client.get(f"/api/v1/sessions/{idle}"),
+        client.get(f"/api/v1/sessions/{idle}/files"),
+        client.post(f"/api/v1/sessions/{idle}/messages", json={"message": "Hi"}),
+    ):
+        assert response.status_code == 404
+        assert response.json()["code"] == "session_not_found"

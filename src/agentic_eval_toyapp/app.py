@@ -715,10 +715,12 @@ def create_app(
     """Construct an application with explicit, injectable dependencies."""
     resolved_settings = settings or get_settings()
     memory_guard = _build_memory_guard(resolved_settings)
-    # One ledger counts a process-local session's turns and reports together
-    # and evicts idle sessions to stay under the in-memory budget.
+    # One ledger counts a process-local session's turns and reports together,
+    # expires sessions past the idle TTL, and evicts idle sessions to stay
+    # under the in-memory budget.
     memory_ledger = SessionMemoryLedger(
-        budget_bytes=resolved_settings.session_memory_budget_bytes
+        budget_bytes=resolved_settings.session_memory_budget_bytes,
+        idle_ttl_seconds=resolved_settings.session_idle_ttl_seconds,
     )
     # Eviction must remove a session from both stores, so the ledger is only
     # used when the app builds both; an injected store opts out entirely.

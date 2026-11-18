@@ -6,8 +6,10 @@ The estimate is deliberately simple: `len()` of each stored string or byte
 string plus a fixed allowance per session. It ignores Python object overhead
 and undercounts non-ASCII text, so it approximates stored data, not RSS.
 
-Before a write, `ensure_room` plans which longest-idle sessions to evict and
-evicts them only when the plan frees enough room; otherwise it evicts nothing
+Before a write, `ensure_room` first removes sessions idle for longer than the
+idle TTL (lazily: there is no background task), then plans which
+longest-idle sessions to evict and evicts them only when the plan frees
+enough room; otherwise it evicts nothing
 and raises `StorageCapacityError`. Each store registers a callback that
 removes one session's data, so evicting a session removes its reports too.
 Everything runs on one event loop with no `await` between planning and
@@ -97,18 +99,23 @@ class SessionMemoryLedger:
     session, are ignored, so untracked sessions can never be evicted.
 
     `budget_bytes=None` disables the budget: sizes are still tracked, but
-    `ensure_room` always succeeds.
+    `ensure_room` never evicts for size or refuses. `idle_ttl_seconds=None`
+    disables idle expiry. The two are independent.
     """
 
     def __init__(
         self,
         *,
         budget_bytes: int | None = None,
+        idle_ttl_seconds: float | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if budget_bytes is not None and budget_bytes < 1:
             raise ValueError("budget_bytes must be at least 1")
+        if idle_ttl_seconds is not None and idle_ttl_seconds <= 0:
+            raise ValueError("idle_ttl_seconds must be positive")
         self._budget_bytes = budget_bytes
+        self._idle_ttl_seconds = idle_ttl_seconds
         self._clock = clock
         self._entries: OrderedDict[UUID, _Entry] = OrderedDict()
         self._total_bytes = 0
@@ -168,12 +175,13 @@ class SessionMemoryLedger:
     def ensure_room(
         self, incoming_bytes: int, *, current_session: UUID | None = None
     ) -> None:
-        """Evict longest-idle sessions so `incoming_bytes` fits, or raise.
+        """Expire idle sessions, then evict so `incoming_bytes` fits, or raise.
 
-        Never evicts `current_session`, a session whose turn is running, or
+        Never removes `current_session`, a session whose turn is running, or
         an untracked (demo) session. When the eligible sessions cannot free
         enough room, nothing is evicted and `StorageCapacityError` is raised.
         """
+        self._expire_idle(current_session)
         budget = self._budget_bytes
         if budget is None:
             return
@@ -200,10 +208,37 @@ class SessionMemoryLedger:
         if freed < needed:
             self._refuse(used, budget, incoming_bytes, reason="nothing_evictable")
         for session_id, size_bytes in victims:
-            self._evict(session_id, size_bytes)
+            self._remove(session_id, size_bytes, event="evict", reason="budget")
         log_process_memory(event="evict", ledger_bytes=self.total_bytes)
 
-    def _evict(self, session_id: UUID, size_bytes: int) -> None:
+    def _expire_idle(self, current_session: UUID | None) -> None:
+        """Remove sessions idle for at least the TTL, longest-idle first.
+
+        Sessions are held in last-access order, so the walk stops at the first
+        one still within the TTL; with nothing expired it costs one check.
+        """
+        ttl = self._idle_ttl_seconds
+        if ttl is None:
+            return
+        now = self._clock()
+        with self._lock:
+            expired: list[tuple[UUID, int]] = []
+            for session_id, entry in self._entries.items():
+                if now - entry.last_access < ttl:
+                    break
+                expired.append((session_id, entry.session_bytes + entry.report_bytes))
+        removed = 0
+        for session_id, size_bytes in expired:
+            if session_id == current_session or self._is_busy(session_id):
+                continue
+            self._remove(session_id, size_bytes, event="expire", reason="idle")
+            removed += 1
+        if removed:
+            log_process_memory(event="expire", ledger_bytes=self.total_bytes)
+
+    def _remove(
+        self, session_id: UUID, size_bytes: int, *, event: str, reason: str
+    ) -> None:
         with self._lock:
             entry = self._entries.pop(session_id)
             self._total_bytes -= entry.session_bytes + entry.report_bytes
@@ -211,9 +246,9 @@ class SessionMemoryLedger:
         self._remove_session(session_id)
         reports_removed = self._remove_reports(session_id)
         log_storage_event(
-            event="evict",
+            event=event,
             session_id=str(session_id),
-            reason="budget",
+            reason=reason,
             bytes_freed=size_bytes,
             reports_removed=reports_removed,
         )
