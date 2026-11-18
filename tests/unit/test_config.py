@@ -83,7 +83,7 @@ def test_settings_defaults_select_the_live_runtime_without_storing_credentials()
     """Normal app traffic should default to live generation with no fake key."""
     settings = AppSettings()
 
-    assert settings.app_name == "Agentic Eval Toy App"
+    assert settings.app_name == "Northstar Policy & Report Assistant"
     assert settings.host == "127.0.0.1"
     assert settings.port == 8000
     assert settings.log_level is LogLevel.INFO

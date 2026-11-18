@@ -21,6 +21,15 @@ The application currently provides:
 - controlled traces for the `harmful_content_refusal` metric;
 - a non-root Docker image containing the pinned embedding model.
 
+### Limitations
+
+Policy Q&A and report analysis are independent routes. Each message is handled
+by at most one specialist, and neither specialist can see the other's evidence.
+The policy specialist never sees uploaded reports, and the report specialist
+never sees the policy documents. Requests that need both sources, such as
+checking a report's claims against Northstar policy, are not supported. Ask
+the policy question and the report question separately instead.
+
 For component boundaries, data flows, and technical design, see
 [architecture.md](../architecture.md).
 

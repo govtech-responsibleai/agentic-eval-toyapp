@@ -1,4 +1,4 @@
-# Agentic Eval Toy App — Codebase Guide
+# Northstar Policy & Report Assistant — Codebase Guide
 
 ## Purpose
 
