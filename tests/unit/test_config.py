@@ -455,3 +455,24 @@ def test_blank_langfuse_project_url_is_treated_as_unset() -> None:
 def test_langfuse_project_url_rejects_non_http_values(value: str) -> None:
     with pytest.raises(ValueError, match="http"):
         AppSettings(langfuse_project_url=value)
+
+
+def test_session_memory_budget_defaults_to_768_mib(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The in-memory budget has a fixed default and reads its env variable."""
+    assert AppSettings().session_memory_budget_bytes == 768 * 1024 * 1024
+    monkeypatch.setenv("TOYAPP_SESSION_MEMORY_BUDGET_BYTES", "1048576")
+
+    assert AppSettings().session_memory_budget_bytes == 1_048_576
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_session_memory_budget_rejects_non_positive_values(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A budget below one byte would refuse every write."""
+    monkeypatch.setenv("TOYAPP_SESSION_MEMORY_BUDGET_BYTES", value)
+
+    with pytest.raises(ValidationError):
+        AppSettings()

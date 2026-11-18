@@ -3,6 +3,7 @@
 import logging
 import ssl
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -16,7 +17,10 @@ from agentic_eval_toyapp.diagnostics import (
     classify_external_error,
     diagnostic_context,
     log_failure,
+    log_process_memory,
     log_trace_observation,
+    peak_rss_bytes,
+    read_rss_bytes,
 )
 from agentic_eval_toyapp.models import RetrievedChunk
 from agentic_eval_toyapp.retrieval import AsyncRetriever
@@ -220,3 +224,39 @@ async def test_diagnostic_context_survives_the_retrieval_thread_hop(
     assert len(probe) == 1
     assert f"session_id={session_id}" in probe[0]
     assert "turn_id=-" not in probe[0]
+
+
+def test_read_rss_bytes_parses_vmrss_in_kib(tmp_path: Path) -> None:
+    """VmRSS is reported in KiB and returned in bytes."""
+    status = tmp_path / "status"
+    status.write_text("Name:\tpython\nVmRSS:\t  2048 kB\nThreads:\t4\n")
+
+    assert read_rss_bytes(status) == 2048 * 1024
+
+
+def test_read_rss_bytes_is_none_without_proc(tmp_path: Path) -> None:
+    """On macOS or a missing file, current RSS is unknown rather than wrong."""
+    assert read_rss_bytes(tmp_path / "missing") is None
+    malformed = tmp_path / "status"
+    malformed.write_text("VmRSS:\tlots\n")
+    assert read_rss_bytes(malformed) is None
+
+
+def test_peak_rss_bytes_converts_platform_units() -> None:
+    """ru_maxrss is KiB on Linux and bytes on macOS."""
+    assert peak_rss_bytes(1_000, platform="linux") == 1_024_000
+    assert peak_rss_bytes(1_000, platform="darwin") == 1_000
+    measured = peak_rss_bytes()
+    assert measured is not None and measured > 0
+
+
+def test_log_process_memory_emits_numbers_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The memory line carries sizes and a sanitised event name."""
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        log_process_memory(event="startup", ledger_bytes=42)
+
+    [message] = [r.getMessage() for r in caplog.records if "toyapp_memory" in r.message]
+    assert message.startswith("toyapp_memory event=startup rss_bytes=")
+    assert message.endswith(" ledger_bytes=42")

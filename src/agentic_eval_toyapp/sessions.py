@@ -30,11 +30,14 @@ from agentic_eval_toyapp.redis_memory import (
     RedisMemoryGuard,
 )
 from agentic_eval_toyapp.reports import StoredReport
-from agentic_eval_toyapp.session_memory import SessionMemoryLedger, turn_footprint
+from agentic_eval_toyapp.session_memory import (
+    SESSION_ALLOWANCE_BYTES,
+    SessionMemoryLedger,
+    SessionNotFoundError,
+    turn_footprint,
+)
 
-
-class SessionNotFoundError(LookupError):
-    """Raised when a caller references an unknown application session."""
+__all__ = ["SessionNotFoundError"]
 
 
 class SessionStoreUnavailableError(RuntimeError):
@@ -135,7 +138,10 @@ class InMemorySessionStore:
 
     With a ledger, every created session is counted at a fixed allowance plus
     its retained turn text, and every access records its last-access time.
-    Seeded sessions are never tracked.
+    Creating a session and starting a turn first make room under the ledger's
+    budget, which may evict other idle sessions. A session whose turn is
+    running holds its lock and is never evicted. Seeded sessions are never
+    tracked, so they are never evicted.
     """
 
     def __init__(
@@ -152,6 +158,8 @@ class InMemorySessionStore:
         self._ledger = ledger
         self._records: dict[UUID, _SessionRecord] = {}
         self._records_lock = Lock()
+        if ledger is not None:
+            ledger.bind_session_store(self._remove, self._is_turn_running)
 
     @property
     def max_turns(self) -> int:
@@ -162,6 +170,16 @@ class InMemorySessionStore:
     def readiness_detail(self) -> str:
         """Describe the process-local store without exposing internal state."""
         return f"retains up to {self.max_turns} complete turns"
+
+    def _remove(self, session_id: UUID) -> None:
+        """Drop one evicted session's turns; the ledger has already forgotten it."""
+        with self._records_lock:
+            self._records.pop(session_id, None)
+
+    def _is_turn_running(self, session_id: UUID) -> bool:
+        with self._records_lock:
+            record = self._records.get(session_id)
+        return record is not None and record.lock.locked()
 
     async def open(self) -> None:
         """The process-local store has no loop-bound resources."""
@@ -174,6 +192,9 @@ class InMemorySessionStore:
 
     async def create(self) -> SessionResponse:
         """Create an isolated empty session with a unique UUID."""
+        if self._ledger is not None:
+            # Make room before inserting; eviction takes this store's lock.
+            self._ledger.ensure_room(SESSION_ALLOWANCE_BYTES)
         with self._records_lock:
             session_id: UUID | None = None
             for _ in range(100):
@@ -215,34 +236,48 @@ class InMemorySessionStore:
         )
         record = self._get_record(session_id)
         async with record.lock:
-            history = _flatten_turns(record.turns)
-            result = await agent.run(
-                user.content,
-                history=history,
-                session_id=str(session_id),
-                reports=reports,
-            )
-            assistant = ConversationMessage(
-                role=ConversationRole.ASSISTANT,
-                content=result.message,
-            )
-            turn = _StoredTurn(user=user, assistant=assistant)
-            # A full deque silently drops its oldest turn on append, so size
-            # that turn first to keep the estimate exact.
-            dropped_bytes = (
-                _stored_turn_bytes(record.turns[0])
-                if len(record.turns) == record.turns.maxlen
-                else 0
-            )
-            record.turns.append(turn)
+            # While this turn waited for the lock, the session was not busy
+            # and may have been evicted; do not run a turn that would be lost.
+            self._get_record(session_id)
+            reservation = 0
             if self._ledger is not None:
-                self._ledger.adjust(
-                    session_id,
-                    session_delta=_stored_turn_bytes(turn) - dropped_bytes,
+                # Admit the turn before any model call or trace exists. The
+                # reply size is unknown, so hold room for it until the end.
+                reservation = len(user.content) + TURN_REPLY_ALLOWANCE_BYTES
+                self._ledger.ensure_room(reservation, current_session=session_id)
+                self._ledger.reserve(reservation)
+            try:
+                history = _flatten_turns(record.turns)
+                result = await agent.run(
+                    user.content,
+                    history=history,
+                    session_id=str(session_id),
+                    reports=reports,
                 )
-                # A turn can take minutes, so it also counts as an access.
-                self._ledger.touch(session_id)
-            return result
+                assistant = ConversationMessage(
+                    role=ConversationRole.ASSISTANT,
+                    content=result.message,
+                )
+                turn = _StoredTurn(user=user, assistant=assistant)
+                # A full deque silently drops its oldest turn on append, so
+                # size that turn first to keep the estimate exact.
+                dropped_bytes = (
+                    _stored_turn_bytes(record.turns[0])
+                    if len(record.turns) == record.turns.maxlen
+                    else 0
+                )
+                record.turns.append(turn)
+                if self._ledger is not None:
+                    self._ledger.adjust(
+                        session_id,
+                        session_delta=_stored_turn_bytes(turn) - dropped_bytes,
+                    )
+                    # A turn can take minutes, so it also counts as an access.
+                    self._ledger.touch(session_id)
+                return result
+            finally:
+                if self._ledger is not None and reservation:
+                    self._ledger.release(reservation)
 
     def _get_record(self, session_id: UUID) -> _SessionRecord:
         with self._records_lock:

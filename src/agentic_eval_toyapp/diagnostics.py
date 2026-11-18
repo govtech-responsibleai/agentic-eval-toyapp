@@ -7,10 +7,12 @@ Exception messages, model prompts, completions, and report contents do not.
 import logging
 import re
 import ssl
+import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -267,4 +269,45 @@ def log_storage_event(
         _safe_identifier(reason),
         bytes_freed,
         reports_removed,
+    )
+
+
+_PROC_STATUS = Path("/proc/self/status")
+
+
+def read_rss_bytes(status_path: Path = _PROC_STATUS) -> int | None:
+    """Return current resident memory from `/proc`, or None where unavailable."""
+    try:
+        status = status_path.read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return None
+    for line in status.splitlines():
+        if line.startswith("VmRSS:"):
+            fields = line.split()
+            if len(fields) >= 2 and fields[1].isdigit():
+                return int(fields[1]) * 1024
+    return None
+
+
+def peak_rss_bytes(
+    max_rss: int | None = None, *, platform: str = sys.platform
+) -> int | None:
+    """Return peak resident memory; `ru_maxrss` is KiB on Linux, bytes on macOS."""
+    if max_rss is None:
+        try:
+            import resource
+        except ImportError:  # pragma: no cover - not available on Windows
+            return None
+        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return max_rss if platform == "darwin" else max_rss * 1024
+
+
+def log_process_memory(*, event: str, ledger_bytes: int) -> None:
+    """Log process RAM next to the session estimate; never any content."""
+    LOGGER.info(
+        "toyapp_memory event=%s rss_bytes=%s peak_rss_bytes=%s ledger_bytes=%s",
+        _safe_identifier(event),
+        read_rss_bytes(),
+        peak_rss_bytes(),
+        ledger_bytes,
     )

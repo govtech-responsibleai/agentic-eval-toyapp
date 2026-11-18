@@ -1,4 +1,4 @@
-"""Track the estimated size and last access of every process-local session.
+"""Keep process-local sessions under a memory budget by evicting idle ones.
 
 One `SessionMemoryLedger` is shared by `InMemorySessionStore` and
 `InMemoryReportStore`, so a session's turns and reports are counted together.
@@ -6,9 +6,17 @@ The estimate is deliberately simple: `len()` of each stored string or byte
 string plus a fixed allowance per session. It ignores Python object overhead
 and undercounts non-ASCII text, so it approximates stored data, not RSS.
 
+Before a write, `ensure_room` plans which longest-idle sessions to evict and
+evicts them only when the plan frees enough room; otherwise it evicts nothing
+and raises `StorageCapacityError`. Each store registers a callback that
+removes one session's data, so evicting a session removes its reports too.
+Everything runs on one event loop with no `await` between planning and
+removal, so no other request can interleave.
+
 This module must not import `sessions` or `reports`; both stores import it.
 """
 
+import logging
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
@@ -17,8 +25,17 @@ from threading import Lock
 from typing import Final
 from uuid import UUID
 
+from agentic_eval_toyapp.diagnostics import log_process_memory, log_storage_event
+from agentic_eval_toyapp.redis_memory import StorageCapacityError
+
+LOGGER = logging.getLogger("uvicorn.error")
+
 # Fixed cost of one session, so a flood of empty sessions still uses budget.
 SESSION_ALLOWANCE_BYTES: Final = 1024
+
+
+class SessionNotFoundError(LookupError):
+    """Raised when a caller references an unknown application session."""
 
 
 def turn_footprint(user_text: str, assistant_text: str) -> int:
@@ -62,25 +79,156 @@ class _Entry:
     last_access: float
 
 
+def _never_busy(session_id: UUID) -> bool:
+    del session_id
+    return False
+
+
+def _remove_nothing(session_id: UUID) -> int:
+    del session_id
+    return 0
+
+
 class SessionMemoryLedger:
     """Keep per-session size estimates and an idle order, updated incrementally.
 
     Sessions are held longest-idle first. Only sessions registered with
     `track` are counted; updates for any other ID, such as a seeded demo
     session, are ignored, so untracked sessions can never be evicted.
+
+    `budget_bytes=None` disables the budget: sizes are still tracked, but
+    `ensure_room` always succeeds.
     """
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        *,
+        budget_bytes: int | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if budget_bytes is not None and budget_bytes < 1:
+            raise ValueError("budget_bytes must be at least 1")
+        self._budget_bytes = budget_bytes
         self._clock = clock
         self._entries: OrderedDict[UUID, _Entry] = OrderedDict()
         self._total_bytes = 0
+        self._reserved_bytes = 0
         self._lock = Lock()
+        self._remove_session: Callable[[UUID], object] = _remove_nothing
+        self._is_busy: Callable[[UUID], bool] = _never_busy
+        self._remove_reports: Callable[[UUID], int] = _remove_nothing
+
+    @property
+    def budget_bytes(self) -> int | None:
+        """Return the configured budget, or None when it is disabled."""
+        return self._budget_bytes
 
     @property
     def total_bytes(self) -> int:
         """Return the estimated bytes of every tracked session."""
         with self._lock:
             return self._total_bytes
+
+    @property
+    def reserved_bytes(self) -> int:
+        """Return room held for replies of turns that are still running."""
+        with self._lock:
+            return self._reserved_bytes
+
+    def bind_session_store(
+        self,
+        remove: Callable[[UUID], object],
+        is_busy: Callable[[UUID], bool],
+    ) -> None:
+        """Register how to drop a session's turns and detect a running turn."""
+        self._remove_session = remove
+        self._is_busy = is_busy
+
+    def bind_report_store(self, remove: Callable[[UUID], int]) -> None:
+        """Register how to drop a session's reports; it returns the count."""
+        self._remove_reports = remove
+
+    def is_tracked(self, session_id: UUID) -> bool:
+        """Return whether the session is counted (and so still exists)."""
+        with self._lock:
+            return session_id in self._entries
+
+    def reserve(self, size_bytes: int) -> None:
+        """Hold room for a write whose final size is not yet known."""
+        with self._lock:
+            self._reserved_bytes += size_bytes
+
+    def release(self, size_bytes: int) -> None:
+        """Give back room taken by `reserve`."""
+        with self._lock:
+            if size_bytes > self._reserved_bytes:
+                raise ValueError("released more than was reserved")
+            self._reserved_bytes -= size_bytes
+
+    def ensure_room(
+        self, incoming_bytes: int, *, current_session: UUID | None = None
+    ) -> None:
+        """Evict longest-idle sessions so `incoming_bytes` fits, or raise.
+
+        Never evicts `current_session`, a session whose turn is running, or
+        an untracked (demo) session. When the eligible sessions cannot free
+        enough room, nothing is evicted and `StorageCapacityError` is raised.
+        """
+        budget = self._budget_bytes
+        if budget is None:
+            return
+        with self._lock:
+            used = self._total_bytes + self._reserved_bytes
+            candidates = tuple(
+                (session_id, entry.session_bytes + entry.report_bytes)
+                for session_id, entry in self._entries.items()
+            )
+        if incoming_bytes > budget:
+            self._refuse(used, budget, incoming_bytes, reason="larger_than_budget")
+        needed = used + incoming_bytes - budget
+        if needed <= 0:
+            return
+        victims: list[tuple[UUID, int]] = []
+        freed = 0
+        for session_id, size_bytes in candidates:
+            if session_id == current_session or self._is_busy(session_id):
+                continue
+            victims.append((session_id, size_bytes))
+            freed += size_bytes
+            if freed >= needed:
+                break
+        if freed < needed:
+            self._refuse(used, budget, incoming_bytes, reason="nothing_evictable")
+        for session_id, size_bytes in victims:
+            self._evict(session_id, size_bytes)
+        log_process_memory(event="evict", ledger_bytes=self.total_bytes)
+
+    def _evict(self, session_id: UUID, size_bytes: int) -> None:
+        with self._lock:
+            entry = self._entries.pop(session_id)
+            self._total_bytes -= entry.session_bytes + entry.report_bytes
+        # Called without the ledger lock, because each store takes its own.
+        self._remove_session(session_id)
+        reports_removed = self._remove_reports(session_id)
+        log_storage_event(
+            event="evict",
+            session_id=str(session_id),
+            reason="budget",
+            bytes_freed=size_bytes,
+            reports_removed=reports_removed,
+        )
+
+    @staticmethod
+    def _refuse(used: int, budget: int, incoming_bytes: int, *, reason: str) -> None:
+        LOGGER.warning(
+            "toyapp_storage event=capacity_refused reason=%s used_bytes=%s "
+            "budget_bytes=%s incoming_bytes=%s",
+            reason,
+            used,
+            budget,
+            incoming_bytes,
+        )
+        raise StorageCapacityError("session memory budget cannot fit the write")
 
     def track(self, session_id: UUID) -> None:
         """Start counting a new session at the fixed allowance."""

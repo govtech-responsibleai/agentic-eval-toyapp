@@ -28,7 +28,11 @@ from agentic_eval_toyapp.redis_memory import (
     RedisMemoryGuard,
     estimate_report_bytes,
 )
-from agentic_eval_toyapp.session_memory import SessionMemoryLedger, report_footprint
+from agentic_eval_toyapp.session_memory import (
+    SessionMemoryLedger,
+    SessionNotFoundError,
+    report_footprint,
+)
 
 
 class UnsupportedReportTypeError(ValueError):
@@ -318,7 +322,9 @@ class InMemoryReportStore:
 
     With a ledger, each added report's original bytes, extracted text and page
     text count towards its session's size, and a deletion subtracts the same
-    amount. Seeded reports are never counted.
+    amount. Adding a report first makes room under the ledger's budget, and
+    evicting a session removes all of its reports. Seeded reports are never
+    counted.
     """
 
     def __init__(
@@ -332,11 +338,13 @@ class InMemoryReportStore:
             raise ValueError("max_reports_per_session must be at least 1")
         self._max_reports_per_session = max_reports_per_session
         self._id_factory = id_factory
-        self._ledger = ledger
         self._records: dict[UUID, StoredReport] = {}
         self._owners: dict[UUID, UUID] = {}
         self._session_file_ids: dict[UUID, list[UUID]] = defaultdict(list)
         self._lock = Lock()
+        self._ledger = ledger
+        if ledger is not None:
+            ledger.bind_report_store(self._remove_session_reports)
 
     @property
     def max_reports_per_session(self) -> int:
@@ -363,10 +371,25 @@ class InMemoryReportStore:
         self, session_id: UUID, report: ProcessedReport
     ) -> ReportUploadResponse:
         """Allocate a globally unique file ID and retain the complete report."""
+        if self._ledger is not None:
+            with self._lock:
+                self._check_capacity(session_id)
+            # Extraction ran without a lock, so the session may have been
+            # evicted meanwhile; storing now would leave unowned reports.
+            if not self._ledger.is_tracked(session_id):
+                raise SessionNotFoundError
+            # Make room without this store's lock; eviction takes it.
+            self._ledger.ensure_room(
+                report_footprint(
+                    report.original_bytes,
+                    report.extracted_text,
+                    (page.text for page in report.pages),
+                ),
+                current_session=session_id,
+            )
         with self._lock:
+            self._check_capacity(session_id)
             session_file_ids = self._session_file_ids[session_id]
-            if len(session_file_ids) >= self._max_reports_per_session:
-                raise ReportCapacityError("session report capacity reached")
 
             file_id: UUID | None = None
             for _ in range(100):
@@ -400,6 +423,21 @@ class InMemoryReportStore:
                     session_id, report_delta=_stored_report_bytes(stored)
                 )
             return metadata
+
+    def _check_capacity(self, session_id: UUID) -> None:
+        if len(self._session_file_ids.get(session_id, ())) >= (
+            self._max_reports_per_session
+        ):
+            raise ReportCapacityError("session report capacity reached")
+
+    def _remove_session_reports(self, session_id: UUID) -> int:
+        """Drop every report a session owns and return how many there were."""
+        with self._lock:
+            file_ids = self._session_file_ids.pop(session_id, [])
+            for file_id in file_ids:
+                del self._records[file_id]
+                del self._owners[file_id]
+            return len(file_ids)
 
     async def list_for_session(
         self, session_id: UUID
@@ -451,9 +489,12 @@ class InMemoryReportStore:
             )
 
     async def purge(self, session_id: UUID) -> int:
-        """Process-local sessions and reports are never separated."""
-        del session_id
-        return 0
+        """Remove reports left by a session that no longer exists.
+
+        Eviction removes a session's reports with it, so this normally finds
+        nothing; it guards against reports outliving their session.
+        """
+        return self._remove_session_reports(session_id)
 
     def seed(
         self,
