@@ -248,3 +248,23 @@ def log_provider_failure(
         error=error,
         completion=completion or getattr(error, "completion", None),
     )
+
+
+def log_storage_event(
+    *,
+    event: str,
+    session_id: str,
+    reason: str,
+    bytes_freed: int,
+    reports_removed: int,
+) -> None:
+    """Log one session removed from Redis; never any stored content."""
+    LOGGER.info(
+        "toyapp_storage event=%s session_id=%s reason=%s bytes_freed=%s "
+        "reports_removed=%s",
+        _safe_identifier(event),
+        _safe_identifier(session_id),
+        _safe_identifier(reason),
+        bytes_freed,
+        reports_removed,
+    )

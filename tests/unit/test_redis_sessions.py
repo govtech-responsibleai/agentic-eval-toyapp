@@ -2,12 +2,13 @@
 
 import asyncio
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from uuid import UUID, uuid4
 
 import pytest
 from anyio import to_thread
 from redis.exceptions import ConnectionError
+from tests.support.fake_redis_memory import FakeMemoryState
 
 from agentic_eval_toyapp.models import (
     AgentTurnResult,
@@ -17,6 +18,7 @@ from agentic_eval_toyapp.models import (
     ConversationRole,
     TerminationReason,
 )
+from agentic_eval_toyapp.redis_memory import RedisMemoryGuard, StorageCapacityError
 from agentic_eval_toyapp.reports import StoredReport
 from agentic_eval_toyapp.sessions import (
     RedisSessionStore,
@@ -80,9 +82,44 @@ class _FakeLock:
         self.acquired = False
 
 
+class _FakeBookkeepingPipeline:
+    def __init__(self, client: "_FakeRedisClient") -> None:
+        self._client = client
+        self._commands: list[tuple[str, tuple[object, ...]]] = []
+
+    def zadd(self, name: str, mapping: Mapping[str, float]) -> object:
+        self._commands.append(("zadd", (name, dict(mapping))))
+        return self
+
+    def hset(self, name: str, key: str, value: str) -> object:
+        self._commands.append(("hset", (name, key, value)))
+        return self
+
+    def hdel(self, name: str, *keys: str) -> object:
+        self._commands.append(("hdel", (name, *keys)))
+        return self
+
+    def zrem(self, name: str, *values: str) -> object:
+        self._commands.append(("zrem", (name, *values)))
+        return self
+
+    async def execute(self) -> list[object]:
+        self._client.ensure_available()
+        await asyncio.sleep(0)
+        return [self._client.memory.apply(c, a) for c, a in self._commands]
+
+
 class _FakeRedisClient:
+    """Model the Redis TTL rules the store relies on.
+
+    A plain `SET` clears a key's TTL, `SET ... EX` replaces it, and `EXPIRE`
+    on a missing key changes nothing and returns 0.
+    """
+
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self.memory = FakeMemoryState()
         self.available = True
         self.lock_available = True
         self.locks: list[_FakeLock] = []
@@ -96,12 +133,38 @@ class _FakeRedisClient:
         self.ensure_available()
         return True
 
-    async def set(self, name: str, value: str, *, nx: bool = False) -> object:
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> object:
         self.ensure_available()
         await asyncio.sleep(0)
         if nx and name in self.data:
             return False
         self.data[name] = value
+        if ex is None:
+            self.ttls.pop(name, None)
+        else:
+            self.ttls[name] = ex
+        return True
+
+    async def info(self, section: str) -> Mapping[str, object]:
+        self.ensure_available()
+        return await self.memory.info(section)
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> object:
+        self.ensure_available()
+        return await self.memory.eval(script, numkeys, *keys_and_args)
+
+    def pipeline(self, transaction: bool = True) -> _FakeBookkeepingPipeline:
+        assert transaction
+        return _FakeBookkeepingPipeline(self)
+
+    async def expire(self, name: str, time: int) -> bool:
+        self.ensure_available()
+        await asyncio.sleep(0)
+        if name not in self.data:
+            return False
+        self.ttls[name] = time
         return True
 
     async def get(self, name: str) -> str | bytes | None:
@@ -235,6 +298,8 @@ async def test_redis_store_retries_uuid_collisions_and_validates_configuration()
         RedisSessionStore(_FakeRedisClient(), key_prefix="  ")
     with pytest.raises(ValueError, match="lock_timeout_seconds"):
         RedisSessionStore(_FakeRedisClient(), lock_timeout_seconds=0)
+    with pytest.raises(ValueError, match="idle_ttl_seconds"):
+        RedisSessionStore(_FakeRedisClient(), idle_ttl_seconds=0)
 
 
 class _BlockingLock(_FakeLock):
@@ -488,3 +553,210 @@ async def test_redis_v1_payload_loads_as_mutable() -> None:
     snapshot = await store.get(session_id)
     assert snapshot.read_only is False
     assert snapshot.retained_turns == 1
+
+
+_TTL = 3_600
+
+
+def _session_key(session_id: UUID) -> str:
+    return f"agentic-eval-toyapp:session:{session_id}"
+
+
+def _pair() -> tuple[ConversationMessage, ConversationMessage]:
+    return (
+        ConversationMessage(role=ConversationRole.USER, content="hi"),
+        ConversationMessage(role=ConversationRole.ASSISTANT, content="hello"),
+    )
+
+
+@pytest.mark.anyio
+async def test_create_sets_the_idle_ttl_on_the_session_key() -> None:
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+
+    session = await store.create()
+
+    assert client.ttls == {_session_key(session.session_id): _TTL}
+
+
+@pytest.mark.anyio
+async def test_every_turn_rewrites_the_session_with_the_idle_ttl() -> None:
+    """A plain SET would clear the TTL; every turn must write it again."""
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+    session_id = (await store.create()).session_id
+    key = _session_key(session_id)
+
+    for message in ("one", "two"):
+        client.ttls[key] = 5  # as if the session had been idle for a while
+        await store.run_turn(session_id, message, agent=_RecordingAgent())
+        assert client.ttls[key] == _TTL
+
+
+@pytest.mark.anyio
+async def test_get_refreshes_the_idle_ttl_of_a_mutable_session() -> None:
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+    session_id = (await store.create()).session_id
+    client.ttls[_session_key(session_id)] = 5
+
+    await store.get(session_id)
+
+    assert client.ttls[_session_key(session_id)] == _TTL
+
+
+@pytest.mark.anyio
+async def test_a_seeded_read_only_session_never_gains_a_ttl() -> None:
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+    session_id = UUID("00000000-0000-0000-0000-0000000000d0")
+
+    assert await store.seed(session_id, (_pair(),), read_only=True) is True
+    await store.get(session_id)
+
+    assert client.ttls == {}
+
+
+@pytest.mark.anyio
+async def test_unseed_leaves_an_expiring_empty_session() -> None:
+    """A rolled-back demo is an ordinary session, so it must expire."""
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+    session_id = UUID("00000000-0000-0000-0000-0000000000d1")
+    await store.seed(session_id, (_pair(),), read_only=True)
+
+    await store.unseed(session_id)
+
+    assert client.ttls == {_session_key(session_id): _TTL}
+    assert (await store.get(session_id)).retained_turns == 0
+
+
+@pytest.mark.anyio
+async def test_get_of_a_missing_session_creates_no_key() -> None:
+    client = _FakeRedisClient()
+    store = RedisSessionStore(client, idle_ttl_seconds=_TTL)
+
+    with pytest.raises(SessionNotFoundError):
+        await store.get(uuid4())
+
+    assert client.data == {}
+    assert client.ttls == {}
+
+
+def _guarded(client: _FakeRedisClient, *, budget: int) -> RedisSessionStore:
+    client.memory.maxmemory = budget
+    return RedisSessionStore(
+        client,
+        idle_ttl_seconds=_TTL,
+        memory_guard=RedisMemoryGuard(high_water=1.0, clock=lambda: 1_000.0),
+    )
+
+
+@pytest.mark.anyio
+async def test_guarded_create_tracks_access_time_and_size() -> None:
+    client = _FakeRedisClient()
+    store = _guarded(client, budget=1 << 30)
+
+    session_id = str((await store.create()).session_id)
+
+    assert client.memory.lru == {session_id: 1_000.0}
+    stored = len(client.data[_session_key(UUID(session_id))])
+    assert int(client.memory.sizes[f"{session_id}:session"]) > stored
+    assert client.memory.eval_calls == []
+
+
+@pytest.mark.anyio
+async def test_guarded_create_evicts_with_no_exempt_session_when_full() -> None:
+    client = _FakeRedisClient()
+    store = _guarded(client, budget=10_000)
+    client.memory.used_memory = 10_000
+
+    def evict(_args: tuple[str, ...]) -> object:
+        client.memory.used_memory = 0
+        return ["old", "memory_budget", "5000", "0"]
+
+    client.memory.evict = evict
+    await store.create()
+
+    (call,) = client.memory.eval_calls
+    assert call[-1] == ""
+
+
+@pytest.mark.anyio
+async def test_guarded_create_refuses_when_nothing_can_be_evicted() -> None:
+    client = _FakeRedisClient()
+    store = _guarded(client, budget=10_000)
+    client.memory.used_memory = 10_000
+
+    with pytest.raises(StorageCapacityError):
+        await store.create()
+    assert client.data == {}
+    assert client.memory.lru == {}
+
+
+@pytest.mark.anyio
+async def test_guarded_turn_is_refused_before_the_agent_runs() -> None:
+    """A refused turn must not cost a model call, a trace, or a stored pair."""
+    client = _FakeRedisClient()
+    store = _guarded(client, budget=1 << 20)
+    session_id = (await store.create()).session_id
+    client.memory.used_memory = 1 << 20
+    agent = _RecordingAgent()
+
+    with pytest.raises(StorageCapacityError):
+        await store.run_turn(session_id, "hello", agent=agent)
+
+    assert agent.calls == []
+    assert [lock.acquired for lock in client.locks] == [False]
+    client.memory.used_memory = 0
+    assert (await store.get(session_id)).retained_turns == 0
+
+
+@pytest.mark.anyio
+async def test_guarded_turn_exempts_its_own_session_and_updates_size() -> None:
+    client = _FakeRedisClient()
+    store = _guarded(client, budget=1 << 20)
+    session_id = (await store.create()).session_id
+    before = int(client.memory.sizes[f"{session_id}:session"])
+    client.memory.used_memory = (1 << 20) - 100
+
+    def evict(_args: tuple[str, ...]) -> object:
+        client.memory.used_memory = 0
+        return ["other", "memory_budget", "70000", "0"]
+
+    client.memory.evict = evict
+    await store.run_turn(session_id, "hello", agent=_RecordingAgent())
+
+    assert client.memory.eval_calls[0][-1] == str(session_id)
+    assert int(client.memory.sizes[f"{session_id}:session"]) > before
+
+
+@pytest.mark.anyio
+async def test_guarded_get_renews_access_time_but_not_for_demos() -> None:
+    client = _FakeRedisClient()
+    now = [1_000.0]
+    client.memory.maxmemory = 1 << 30
+    store = RedisSessionStore(
+        client,
+        idle_ttl_seconds=_TTL,
+        memory_guard=RedisMemoryGuard(clock=lambda: now[0]),
+    )
+    session_id = str((await store.create()).session_id)
+    demo_id = UUID("00000000-0000-0000-0000-0000000000d2")
+    await store.seed(demo_id, (_pair(),), read_only=True)
+
+    now[0] = 2_000.0
+    await store.get(UUID(session_id))
+    await store.get(demo_id)
+
+    assert client.memory.lru == {session_id: 2_000.0}
+
+
+@pytest.mark.anyio
+async def test_memory_usage_is_none_without_a_guard_and_reports_the_budget() -> None:
+    client = _FakeRedisClient()
+    assert await RedisSessionStore(client).memory_usage() is None
+
+    usage = await _guarded(client, budget=4_096).memory_usage()
+    assert usage is not None
+    assert (usage.budget_bytes, usage.source) == (4_096, "maxmemory")

@@ -89,12 +89,9 @@ async def export_session(
     """
     session = await session_store.get(session_id)
 
-    file_metadata = await report_store.list_for_session(session_id)
-    file_ids = [meta.file_id for meta in file_metadata]
-
-    reports: tuple[StoredReport, ...] = ()
-    if file_ids:
-        reports = await report_store.resolve(session_id, file_ids)
+    # A report whose content Redis already removed is left out rather than
+    # failing the whole export; the store also drops it from the index.
+    reports: tuple[StoredReport, ...] = await report_store.resolve_available(session_id)
 
     exported_files = tuple(_build_exported_file(r) for r in reports)
 

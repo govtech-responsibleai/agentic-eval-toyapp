@@ -76,6 +76,7 @@ agentic-eval-toyapp/
 │       │   ├── analysis.md                   # Report grounding and findings instructions
 │       │   ├── coordinator.md                # Coordinator routing and trust-boundary instructions
 │       │   └── system.md                     # RAG role and action instructions
+│       ├── redis_memory.py                   # Redis memory budget and idle-session eviction
 │       ├── retrieval.py                      # Corpus loading and exact FAISS search
 │       ├── report_sources.py                 # Complete report text with stable page and section locators
 │       ├── reports.py                        # Bounded in-memory and Redis report storage
@@ -107,7 +108,12 @@ agentic-eval-toyapp/
     │   ├── test_health_api.py                # Health, readiness, capability, and OpenAPI tests
     │   ├── test_langfuse_live.py             # Opt-in Langfuse export and v4 retrieval test
     │   ├── test_model_live.py                # Opt-in live-provider structured-action test
+    │   ├── test_redis_allkeys_live.py        # Opt-in: Redis allkeys-lru eviction never causes a 500
+    │   ├── test_redis_async_api.py           # Redis stores over HTTP: TTLs, budget, missing keys
+    │   ├── test_redis_memory_live.py         # Opt-in: real Lua eviction script against Redis
     │   └── test_retrieval_live.py            # Opt-in pinned-model semantic retrieval tests
+    ├── support/
+    │   └── fake_redis_memory.py              # Offline model of Redis memory bookkeeping
     ├── trace_cases/
     │   ├── test_catalog.py                   # Controlled-pair and ground-truth integrity tests
     │   ├── test_cli.py                       # Metric/variant selection-plan tests
@@ -129,6 +135,7 @@ agentic-eval-toyapp/
         ├── test_report_sources.py            # Complete report source and locator edge cases
         ├── test_retrieval.py                 # Corpus integrity and deterministic FAISS tests
         ├── test_reports.py                   # Report extraction, limits, hashing, and isolation tests
+        ├── test_redis_memory.py              # Memory budget derivation and eviction driver tests
         ├── test_redis_reports.py             # Offline Redis report persistence and integrity tests
         ├── test_redis_sessions.py            # Offline Redis persistence and failure-boundary tests
         ├── test_sessions.py                  # Session isolation, history, and truncation tests

@@ -58,10 +58,11 @@ let sessionFiles = [];
 let isReadOnly = false;
 
 class ApiRequestError extends Error {
-  constructor(message, status) {
+  constructor(message, status, code = null) {
     super(message);
     this.name = "ApiRequestError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -145,6 +146,7 @@ async function apiRequest(path, options = {}) {
     throw new ApiRequestError(
       payload.message || `Request failed (${response.status}).`,
       response.status,
+      payload.code ?? null,
     );
   }
   return payload;
@@ -161,7 +163,44 @@ async function fileRequest(path, options) {
   } catch (_error) {
     // Keep the HTTP status when an upstream response is not JSON.
   }
-  throw new Error(payload.message || `Request failed (${response.status}).`);
+  throw new ApiRequestError(
+    payload.message || `Request failed (${response.status}).`,
+    response.status,
+    payload.code ?? null,
+  );
+}
+
+function isMissingSession(error) {
+  return (
+    error instanceof ApiRequestError
+    && error.status === 404
+    && error.code === "session_not_found"
+  );
+}
+
+function isMissingReport(error) {
+  return error instanceof ApiRequestError && error.code === "report_not_found";
+}
+
+// A session can expire after its idle period or be removed to free storage
+// space. Start a replacement and say why, instead of failing every request.
+async function recoverFromMissingSession(error, draft = "") {
+  if (!isMissingSession(error)) {
+    return false;
+  }
+  const lostId = sessionId;
+  requestInProgress = false;
+  fileOperationInProgress = false;
+  await createSession(
+    null,
+    true,
+    `Session ${lostId} has expired or was removed to free space. Started a new session.`,
+  );
+  if (draft) {
+    messageInput.value = draft;
+    updateControls();
+  }
+  return true;
 }
 
 function createTextElement(tagName, text, className = "") {
@@ -217,7 +256,15 @@ function renderFiles() {
 }
 
 async function loadFiles() {
-  const response = await apiRequest(`/sessions/${sessionId}/files`);
+  let response;
+  try {
+    response = await apiRequest(`/sessions/${sessionId}/files`);
+  } catch (error) {
+    if (await recoverFromMissingSession(error)) {
+      return;
+    }
+    throw error;
+  }
   sessionFiles = response.files;
   if (selectedFileId && !sessionFiles.some((file) => file.file_id === selectedFileId)) {
     selectedFileId = null;
@@ -244,6 +291,9 @@ async function uploadFile() {
     setUploadStatus("");
     renderFiles();
   } catch (error) {
+    if (await recoverFromMissingSession(error)) {
+      return;
+    }
     setUploadStatus(error.message, true);
   } finally {
     reportUpload.value = "";
@@ -272,6 +322,9 @@ async function deleteFile(file) {
     setUploadStatus("");
     renderFiles();
   } catch (error) {
+    if (await recoverFromMissingSession(error)) {
+      return;
+    }
     await loadFiles().catch(() => {});
     setUploadStatus(error.message, true);
   } finally {
@@ -592,7 +645,7 @@ function updateSessionUrl(id, replace = false) {
   window.history[method]({ sessionId: id }, "", path);
 }
 
-async function createSession(resumeId = null, replaceUrl = false) {
+async function createSession(resumeId = null, replaceUrl = false, notice = "") {
   setBusy(true);
   setStatus(resumeId === null ? "Creating a new session…" : "Loading session…");
   sessionId = null;
@@ -609,7 +662,7 @@ async function createSession(resumeId = null, replaceUrl = false) {
   resetSessionScroll();
   try {
     let session = null;
-    let fallbackMessage = "";
+    let fallbackMessage = notice;
     if (resumeId !== null) {
       try {
         session = await apiRequest(`/sessions/${encodeURIComponent(resumeId)}`);
@@ -676,10 +729,21 @@ async function submitMessage(event) {
     setStatus("Turn complete.");
   } catch (error) {
     workingIndicator.remove();
-    appendMessage("assistant", error.message, "request_error");
-    setStatus(error.message, true);
+    if (await recoverFromMissingSession(error, message)) {
+      return;
+    }
+    if (isMissingReport(error)) {
+      const lost = attachedFile?.filename ?? "The selected report";
+      const explanation = `${lost} is no longer available and was removed from this session.`;
+      appendMessage("assistant", explanation, "request_error");
+      setStatus(explanation, true);
+      selectedFileId = null;
+    } else {
+      appendMessage("assistant", error.message, "request_error");
+      setStatus(error.message, true);
+    }
     messageInput.value = message;
-    if (selectedFileId) {
+    if (attachedFile) {
       await loadFiles().catch(() => {});
     }
   } finally {

@@ -49,6 +49,7 @@ from agentic_eval_toyapp.diagnostics import (
     classify_external_error,
     diagnostic_context,
     log_failure,
+    log_storage_event,
 )
 from agentic_eval_toyapp.embeddings import SentenceTransformerEmbeddingProvider
 from agentic_eval_toyapp.models import (
@@ -79,6 +80,12 @@ from agentic_eval_toyapp.providers import (
     OpenAIChatGenerationProvider,
     OpenAICompatibleChatClient,
     StructuredCompletionClient,
+)
+from agentic_eval_toyapp.redis_memory import (
+    RedisMemoryGuard,
+    StorageBudgetUnavailableError,
+    StorageCapacityError,
+    StorageUnavailableError,
 )
 from agentic_eval_toyapp.reports import (
     InMemoryReportStore,
@@ -444,7 +451,18 @@ def _build_default_agent(
     return _build_rag_agent(settings, retrieval_limiter)
 
 
-def _build_session_store(settings: AppSettings) -> SessionStore:
+def _build_memory_guard(settings: AppSettings) -> RedisMemoryGuard:
+    """Construct the stateless guard that keeps Redis under its memory budget."""
+    return RedisMemoryGuard(
+        key_prefix=settings.redis_key_prefix,
+        high_water=settings.redis_memory_high_water,
+        budget_bytes=settings.redis_memory_budget_bytes,
+    )
+
+
+def _build_session_store(
+    settings: AppSettings, memory_guard: RedisMemoryGuard
+) -> SessionStore:
     """Construct the explicitly selected conversation-session backend."""
     if settings.session_store_backend is SessionStoreBackend.MEMORY:
         return InMemorySessionStore(max_turns=settings.session_max_turns)
@@ -455,10 +473,14 @@ def _build_session_store(settings: AppSettings) -> SessionStore:
         socket_timeout_seconds=settings.redis_socket_timeout_seconds,
         lock_timeout_seconds=settings.redis_lock_timeout_seconds,
         lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
+        idle_ttl_seconds=settings.session_idle_ttl_seconds,
+        memory_guard=memory_guard,
     )
 
 
-def _build_report_store(settings: AppSettings) -> ReportStore:
+def _build_report_store(
+    settings: AppSettings, memory_guard: RedisMemoryGuard
+) -> ReportStore:
     """Construct the report backend selected with conversation persistence."""
     if settings.session_store_backend is SessionStoreBackend.MEMORY:
         return InMemoryReportStore(
@@ -471,6 +493,9 @@ def _build_report_store(settings: AppSettings) -> ReportStore:
         socket_timeout_seconds=settings.redis_socket_timeout_seconds,
         lock_timeout_seconds=settings.redis_lock_timeout_seconds,
         lock_blocking_timeout_seconds=(settings.redis_lock_blocking_timeout_seconds),
+        report_load_concurrency=settings.report_load_concurrency,
+        idle_ttl_seconds=settings.session_idle_ttl_seconds,
+        memory_guard=memory_guard,
     )
 
 
@@ -544,6 +569,28 @@ async def _handle_report_store_busy(
         status_code=409,
         code="report_store_busy",
         message="Another request is currently updating this session's reports.",
+    )
+
+
+async def _handle_storage_capacity(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    # Same public shape as turn admission: the service is at capacity, not down.
+    return _public_error(
+        status_code=503,
+        code="server_busy",
+        message="The service is at capacity. Retry the request shortly.",
+        headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+    )
+
+
+async def _handle_storage_unavailable(
+    _request: Request, _error: Exception
+) -> JSONResponse:
+    return _public_error(
+        status_code=503,
+        code="session_store_unavailable",
+        message="The conversation session store is temporarily unavailable.",
     )
 
 
@@ -660,14 +707,50 @@ def create_app(
 ) -> FastAPI:
     """Construct an application with explicit, injectable dependencies."""
     resolved_settings = settings or get_settings()
-    resolved_store = session_store or _build_session_store(resolved_settings)
+    memory_guard = _build_memory_guard(resolved_settings)
+    resolved_store = session_store or _build_session_store(
+        resolved_settings, memory_guard
+    )
     resolved_report_processor = report_processor or ReportProcessor(
         max_bytes=resolved_settings.upload_max_bytes,
         max_pdf_pages=resolved_settings.upload_max_pdf_pages,
         max_extracted_characters=(resolved_settings.upload_max_extracted_characters),
     )
-    resolved_report_store = report_store or _build_report_store(resolved_settings)
+    resolved_report_store = report_store or _build_report_store(
+        resolved_settings, memory_guard
+    )
     demos = load_demos()
+
+    async def _purge_leftover_reports(session_id: UUID) -> None:
+        try:
+            removed = await resolved_report_store.purge(session_id)
+        except ReportStoreUnavailableError:
+            # Cleanup is best effort; the leftovers keep their idle TTL.
+            return
+        if removed:
+            log_storage_event(
+                event="orphan_cleanup",
+                session_id=str(session_id),
+                reason="session_missing",
+                bytes_freed=0,
+                reports_removed=removed,
+            )
+
+    async def access_session(session_id: UUID) -> SessionResponse:
+        """Load a session and renew the idle expiry of everything it owns.
+
+        A missing session key means the session is gone, even when Redis kept
+        some of its report keys; those leftovers are removed before the 404.
+        """
+        try:
+            session = await resolved_store.get(session_id)
+        except SessionNotFoundError:
+            await _purge_leftover_reports(session_id)
+            raise
+        if not session.read_only:
+            await resolved_report_store.touch(session_id)
+        return session
+
     admission = TurnAdmission(resolved_settings.max_pending_turns)
     resolver: _AgentResolver
 
@@ -740,6 +823,10 @@ def create_app(
         _handle_agent_initialisation_error,
     )
     application.add_exception_handler(ServerBusyError, _handle_server_busy)
+    application.add_exception_handler(StorageCapacityError, _handle_storage_capacity)
+    application.add_exception_handler(
+        StorageUnavailableError, _handle_storage_unavailable
+    )
     application.add_exception_handler(TraceExportError, _handle_trace_export_error)
     application.add_exception_handler(
         RequestValidationError,
@@ -854,6 +941,32 @@ def create_app(
                 status=CheckStatus.FAIL,
                 detail="configured report store is unavailable",
             )
+        memory_check: ReadinessCheck | None = None
+        if session_store_ready and isinstance(resolved_store, RedisSessionStore):
+            try:
+                usage = await resolved_store.memory_usage()
+            except StorageUnavailableError as error:
+                session_store_ready = False
+                memory_check = ReadinessCheck(
+                    name="redis_memory_budget",
+                    status=CheckStatus.FAIL,
+                    detail=(
+                        "Redis maxmemory is 0 or unreadable; set "
+                        "TOYAPP_REDIS_MEMORY_BUDGET_BYTES"
+                        if isinstance(error, StorageBudgetUnavailableError)
+                        else "Redis memory usage could not be read"
+                    ),
+                )
+            else:
+                if usage is not None:
+                    memory_check = ReadinessCheck(
+                        name="redis_memory_budget",
+                        status=CheckStatus.PASS,
+                        detail=(
+                            f"budget {usage.budget_bytes} bytes from {usage.source}; "
+                            f"{usage.used_bytes} bytes used"
+                        ),
+                    )
         checks = [
             ReadinessCheck(
                 name="configuration",
@@ -861,6 +974,7 @@ def create_app(
                 detail="service settings validated",
             ),
             session_store_check,
+            *(() if memory_check is None else (memory_check,)),
             report_store_check,
             ReadinessCheck(
                 name="langfuse_tracing",
@@ -956,7 +1070,7 @@ def create_app(
     )
     async def get_session(session_id: UUID) -> SessionResponse:
         """Return safe public messages for one existing session."""
-        return await resolved_store.get(session_id)
+        return await access_session(session_id)
 
     @application.post(
         f"{API_PREFIX}/sessions/{{session_id}}/files",
@@ -978,7 +1092,7 @@ def create_app(
     ) -> ReportUploadResponse:
         """Validate and retain one report without invoking an agent turn."""
         with diagnostic_context(session_id):
-            session = await resolved_store.get(session_id)
+            session = await access_session(session_id)
             if session.read_only:
                 raise SessionReadOnlyError
             try:
@@ -1016,7 +1130,12 @@ def create_app(
                     error=error,
                 )
                 raise
-            except (ReportStoreUnavailableError, ReportStoreBusyError):
+            except (
+                ReportStoreUnavailableError,
+                ReportStoreBusyError,
+                StorageCapacityError,
+                StorageUnavailableError,
+            ):
                 raise
             except Exception as error:
                 log_failure(
@@ -1039,7 +1158,7 @@ def create_app(
     )
     async def list_reports(session_id: UUID) -> ReportListResponse:
         """List safe metadata for reports retained by this session."""
-        await resolved_store.get(session_id)
+        await access_session(session_id)
         return ReportListResponse(
             files=await resolved_report_store.list_for_session(session_id)
         )
@@ -1056,7 +1175,7 @@ def create_app(
     )
     async def delete_report(session_id: UUID, file_id: UUID) -> Response:
         """Remove one owned report without changing past conversation turns."""
-        session = await resolved_store.get(session_id)
+        session = await access_session(session_id)
         if session.read_only:
             raise SessionReadOnlyError
         await resolved_report_store.delete(session_id, file_id)
@@ -1079,7 +1198,7 @@ def create_app(
     ) -> SessionMessageResponse:
         """Execute and retain one bounded agent turn."""
         with diagnostic_context(session_id, turn=True):
-            session = await resolved_store.get(session_id)
+            session = await access_session(session_id)
             if session.read_only:
                 raise SessionReadOnlyError
             if len(request.file_ids) > resolved_settings.upload_max_files_per_message:
@@ -1138,6 +1257,7 @@ def create_app(
     )
     async def export_session_endpoint(session_id: UUID) -> Response:
         """Export one session as a portable JSON or ZIP file."""
+        await access_session(session_id)
         content, content_type, filename = await export_session(
             session_id, resolved_store, resolved_report_store
         )

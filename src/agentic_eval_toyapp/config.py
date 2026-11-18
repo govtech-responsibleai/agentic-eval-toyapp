@@ -113,12 +113,15 @@ class AppSettings(BaseSettings):
     langfuse_flush_on_turn: bool = True
     langfuse_include_report_text: bool = False
     session_max_turns: int = Field(default=10, ge=1, le=100)
+    session_idle_ttl_seconds: int = Field(default=30 * 24 * 60 * 60, ge=60)
     session_store_backend: SessionStoreBackend = SessionStoreBackend.MEMORY
     redis_url: SecretStr | None = Field(
         default=None,
         validation_alias=AliasChoices("REDIS_URL", "TOYAPP_REDIS_URL"),
     )
     redis_key_prefix: str = "agentic-eval-toyapp"
+    redis_memory_high_water: float = Field(default=0.75, gt=0.0, le=1.0)
+    redis_memory_budget_bytes: int | None = Field(default=None, ge=1)
     redis_socket_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
     redis_lock_timeout_seconds: float = Field(default=1_800.0, gt=0.0, le=3_600.0)
     redis_lock_blocking_timeout_seconds: float = Field(
@@ -135,6 +138,7 @@ class AppSettings(BaseSettings):
     )
     upload_max_files_per_message: int = Field(default=1, ge=1, le=10)
     upload_max_reports_per_session: int = Field(default=10, ge=1, le=100)
+    report_load_concurrency: int = Field(default=4, ge=1)
     max_pending_turns: int = Field(default=128, ge=1)
     llm_max_requests_per_minute: int = Field(default=180, ge=1)
     llm_max_concurrent_calls: int = Field(default=16, ge=1)

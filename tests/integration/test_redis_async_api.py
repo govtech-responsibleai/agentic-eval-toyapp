@@ -1,12 +1,16 @@
 """HTTP-level proof that the Redis stores run on the loop and own their client."""
 
 import asyncio
-from collections.abc import Sequence
+import io
+import json
+import zipfile
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 import pytest
 from httpx2 import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
+from tests.support.fake_redis_memory import FakeMemoryState
 
 from agentic_eval_toyapp.app import create_app
 from agentic_eval_toyapp.config import AppSettings
@@ -17,6 +21,7 @@ from agentic_eval_toyapp.models import (
     ConversationMessage,
     TerminationReason,
 )
+from agentic_eval_toyapp.redis_memory import RedisMemoryGuard
 from agentic_eval_toyapp.reports import RedisReportStore, StoredReport
 from agentic_eval_toyapp.sessions import RedisSessionStore
 
@@ -54,27 +59,117 @@ class _Lock:
         self._guard.release()
 
 
+class _Pipeline:
+    """Buffer writes and apply them together, like MULTI/EXEC."""
+
+    def __init__(self, client: "_FakeRedis") -> None:
+        self._client = client
+        self._commands: list[tuple[str, tuple[str, ...], int | None]] = []
+        self._bookkeeping: list[tuple[str, tuple[object, ...]]] = []
+
+    def set(self, name: str, value: str, *, ex: int | None = None) -> object:
+        self._commands.append(("set", (name, value), ex))
+        return self
+
+    def expire(self, name: str, time: int) -> object:
+        self._commands.append(("expire", (name,), time))
+        return self
+
+    def delete(self, *names: str) -> object:
+        self._commands.append(("delete", names, None))
+        return self
+
+    def zadd(self, name: str, mapping: Mapping[str, float]) -> object:
+        self._bookkeeping.append(("zadd", (name, dict(mapping))))
+        return self
+
+    def hset(self, name: str, key: str, value: str) -> object:
+        self._bookkeeping.append(("hset", (name, key, value)))
+        return self
+
+    def hdel(self, name: str, *keys: str) -> object:
+        self._bookkeeping.append(("hdel", (name, *keys)))
+        return self
+
+    def zrem(self, name: str, *values: str) -> object:
+        self._bookkeeping.append(("zrem", (name, *values)))
+        return self
+
+    async def execute(self) -> list[object]:
+        await asyncio.sleep(0)
+        results: list[object] = [
+            self._client.memory.apply(command, arguments)
+            for command, arguments in self._bookkeeping
+        ]
+        for command, arguments, seconds in self._commands:
+            if command == "set":
+                self._client.store(arguments[0], arguments[1], seconds)
+                results.append(True)
+            elif command == "expire":
+                assert seconds is not None
+                results.append(self._client.refresh(arguments[0], seconds))
+            else:
+                results.append(sum(self._client.remove(n) for n in arguments))
+        return results
+
+
 class _FakeRedis:
     """Async stand-in for `redis.asyncio.Redis`, bound to whichever loop calls it."""
 
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+        self.memory = FakeMemoryState()
         self.closed = False
         self._guards: dict[str, asyncio.Lock] = {}
+
+    def store(self, name: str, value: str, ex: int | None) -> None:
+        """Write like Redis: a SET without EX clears any existing TTL."""
+        self.data[name] = value
+        if ex is None:
+            self.ttls.pop(name, None)
+        else:
+            self.ttls[name] = ex
+
+    def refresh(self, name: str, seconds: int) -> bool:
+        if name not in self.data:
+            return False
+        self.ttls[name] = seconds
+        return True
+
+    def remove(self, name: str) -> bool:
+        self.ttls.pop(name, None)
+        return self.data.pop(name, None) is not None
 
     async def ping(self) -> bool:
         return True
 
-    async def set(self, name: str, value: str, *, nx: bool = False) -> object:
+    async def info(self, section: str) -> Mapping[str, object]:
+        return await self.memory.info(section)
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> object:
+        return await self.memory.eval(script, numkeys, *keys_and_args)
+
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> object:
         await asyncio.sleep(0)
         if nx and name in self.data:
             return False
-        self.data[name] = value
+        self.store(name, value, ex)
         return True
+
+    async def expire(self, name: str, time: int) -> bool:
+        await asyncio.sleep(0)
+        return self.refresh(name, time)
 
     async def get(self, name: str) -> str | None:
         await asyncio.sleep(0)
         return self.data.get(name)
+
+    def pipeline(self, transaction: bool = True) -> "_Pipeline":
+        assert transaction
+        return _Pipeline(self)
 
     def lock(self, name: str, *, timeout: float, blocking_timeout: float) -> _Lock:
         del timeout, blocking_timeout
@@ -213,3 +308,270 @@ async def test_injected_fakes_serve_requests_under_async_client() -> None:
         )
         assert deleted.status_code == 204
         assert (await client.get("/ready")).json()["status"] == "ready"
+
+
+_TTL = 3_600
+
+
+def _expiring_keys(fake: _FakeRedis, session_id: str) -> dict[str, int]:
+    return {key: ttl for key, ttl in fake.ttls.items() if session_id in key}
+
+
+def _owned_keys(fake: _FakeRedis, session_id: str) -> set[str]:
+    return {key for key in fake.data if session_id in key and not key.endswith("-lock")}
+
+
+@pytest.mark.anyio
+async def test_every_session_route_refreshes_all_of_the_sessions_keys() -> None:
+    """Any request on a session renews its turns and its reports together."""
+    fake = _FakeRedis()
+    application = create_app(
+        AppSettings(langfuse_enabled=False),
+        session_store=RedisSessionStore(fake, idle_ttl_seconds=_TTL),
+        report_store=RedisReportStore(
+            fake, max_reports_per_session=3, idle_ttl_seconds=_TTL
+        ),
+        agent=_Agent(),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://testserver"
+    ) as client:
+        session_id = (await client.post("/api/v1/sessions")).json()["session_id"]
+        base = f"/api/v1/sessions/{session_id}"
+        upload = {"file": ("r.md", b"# Report\n\nBody.", "text/markdown")}
+        file_id = (await client.post(f"{base}/files", files=upload)).json()["file_id"]
+        await client.post(f"{base}/files", files=upload)
+        assert len(_owned_keys(fake, session_id)) == 4
+
+        requests = (
+            lambda: client.get(base),
+            lambda: client.get(f"{base}/files"),
+            lambda: client.post(f"{base}/messages", json={"message": "hi"}),
+            lambda: client.get(f"{base}/export"),
+            lambda: client.delete(f"{base}/files/{file_id}"),
+            lambda: client.post(f"{base}/files", files=upload),
+        )
+        for send in requests:
+            for key in _expiring_keys(fake, session_id):
+                fake.ttls[key] = 5
+            response = await send()
+            assert response.status_code < 300, response.text
+            assert _expiring_keys(fake, session_id) == dict.fromkeys(
+                _owned_keys(fake, session_id), _TTL
+            )
+
+
+@pytest.mark.anyio
+async def test_demo_session_requests_never_add_a_ttl() -> None:
+    fake = _FakeRedis()
+    application = create_app(
+        AppSettings(langfuse_enabled=False),
+        session_store=RedisSessionStore(fake, idle_ttl_seconds=_TTL),
+        report_store=RedisReportStore(
+            fake, max_reports_per_session=3, idle_ttl_seconds=_TTL
+        ),
+        agent=_Agent(),
+    )
+    with TestClient(application) as client:
+        demo_ids = {
+            key.split(":")[2] for key in fake.data if key.split(":")[1] == "session"
+        }
+        assert demo_ids
+        for demo_id in demo_ids:
+            base = f"/api/v1/sessions/{demo_id}"
+            assert client.get(base).json()["read_only"] is True
+            assert client.get(f"{base}/files").status_code == 200
+            assert client.get(f"{base}/export").status_code == 200
+    assert fake.ttls == {}
+
+
+def _guarded_app(fake: _FakeRedis) -> Any:
+    guard = RedisMemoryGuard(high_water=1.0)
+    return create_app(
+        AppSettings(langfuse_enabled=False),
+        session_store=RedisSessionStore(fake, memory_guard=guard),
+        report_store=RedisReportStore(
+            fake, max_reports_per_session=3, memory_guard=guard
+        ),
+        agent=_Agent(),
+    )
+
+
+@pytest.mark.anyio
+async def test_a_full_budget_returns_the_capacity_503_shape() -> None:
+    fake = _FakeRedis()
+    fake.memory.maxmemory = 1 << 20
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id = (await client.post("/api/v1/sessions")).json()["session_id"]
+        fake.memory.used_memory = 1 << 20
+
+        responses = (
+            await client.post("/api/v1/sessions"),
+            await client.post(
+                f"/api/v1/sessions/{session_id}/messages", json={"message": "hi"}
+            ),
+            await client.post(
+                f"/api/v1/sessions/{session_id}/files",
+                files={"file": ("r.md", b"# Report\n\nBody.", "text/markdown")},
+            ),
+        )
+
+    for response in responses:
+        assert response.status_code == 503
+        assert response.json()["code"] == "server_busy"
+        assert response.headers["Retry-After"]
+
+
+def test_ready_fails_without_maxmemory_or_a_fallback_budget() -> None:
+    fake = _FakeRedis()
+    fake.memory.maxmemory = 0
+    with TestClient(_guarded_app(fake)) as client:
+        body = client.get("/ready").json()
+        create = client.post("/api/v1/sessions")
+
+    assert body["status"] == "not_ready"
+    (check,) = [c for c in body["checks"] if c["name"] == "redis_memory_budget"]
+    assert check["status"] == "fail"
+    assert "TOYAPP_REDIS_MEMORY_BUDGET_BYTES" in check["detail"]
+    assert create.status_code == 503
+    assert create.json()["code"] == "session_store_unavailable"
+
+
+def test_ready_reports_the_budget_and_its_source() -> None:
+    fake = _FakeRedis()
+    fake.memory.maxmemory = 4_096
+    with TestClient(_guarded_app(fake)) as client:
+        body = client.get("/ready").json()
+
+    assert body["status"] == "ready"
+    (check,) = [c for c in body["checks"] if c["name"] == "redis_memory_budget"]
+    assert check["status"] == "pass"
+    assert "4096 bytes from maxmemory" in check["detail"]
+
+
+def test_ready_has_no_memory_check_on_the_memory_backend() -> None:
+    application = create_app(AppSettings(langfuse_enabled=False), agent=_Agent())
+    with TestClient(application) as client:
+        names = [c["name"] for c in client.get("/ready").json()["checks"]]
+    assert "redis_memory_budget" not in names
+
+
+async def _session_with_reports(
+    client: AsyncClient, count: int
+) -> tuple[str, list[str]]:
+    session_id = (await client.post("/api/v1/sessions")).json()["session_id"]
+    file_ids: list[str] = []
+    for n in range(count):
+        uploaded = await client.post(
+            f"/api/v1/sessions/{session_id}/files",
+            files={"file": (f"r{n}.md", f"# Report {n}".encode(), "text/markdown")},
+        )
+        file_ids.append(uploaded.json()["file_id"])
+    return session_id, file_ids
+
+
+@pytest.mark.anyio
+async def test_a_missing_session_key_is_a_404_and_its_reports_are_purged() -> None:
+    """Under allkeys-* eviction a session can lose its key but keep its reports."""
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, _ = await _session_with_reports(client, 2)
+        del fake.data[f"agentic-eval-toyapp:session:{session_id}"]
+        base = f"/api/v1/sessions/{session_id}"
+
+        responses = [
+            await client.get(base),
+            await client.get(f"{base}/files"),
+            await client.post(f"{base}/messages", json={"message": "hi"}),
+            await client.post(
+                f"{base}/files", files={"file": ("x.md", b"# X", "text/markdown")}
+            ),
+            await client.get(f"{base}/export"),
+        ]
+
+    assert [r.status_code for r in responses] == [404] * 5
+    assert {r.json()["code"] for r in responses} == {"session_not_found"}
+    assert [key for key in fake.data if session_id in key] == []
+    assert session_id not in fake.memory.lru
+    assert all(not field.startswith(session_id) for field in fake.memory.sizes)
+
+
+@pytest.mark.anyio
+async def test_an_attachment_whose_content_is_gone_is_a_404_and_is_unlisted() -> None:
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, (gone, kept) = await _session_with_reports(client, 2)
+        del fake.data[f"agentic-eval-toyapp:report:{session_id}:{gone}"]
+        base = f"/api/v1/sessions/{session_id}"
+
+        sent = await client.post(
+            f"{base}/messages", json={"message": "hi", "file_ids": [gone]}
+        )
+        listed = (await client.get(f"{base}/files")).json()["files"]
+        retry = await client.post(f"{base}/messages", json={"message": "hi"})
+
+    assert sent.status_code == 404
+    assert sent.json()["code"] == "report_not_found"
+    assert [f["file_id"] for f in listed] == [kept]
+    assert retry.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_export_skips_a_report_whose_content_is_gone() -> None:
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, (gone, kept) = await _session_with_reports(client, 2)
+        del fake.data[f"agentic-eval-toyapp:report:{session_id}:{gone}"]
+
+        exported = await client.get(f"/api/v1/sessions/{session_id}/export")
+
+    assert exported.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        names = archive.namelist()
+        manifest = json.loads(archive.read("session.json"))
+    assert names == ["session.json", f"uploaded/{kept}"]
+    assert [f["file_id"] for f in manifest["files"]] == [kept]
+
+
+@pytest.mark.anyio
+async def test_export_with_every_report_gone_returns_plain_json() -> None:
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, (only,) = await _session_with_reports(client, 1)
+        del fake.data[f"agentic-eval-toyapp:report:{session_id}:{only}"]
+
+        exported = await client.get(f"/api/v1/sessions/{session_id}/export")
+
+    assert exported.status_code == 200
+    assert exported.headers["content-type"].startswith("application/json")
+    assert exported.json()["files"] == []
+
+
+@pytest.mark.anyio
+async def test_a_missing_report_index_lists_no_files_and_upload_still_works() -> None:
+    fake = _FakeRedis()
+    async with AsyncClient(
+        transport=ASGITransport(app=_guarded_app(fake)), base_url="http://testserver"
+    ) as client:
+        session_id, _ = await _session_with_reports(client, 1)
+        del fake.data[f"agentic-eval-toyapp:reports:{session_id}:index"]
+        base = f"/api/v1/sessions/{session_id}"
+
+        listed = await client.get(f"{base}/files")
+        uploaded = await client.post(
+            f"{base}/files", files={"file": ("y.md", b"# Y", "text/markdown")}
+        )
+
+    assert listed.status_code == 200
+    assert listed.json()["files"] == []
+    assert uploaded.status_code == 201

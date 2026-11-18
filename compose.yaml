@@ -26,6 +26,8 @@ services:
       TOYAPP_EMBEDDING_LOCAL_FILES_ONLY: "true"
       TOYAPP_SESSION_STORE_BACKEND: redis
       TOYAPP_REDIS_URL: redis://redis:6379/0
+      # This Redis sets no maxmemory, so the app needs an explicit budget.
+      TOYAPP_REDIS_MEMORY_BUDGET_BYTES: ${TOYAPP_REDIS_MEMORY_BUDGET_BYTES:-536870912}
     depends_on:
       redis:
         condition: service_healthy
