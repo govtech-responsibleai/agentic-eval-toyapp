@@ -1163,7 +1163,7 @@ The multi-stage `Dockerfile` separates networked construction from runtime.
 The builder installs production dependencies from `uv.lock`, installs the
 application as a non-editable wheel, and downloads and validates the configured
 SentenceTransformer revision. The final image receives the virtual environment,
-model cache, and selected public CA bundle. It runs Uvicorn as the unprivileged
+model cache, and trusts only the Debian system CA bundle. It runs Uvicorn as the unprivileged
 `toyapp` user and health-checks `/health` on the fixed internal port 8000.
 
 PyTorch is an explicit application dependency sourced from PyTorch's CPU-only
@@ -1177,13 +1177,16 @@ Langfuse remain external. Compose reads their settings from `.env` at container
 startup; Docker build steps cannot access those secrets. Its local Redis service
 uses append-only persistence in a named volume and is not published to the host.
 
-For managed TLS interception, the Makefile passes `DOCKER_CA_CERT`, defaulting
-to the host's `SSL_CERT_FILE`, as a BuildKit secret mount. The builder copies
-that public certificate bundle—not a credential or private key—into its trust
-path and the final runtime. The copied bundle is mode `0644`: writable only by
-root but readable by the unprivileged `toyapp` runtime. If no bundle is
-configured, the Debian system bundle is used. Certificate verification is never
-disabled.
+For managed TLS interception, the Makefile passes `CA_BUNDLE`, defaulting to
+the host's `SSL_CERT_FILE`, as a BuildKit secret mount. Only the builder stage
+trusts that public certificate bundle—not a credential or private key—so its
+package and model downloads succeed behind the proxy; the builder is not
+shipped. The runtime image trusts only the Debian system bundle at
+`/etc/ssl/certs/ca-certificates.crt`, so a proxy CA on the build machine never
+reaches Airbase. For a local run behind the same proxy, `make docker-up` adds
+`compose.ca.yaml`, which mounts `CA_BUNDLE` read-only at `/run/toyapp-ca.pem`
+and points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE` at it.
+Certificate verification is never disabled.
 
 The image deliberately excludes `trace_cases`. Controlled generation is an
 operator-side evaluation tool rather than part of the target application's
@@ -1205,11 +1208,11 @@ flowchart LR
 
     Venv --> Image[Minimal runtime image]
     Cache --> Image
-    Builder --> TrustedCA[Runtime public CA bundle]
-    TrustedCA --> Image
+    DebianCA[Debian system CA bundle] --> Image
 
     subgraph Runtime[Container runtime]
         Env[Runtime .env values] --> Service[Non-root Uvicorn service]
+        LocalCA[Optional local-run CA bundle] -. compose.ca.yaml read-only mount .-> Service
         Image --> Service
         Service --> Redis[(Redis session and report store)]
         Volume[Named persistent volume] --> Redis

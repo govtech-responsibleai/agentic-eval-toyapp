@@ -112,17 +112,19 @@ services; their credentials are passed from `.env` only when the container
 starts and are not copied into the image.
 
 The image uses the CPU-only PyTorch wheel source and does not include CUDA
-libraries. In a managed network, `make docker-build` automatically forwards the
-certificate bundle named by the host's `SSL_CERT_FILE` through a BuildKit
-secret. Override it explicitly when necessary:
+libraries. In a managed network, `make docker-build` and `make docker-up`
+automatically use the certificate bundle named by the host's `SSL_CERT_FILE`.
+Override it explicitly when necessary:
 
 ```bash
-make docker-build DOCKER_CA_CERT=/absolute/path/to/combined-ca-bundle.pem
+make docker-up CA_BUNDLE=/absolute/path/to/combined-ca-bundle.pem
 ```
 
-TLS verification remains enabled. The selected public CA bundle is copied into
-the runtime image so the unprivileged service can read it while only root can
-modify it. Supply public CA certificates only; do not include private keys.
+TLS verification remains enabled. The bundle is used for the build, through a
+BuildKit secret, and for the local run, where `compose.ca.yaml` mounts it
+read-only into the container. It is not in the image, which trusts only the
+Debian system bundle, so an image built behind the proxy carries no proxy CA to
+Airbase. Supply public CA certificates only; do not include private keys.
 
 ## Operational error logs
 

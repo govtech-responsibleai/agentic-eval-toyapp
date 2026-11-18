@@ -20,9 +20,7 @@ def test_dockerfile_pins_and_caches_the_configured_embedding_model() -> None:
     )
     assert "TOYAPP_EMBEDDING_LOCAL_FILES_ONLY=true" in dockerfile
     assert "HF_HUB_OFFLINE=1" in dockerfile
-    assert "REQUESTS_CA_BUNDLE=/opt/toyapp-ca-bundle.pem" in dockerfile
     assert "--mount=type=secret,id=toyapp_ca_bundle" in dockerfile
-    assert "chmod 0644 /opt/toyapp-ca-bundle.pem" in dockerfile
     assert "UV_COMPILE_BYTECODE" not in dockerfile
     assert "groupadd --gid 999 app" in dockerfile
     assert "useradd --uid 999 --gid app" in dockerfile
@@ -32,6 +30,32 @@ def test_dockerfile_pins_and_caches_the_configured_embedding_model() -> None:
     assert "os.environ.get('PORT', '8000')" in dockerfile
     assert "${PORT:-8000}" in dockerfile
     assert "HEALTHCHECK" in dockerfile
+
+
+def test_runtime_image_trusts_only_the_debian_ca_bundle() -> None:
+    """A build-time proxy CA must not ship; the runtime uses the Debian bundle."""
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    runtime_stage = dockerfile.split("FROM python-base AS runtime", maxsplit=1)[1]
+    debian_bundle = "/etc/ssl/certs/ca-certificates.crt"
+
+    assert "ca-bundle" not in runtime_stage
+    assert "toyapp_ca_bundle" not in runtime_stage
+    assert f"SSL_CERT_FILE={debian_bundle}" in runtime_stage
+    assert f"REQUESTS_CA_BUNDLE={debian_bundle}" in runtime_stage
+
+
+def test_compose_mounts_a_local_ca_bundle_only_through_the_overlay() -> None:
+    """The base Compose file needs no CA; the overlay mounts one read-only."""
+    compose = (REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8")
+    overlay = (REPOSITORY_ROOT / "compose.ca.yaml").read_text(encoding="utf-8")
+    mounted_bundle = "/run/toyapp-ca.pem"
+
+    assert "image: ${IMAGE_TAG:-agentic-eval-toyapp:local}" in compose
+    assert "CA_BUNDLE" not in compose
+    assert "${CA_BUNDLE:?" in overlay
+    assert f":{mounted_bundle}:ro" in overlay
+    for variable in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        assert f"{variable}: {mounted_bundle}" in overlay
 
 
 def test_airbase_configuration_targets_the_expected_project() -> None:
