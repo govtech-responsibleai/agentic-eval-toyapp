@@ -6,6 +6,7 @@ import math
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from threading import Barrier
@@ -20,6 +21,32 @@ class UserResult:
     succeeded: bool
     latency_seconds: float
     error: str | None = None
+    status: str | None = None
+
+
+# Edge proxies such as Cloudflare reject urllib's default `Python-urllib/x.y`
+# agent (error 1010), so identify the tool explicitly.
+USER_AGENT = "agentic-eval-toyapp-load-test/1.0"
+
+# Turn statuses that mean the service handled the request. `failed` (for
+# example a provider error or limit) and anything unexpected are failures.
+COMPLETED_STATUSES = frozenset({"answered", "clarification_required"})
+
+
+def build_request(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, object] | None = None,
+) -> urllib.request.Request:
+    """Return a JSON request that identifies the load-test client."""
+    encoded = json.dumps(payload).encode() if payload is not None else None
+    return urllib.request.Request(
+        url,
+        data=encoded,
+        method=method,
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+    )
 
 
 def _request_json(
@@ -29,13 +56,7 @@ def _request_json(
     payload: dict[str, object] | None = None,
     timeout_seconds: float,
 ) -> object:
-    encoded = json.dumps(payload).encode() if payload is not None else None
-    request = urllib.request.Request(
-        url,
-        data=encoded,
-        method=method,
-        headers={"Content-Type": "application/json"},
-    )
+    request = build_request(url, method=method, payload=payload)
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         return json.loads(response.read().decode())
 
@@ -46,6 +67,21 @@ def normalise_base_url(value: str) -> str:
     if not base_url.startswith(("http://", "https://")):
         raise ValueError("base URL must start with http:// or https://")
     return base_url
+
+
+def check_turn_result(result: dict[str, object]) -> str:
+    """Return the turn status when the service completed the turn normally.
+
+    A load test measures whether the service copes, not answer quality, so a
+    model choosing to ask a follow-up question counts as a completed turn.
+    """
+    status = result.get("status")
+    if isinstance(status, str) and status in COMPLETED_STATUSES:
+        return status
+    raise ValueError(
+        "message response did not complete: "
+        f"status={status} termination_reason={result.get('termination_reason')}"
+    )
 
 
 def _run_user(
@@ -81,13 +117,12 @@ def _run_user(
         result = cast(dict[str, object], response).get("result")
         if not isinstance(result, dict):
             raise ValueError("message response did not contain a result object")
-        typed_result = cast(dict[str, object], result)
-        if typed_result.get("status") != "answered":
-            raise ValueError("message response was not answered")
+        status = check_turn_result(cast(dict[str, object], result))
         return UserResult(
             user=user,
             succeeded=True,
             latency_seconds=time.perf_counter() - started,
+            status=status,
         )
     except (OSError, ValueError, urllib.error.URLError) as error:
         return UserResult(
@@ -130,6 +165,13 @@ def summarise(
             "p99": round(percentile(latencies, 0.99), 3),
             "max": round(max(latencies), 3),
         },
+        "statuses": dict(
+            sorted(
+                Counter(
+                    result.status for result in results if result.status is not None
+                ).items()
+            )
+        ),
         "failures": [asdict(result) for result in results if not result.succeeded],
     }
 
