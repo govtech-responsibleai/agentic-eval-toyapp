@@ -116,6 +116,55 @@ in the URL. `TOYAPP_SESSION_MAX_TURNS` and
 for both backends. Redis availability is included in `/ready`; requests that
 need an unavailable store return safe `503` storage errors.
 
+### In-memory backend limits
+
+The in-memory backend keeps every session and report in the application
+process, so it bounds them itself. Without that bound, a spike in sessions or
+uploads would grow the process until the container is killed for running out
+of memory, losing every session at once.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TOYAPP_SESSION_MEMORY_BUDGET_BYTES` | `805306368` (768 MiB) | Estimated bytes all in-memory sessions and reports may hold before the longest-idle sessions are evicted. |
+| `TOYAPP_SESSION_IDLE_TTL_SECONDS` | `2592000` (30 days) | A session idle this long is removed at the next budget check. Shared with the Redis backend. |
+
+The estimate for a session is a fixed 1 KiB allowance, plus the length of
+every retained message, plus, for each report, its original bytes, its
+extracted text and, for a PDF, its per-page text. It is cheap to keep up to
+date but is not the process's real memory use: Python object overhead is not
+counted, and a non-ASCII character counts as one although it can take up to
+four bytes. Leave headroom between the budget and the instance's memory for
+the Python runtime, the embedding model and FAISS index, and temporary memory
+used while a PDF is parsed. See [Deploying to Airbase](deploy-airbase.md#session-memory-on-bsmall)
+for how to choose a budget for an instance.
+
+Before creating a session, storing a report, or starting a turn, the app:
+
+1. removes every session idle for at least `TOYAPP_SESSION_IDLE_TTL_SECONDS`;
+2. checks whether the incoming data fits the budget and, if it does not, works
+   out which longest-idle sessions to evict;
+3. evicts them only if that frees enough room. Otherwise it evicts nothing and
+   returns `503 server_busy` with `Retry-After: 10`.
+
+Evicting or expiring a session removes its turns and all of its reports. The
+session then returns `404 session_not_found`, and the browser starts a new
+session and explains why. A turn is checked before the agent runs and reserves
+64 KiB for the reply until it finishes, so a refused turn makes no model call
+and leaves no trace. A single upload larger than the whole budget is always
+refused.
+
+Seeded demo sessions are never counted, expired or evicted. A session with a
+turn in progress, and the session making the current request, are also never
+removed. Expiry happens only during those checks; there is no background task,
+so an expired session can still be read until the next session, upload or
+turn arrives.
+
+At the default limits the estimate is about 5.4 MB for a maximum-size PDF
+report (5 MiB file, 100,000 characters stored twice), about 54 MB for a
+session holding ten of them, and under 1 MB for ten turns of conversation, so
+the default budget holds roughly fourteen sessions that have each uploaded ten
+maximum-size reports, or thousands of sessions without uploads.
+
 The Redis backend works with any Redis provider, memory limit, eviction policy,
 and number of app instances sharing one Redis. It needs a single Redis node:
 Redis Cluster is not supported, because eviction runs as one Lua script over
@@ -125,7 +174,7 @@ keys whose names it derives.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TOYAPP_SESSION_IDLE_TTL_SECONDS` | `2592000` (30 days) | Idle expiry for every key a session owns. Any request on the session renews all of them. |
+| `TOYAPP_SESSION_IDLE_TTL_SECONDS` | `2592000` (30 days) | Idle expiry for every key a session owns. Any request on the session renews all of them. The in-memory backend uses the same setting. |
 | `TOYAPP_REDIS_MEMORY_HIGH_WATER` | `0.75` | Fraction of Redis `maxmemory` the app may fill before it evicts idle sessions. |
 | `TOYAPP_REDIS_MEMORY_BUDGET_BYTES` | unset | Fallback budget in bytes. Required when `maxmemory` is `0` or unreadable. |
 | `TOYAPP_REPORT_LOAD_CONCURRENCY` | `4` | Report-content loads one app instance runs at once, which bounds its temporary memory use. |
@@ -212,8 +261,10 @@ still occupies memory until it expires or is flushed.
 
 ### Operational logs
 
-Each session removed from Redis is logged on one line with fixed fields and no
-stored content:
+Each session removed from either backend is logged on one line with fixed
+fields and no stored content. The in-memory backend logs `reason=budget` for
+eviction and `reason=idle` for expiry; Redis logs `reason=memory_budget` and
+`reason=expired`:
 
 ```text
 toyapp_storage event=evict session_id=… reason=memory_budget bytes_freed=… reports_removed=…
@@ -221,6 +272,19 @@ toyapp_storage event=expire session_id=… reason=expired bytes_freed=0 reports_
 toyapp_storage event=orphan_cleanup session_id=… reason=session_missing bytes_freed=0 reports_removed=…
 toyapp_storage event=report_pruned session_id=… reason=content_missing bytes_freed=0 reports_removed=…
 toyapp_storage event=capacity_refused reason=… used_bytes=… budget_bytes=… incoming_bytes=…
+```
+
+With the in-memory backend, the app also logs its own memory use once at
+startup and after each pass that evicted or expired sessions.
+`rss_bytes` is current resident memory from `/proc/self/status` (`None` where
+that file does not exist, such as on macOS), `peak_rss_bytes` is the highest
+resident memory since the process started, and `ledger_bytes` is the session
+estimate:
+
+```text
+toyapp_memory event=startup rss_bytes=… peak_rss_bytes=… ledger_bytes=0
+toyapp_memory event=evict rss_bytes=… peak_rss_bytes=… ledger_bytes=…
+toyapp_memory event=expire rss_bytes=… peak_rss_bytes=… ledger_bytes=…
 ```
 
 ### Docker Compose

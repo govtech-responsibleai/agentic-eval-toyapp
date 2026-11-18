@@ -74,7 +74,9 @@ establish a performance or availability service-level objective.
 Airbase deploys only the application image, not the Redis service in
 `compose.yaml`. Sessions, uploaded files, metadata, and extracted report text
 therefore use process memory and are lost when the instance restarts or is
-replaced. The deployment has no application authentication or rate limiting;
+replaced. Their total is bounded by `TOYAPP_SESSION_MEMORY_BUDGET_BYTES`; under
+a spike the longest-idle sessions are evicted rather than the container
+running out of memory. The deployment has no application authentication or rate limiting;
 live-provider credentials on a publicly reachable environment can incur cost.
 Provider quota, model availability, Airbase gateway behaviour, and Langfuse
 ingestion remain external dependencies.

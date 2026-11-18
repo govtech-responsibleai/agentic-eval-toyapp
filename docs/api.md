@@ -84,7 +84,7 @@ accepted types are listed in [Configuration](configuration.md#report-uploads).
 | 415 | `unsupported_file_type` | The extension and media type are not a supported pair, the PDF signature is missing, or the filename is invalid |
 | 422 | `report_processing_failed` | The file is empty, not valid UTF-8, encrypted, malformed, or has no extractable text |
 | 422 | `too_many_report_files` | A message attaches more files than the per-message limit |
-| 503 | `server_busy` | Redis is at its memory budget and no idle session could be evicted; retry after `Retry-After` |
+| 503 | `server_busy` | The session store is at its memory budget and no idle session could be evicted; retry after `Retry-After` |
 | 503 | `report_store_unavailable` | The report store cannot be reached |
 
 Retrieve the retained public conversation:
@@ -108,9 +108,9 @@ the user from submitting additional turns.
 | `GET /health` | Report process liveness and application version. |
 | `GET /ready` | Report initialised chat dependencies. |
 | `GET /api/v1/capabilities` | Advertise the available target features and actions. |
-| `POST /api/v1/sessions` | Create an empty conversation session in the configured store. |
+| `POST /api/v1/sessions` | Create an empty conversation session in the configured store. Returns `503` `server_busy` with `Retry-After: 10` when the store's memory budget is full and no idle session can be evicted. |
 | `POST /api/v1/sessions/{session_id}/files` | Validate and retain one session-scoped report without invoking an agent. |
 | `GET /api/v1/sessions/{session_id}/files` | List safe metadata for that session's retained reports. |
 | `DELETE /api/v1/sessions/{session_id}/files/{file_id}` | Remove one owned report without changing past turns. |
-| `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one agent turn; the client waits for the reply. Returns `503` `server_busy` with `Retry-After: 10` when the admission cap is reached. |
+| `POST /api/v1/sessions/{session_id}/messages` | Execute and retain one agent turn; the client waits for the reply. Returns `503` `server_busy` with `Retry-After: 10` when the admission cap is reached or the store's memory budget cannot fit the turn. |
 | `GET /api/v1/sessions/{session_id}` | Return the retained public conversation history. |

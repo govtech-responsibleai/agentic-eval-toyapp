@@ -465,6 +465,41 @@ endpoint that touches the store is `async def`, so no worker thread ever
 iterates that deque while the loop appends to it. Uploads therefore never wait
 on a running turn.
 
+In-memory sessions and reports are bounded by a `SessionMemoryLedger`
+(`session_memory.py`) that both in-memory stores share. It keeps each tracked
+session's estimated size (a fixed 1 KiB allowance, retained message text, and
+each report's original bytes, extracted text and page text) and its last
+access, in an ordered dictionary with the longest-idle session first. Each
+store updates it by adding or subtracting only the size of what changed, and
+`get()`, which every session route reaches through `access_session`, records
+the access.
+
+Neither store refers to the other. Each registers a callback with the ledger
+that removes one session's data from that store, and the session store also
+registers a check for whether a session's turn lock is held. Before a session
+is created, a report is stored, or a turn starts, `ensure_room` first removes
+sessions idle for `session_idle_ttl_seconds`, then plans which longest-idle
+sessions would have to go for the incoming data to fit
+`session_memory_budget_bytes`. It removes them only when the plan frees enough
+room; otherwise it removes nothing and raises the capacity error that becomes
+`503 server_busy`. Demo sessions are never tracked, and the requesting session
+and any session holding its turn lock are skipped. Everything runs on one
+event loop with no `await` between planning and removal, so the step needs no
+distributed lock. A turn reserves room for its reply before the agent runs and
+holds it until the turn ends. A turn queued behind another on the same session
+checks that its session still exists once it gets the lock, and an upload
+checks it after extraction, so neither writes into a removed session.
+
+```text
+            SessionMemoryLedger  (one per process, memory backend only)
+      session_id -> {session_bytes, report_bytes, last_access}, idle order
+             ▲                                        ▲
+  track / touch / adjust                       adjust (add, delete)
+  remove(sid), turn lock held?                 remove(sid) -> reports removed
+             │                                        │
+    InMemorySessionStore                     InMemoryReportStore
+```
+
 `RedisSessionStore` stores a versioned JSON record under a namespaced UUID key
 and uses a Redis distributed lock for each session. That lock covers reading
 history, running the agent, and writing the resulting pair, so concurrent app
@@ -531,8 +566,9 @@ flowchart TD
 
 In Redis mode, complete turn pairs survive application restarts and are shared
 across workers while the Redis data remains available. The memory backend is
-retained for simple source-based development and deterministic tests; its
-sessions disappear on process restart. `/ready` pings Redis without exposing
+used for source-based development, deterministic tests and the Airbase
+deployment; its sessions disappear on process restart and are bounded by the
+in-memory budget described above. `/ready` pings Redis without exposing
 its URL, and storage or lock failures are mapped to stable public errors.
 
 [Back to component index](#component-index)
@@ -1275,6 +1311,13 @@ excluded from `make ci`.
 - The in-memory backend loses bounded session history on restart. Redis makes
   session history persistent and worker-shared, but Redis operation and backup
   remain deployment responsibilities.
+- In-memory sessions are bounded by an estimate of stored data, not by the
+  process's real memory use. The estimate omits Python object overhead and
+  counts each non-ASCII character as one, and an assistant reply longer than
+  the 64 KiB reservation can take the total briefly over budget until the next
+  write evicts. Temporary memory used while parsing a PDF is outside the
+  budget. Expiry runs only when a session, upload or turn arrives, so an
+  expired session stays readable until then.
 - Redis memory is bounded by app-side eviction of idle sessions, so under load
   the longest-idle sessions are removed and their users start new sessions.
   Eviction requires a single Redis node; Redis Cluster is not supported. A
