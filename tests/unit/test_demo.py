@@ -303,20 +303,43 @@ def test_load_zip_missing_uploaded_entry(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_load_bundled_demo() -> None:
-    """The committed demo-session.json resource loads without error."""
-    demo = load_demos()[0]
-    assert demo.session_id == UUID(DEMO_SESSION_ID)
-    assert len(demo.turns) >= 1
-    for user_msg, assistant_msg in demo.turns:
-        assert user_msg.role is ConversationRole.USER
-        assert assistant_msg.role is ConversationRole.ASSISTANT
+BUNDLED_DEMO_SESSION_IDS = {
+    UUID("abbffcea-78b5-4a04-a9b2-07e2668a595a"),
+    UUID("4729cc43-f976-4869-925a-cae62dee9fc4"),
+    UUID("44db0e4b-0582-4dd8-b5b3-90221914aafc"),
+    UUID("949090b5-5cbe-4d7d-a8e8-9263d163a5a3"),
+}
 
 
-def test_bundled_demo_carries_its_langfuse_project_url() -> None:
-    assert load_demos()[0].langfuse_project_url == (
-        "https://gcapdev.aip.gov.sg/langfuse/project/cmvp7ubyb0001021vboemw2i3"
+def test_load_bundled_demos() -> None:
+    """Every committed demo resource loads with complete user/assistant pairs."""
+    demos = load_demos()
+    assert {demo.session_id for demo in demos} == BUNDLED_DEMO_SESSION_IDS
+    for demo in demos:
+        assert len(demo.turns) >= 1
+        for user_msg, assistant_msg in demo.turns:
+            assert user_msg.role is ConversationRole.USER
+            assert assistant_msg.role is ConversationRole.ASSISTANT
+
+
+def test_bundled_report_demo_carries_its_uploaded_report() -> None:
+    """The ZIP demo ships the Q2 service review with verified bytes."""
+    demo = next(
+        demo
+        for demo in load_demos()
+        if demo.session_id == UUID("949090b5-5cbe-4d7d-a8e8-9263d163a5a3")
     )
+    assert [report.metadata.filename for report in demo.reports] == [
+        "northstar-q2-service-review.md"
+    ]
+    assert demo.reports[0].metadata.media_type is ReportMediaType.MARKDOWN
+
+
+def test_bundled_demos_carry_their_langfuse_project_url() -> None:
+    for demo in load_demos():
+        assert demo.langfuse_project_url == (
+            "https://gcapdev.aip.gov.sg/langfuse/project/cmvp7ubyb0001021vboemw2i3"
+        )
 
 
 def test_langfuse_project_url_is_none_without_metadata(tmp_path: Path) -> None:

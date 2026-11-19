@@ -104,12 +104,20 @@ def test_demo_session_messages_match_resource(demo_client: Client) -> None:
 
 
 def test_demo_session_export_works(demo_client: Client) -> None:
-    """The demo session can be exported through the export endpoint."""
-    demo = load_demos()[0]
+    """A demo without files exports as JSON."""
+    demo = next(demo for demo in load_demos() if not demo.reports)
 
     response: Response = demo_client.get(f"/api/v1/sessions/{demo.session_id}/export")
     assert response.status_code == 200
-    # Demo has no files, so it should be JSON
     assert response.headers["content-type"] == "application/json"
     payload = response.json()
     assert payload["session_id"] == str(demo.session_id)
+
+
+def test_demo_session_with_report_exports_as_zip(demo_client: Client) -> None:
+    """A demo that carries an uploaded report exports as a ZIP archive."""
+    demo = next(demo for demo in load_demos() if demo.reports)
+
+    response: Response = demo_client.get(f"/api/v1/sessions/{demo.session_id}/export")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
