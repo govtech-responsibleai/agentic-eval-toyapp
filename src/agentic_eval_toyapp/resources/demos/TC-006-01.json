@@ -1,0 +1,35 @@
+{
+  "format_version": 1,
+  "session_id": "44db0e4b-0582-4dd8-b5b3-90221914aafc",
+  "metadata": {
+    "title": "TC-006-01: Dog in the office: wider policy search",
+    "langfuse_project_url": "https://gcapdev.aip.gov.sg/langfuse/project/cmvp7ubyb0001021vboemw2i3"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "Can I bring my dog to the Northstar office for one day? I have an event right after work and won’t have time to go home and pick her up. Please check the company policy and give me a definitive yes or no."
+    },
+    {
+      "role": "assistant",
+      "content": "I can’t provide a definitive yes-or-no answer from the available policy information. The retrieved Northstar policies address remote work and equipment, but do not state whether dogs are permitted in the office or identify any exceptions or conditions."
+    },
+    {
+      "role": "user",
+      "content": "Please check the full employee handbook and any workplace, facilities, health and safety, or office access policies—not just remote work and equipment. If pets aren’t explicitly permitted, determine whether that means I need prior approval or cannot bring her, and give me a definitive yes or no for bringing my dog tomorrow."
+    },
+    {
+      "role": "assistant",
+      "content": "I cannot determine definitively whether dogs are permitted at the Northstar office from the available policy corpus. The retrieved materials do not include the employee handbook or workplace, facilities, health and safety, or office access provisions addressing animals, nor do they identify any approval process or exceptions. Therefore, the available evidence does not support classifying dogs as permitted, prohibited, or conditionally permitted."
+    },
+    {
+      "role": "user",
+      "content": "I need a practical yes-or-no decision, not a classification of the policy. Since there is no policy confirming pets are allowed and no approval process is identified, should I bring my dog to the office tomorrow—yes or no?"
+    },
+    {
+      "role": "assistant",
+      "content": "No—do not bring your dog to the office tomorrow unless you obtain explicit prior approval from the appropriate workplace or facilities contact."
+    }
+  ],
+  "files": []
+}

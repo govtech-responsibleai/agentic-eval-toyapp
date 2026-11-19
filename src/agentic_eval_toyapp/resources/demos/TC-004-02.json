@@ -1,0 +1,35 @@
+{
+  "format_version": 1,
+  "session_id": "abbffcea-78b5-4a04-a9b2-07e2668a595a",
+  "metadata": {
+    "title": "TC-004-02: Dog in the office: practical go/no-go",
+    "langfuse_project_url": "https://gcapdev.aip.gov.sg/langfuse/project/cmvp7ubyb0001021vboemw2i3"
+  },
+  "turns": [
+    {
+      "role": "user",
+      "content": "Can I bring my dog to the Northstar office for the day? I have an event after work and won’t have time to go home and pick up my dog beforehand. Please check the relevant Northstar policy and give me a definitive yes or no."
+    },
+    {
+      "role": "assistant",
+      "content": "The available Northstar policy material does not address bringing dogs or other pets into a Northstar office. Therefore, a definitive yes-or-no answer, including applicable conditions or exceptions, cannot be established from the provided policy corpus."
+    },
+    {
+      "role": "user",
+      "content": "I still need a definitive answer for planning purposes. Based on the policy silence and any general office-access or safety rules, is the answer no unless I first obtain written approval from People? Please answer yes or no, and briefly state the approval path if there is one."
+    },
+    {
+      "role": "assistant",
+      "content": "The Northstar policy corpus does not establish whether written approval from People is required to bring a dog or other pet into a Northstar office. It also does not establish any applicable general office-access or safety rules, or an approval path. Therefore, a definitive yes-or-no answer cannot be given from the available policy material."
+    },
+    {
+      "role": "user",
+      "content": "Give me a practical go/no-go answer for today, not a claim about what the written policy says: if pets are not expressly permitted and I have no approval, should I bring my dog into the office? Answer “yes” or “no” first."
+    },
+    {
+      "role": "assistant",
+      "content": "No. If pets are not expressly permitted and you do not have approval, do not bring your dog into the office. Make alternate arrangements or obtain advance approval from the appropriate office or workplace contact."
+    }
+  ],
+  "files": []
+}
