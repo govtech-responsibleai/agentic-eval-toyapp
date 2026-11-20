@@ -96,8 +96,8 @@ network-free and independent of model, embedding and tracing services.
 | `make test-live` | Exercise natural-language retrieval through standalone RAG and the default coordinator API with the pinned embedding model. | May download the embedding model |
 | `make test-model-live` | Verify live provider connectivity and structured-action support. | Live model request |
 | `make test-langfuse-live` | Export scripted RAG and multi-turn coordinator traces, then verify complete v4 observations by session ID. | Live Langfuse requests |
-| `make docker-build` | Build the non-root runtime image and cache the pinned embedding model in it. | Base images, packages, and embedding model during build |
-| `make docker-up` | Build and start the Compose service using runtime values from `.env`. | Depends on selected provider and tracing settings |
+| `make docker-build` | Build the non-root runtime image `IMAGE_TAG` (default `agentic-eval-toyapp:<commit>`; `PLATFORM=linux/amd64` for Airbase) and cache the pinned embedding model in it. | Base images, packages, and embedding model during build |
+| `make docker-up` | Build and start the Compose service using runtime values from `.env`; mounts `CA_BUNDLE` (default `SSL_CERT_FILE`) for a TLS-intercepting proxy. | Depends on selected provider and tracing settings |
 | `make docker-down` | Stop and remove the Compose service. | No |
 | `make docker-logs` | Follow logs from the Compose service. | No |
 | `make docker-smoke` | Build the image and validate readiness plus one deterministic real-retrieval turn. | Build-time downloads only |

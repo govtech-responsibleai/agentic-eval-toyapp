@@ -56,11 +56,14 @@ RUN /app/.venv/bin/python /tmp/cache_embedding_model.py \
 
 FROM python-base AS runtime
 
+# The runtime trusts only the Debian bundle. A proxy CA used for the build stays in the builder;
+# a local run behind the proxy mounts it at runtime (compose.ca.yaml), so it never ships.
+
 ENV PATH="/app/.venv/bin:${PATH}" \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    SSL_CERT_FILE=/opt/toyapp-ca-bundle.pem \
-    REQUESTS_CA_BUNDLE=/opt/toyapp-ca-bundle.pem \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
     PORT=8000 \
     TOYAPP_HOST=0.0.0.0 \
     TOYAPP_PORT=8000 \
@@ -74,7 +77,6 @@ RUN groupadd --gid 999 app \
 
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --from=builder --chown=app:app /opt/models /opt/models
-COPY --from=builder --chown=app:app /opt/toyapp-ca-bundle.pem /opt/toyapp-ca-bundle.pem
 
 USER app
 

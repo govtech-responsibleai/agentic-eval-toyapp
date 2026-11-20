@@ -1,17 +1,25 @@
 .PHONY: help install run trace-cases-list trace-case docker-build docker-up docker-down docker-logs docker-smoke docker-smoke-run load-test lock-check lint lint-fix format format-check fix typecheck check test test-unit test-live test-model-live test-langfuse-live ci clean
 
 PYTHON_SOURCES := src tests trace_cases scripts
-DOCKER_IMAGE ?= agentic-eval-toyapp:local
-DOCKER_CA_CERT ?= $(SSL_CERT_FILE)
-DOCKER_PLATFORM ?=
+# The image that docker-build makes and docker-up and docker-smoke-run start. The default names the commit.
+IMAGE_TAG ?= agentic-eval-toyapp:$(shell git rev-parse --short HEAD 2>/dev/null || echo local)
+# The platform to build for. Leave it empty for this computer; use linux/amd64 for Airbase.
+PLATFORM ?=
+# A CA bundle for a proxy that intercepts TLS. docker-build reads it as a BuildKit secret and
+# docker-up mounts it, so the runtime image never holds it.
+CA_BUNDLE ?= $(SSL_CERT_FILE)
 DOCKER_SMOKE_PORT ?= 18000
 DOCKER_SMOKE_TIMEOUT ?= 180
 LOAD_TEST_URL ?=
 LOAD_TEST_USERS ?= 60
 LOAD_TEST_TIMEOUT ?= 60
 COMMA := ,
-DOCKER_CA_SECRET_ARGUMENT = $(if $(strip $(DOCKER_CA_CERT)),--secret id=toyapp_ca_bundle$(COMMA)src="$(DOCKER_CA_CERT)",)
-DOCKER_PLATFORM_ARGUMENT = $(if $(strip $(DOCKER_PLATFORM)),--platform "$(DOCKER_PLATFORM)",)
+CA_SECRET_ARGUMENT = $(if $(strip $(CA_BUNDLE)),--secret id=toyapp_ca_bundle$(COMMA)src="$(CA_BUNDLE)",)
+PLATFORM_ARGUMENT = $(if $(strip $(PLATFORM)),--platform "$(PLATFORM)",)
+# Compose takes the image name and the CA bundle from these variables, not from Make.
+COMPOSE_ENVIRONMENT = IMAGE_TAG="$(IMAGE_TAG)" $(if $(strip $(CA_BUNDLE)),CA_BUNDLE="$(abspath $(CA_BUNDLE))",)
+COMPOSE_FILE_ARGUMENTS = $(if $(strip $(CA_BUNDLE)),-f compose.yaml -f compose.ca.yaml,)
+DOCKER_COMPOSE = $(COMPOSE_ENVIRONMENT) docker compose $(COMPOSE_FILE_ARGUMENTS)
 TRACE_METRIC_ARGUMENT = $(if $(strip $(METRIC)),--metric "$(METRIC)",)
 TRACE_VARIANT_ARGUMENT = $(if $(strip $(VARIANT)),--variant "$(VARIANT)",)
 
@@ -21,11 +29,12 @@ help:
 	@printf "  make run           Start the local development API\n"
 	@printf "  make trace-cases-list  List supported controlled trace metrics\n"
 	@printf "  make trace-case [METRIC=...] [VARIANT=...]  Generate controlled traces; omitted filters select all\n"
-	@printf "  make docker-build  Build the runtime image with the pinned embedding model\n"
-	@printf "  make docker-up     Build and start the Compose service\n"
+	@printf "  make docker-build  Build IMAGE_TAG (default agentic-eval-toyapp:<commit>); PLATFORM=linux/amd64 for Airbase\n"
+	@printf "  make docker-up     Build and start IMAGE_TAG with Compose; CA_BUNDLE (default SSL_CERT_FILE) is mounted, not built in\n"
 	@printf "  make docker-down   Stop and remove the Compose service\n"
 	@printf "  make docker-logs   Follow Compose service logs\n"
-	@printf "  make docker-smoke  Build and verify RAG, coordinator, browser assets, and restart\n"
+	@printf "  make docker-smoke  Build IMAGE_TAG and verify RAG, coordinator, browser assets, and restart\n"
+	@printf "  make docker-smoke-run  Verify an existing IMAGE_TAG without building it\n"
 	@printf "  make load-test LOAD_TEST_URL=https://... [LOAD_TEST_USERS=60]  Run concurrent session/message flows\n"
 	@printf "  make lock-check    Check that the uv lockfile is current\n"
 	@printf "  make lint          Run Ruff lint checks\n"
@@ -59,22 +68,23 @@ trace-case:
 	uv run python -m trace_cases generate $(TRACE_METRIC_ARGUMENT) $(TRACE_VARIANT_ARGUMENT)
 
 docker-build:
-	docker build $(DOCKER_PLATFORM_ARGUMENT) $(DOCKER_CA_SECRET_ARGUMENT) --tag "$(DOCKER_IMAGE)" .
+	docker build $(PLATFORM_ARGUMENT) $(CA_SECRET_ARGUMENT) --tag "$(IMAGE_TAG)" .
 
 docker-up: docker-build
-	docker compose up --detach --no-build
+	@test -z "$(strip $(CA_BUNDLE))" || test -f "$(CA_BUNDLE)" || { printf "CA_BUNDLE %s not found\n" "$(CA_BUNDLE)" >&2; exit 2; }
+	$(DOCKER_COMPOSE) up --detach --no-build
 
 docker-down:
-	docker compose down
+	$(DOCKER_COMPOSE) down
 
 docker-logs:
-	docker compose logs --follow toyapp
+	$(DOCKER_COMPOSE) logs --follow toyapp
 
 docker-smoke: docker-build docker-smoke-run
 
 docker-smoke-run:
 	python3 -m scripts.docker_smoke \
-		--image "$(DOCKER_IMAGE)" \
+		--image "$(IMAGE_TAG)" \
 		--host-port "$(DOCKER_SMOKE_PORT)" \
 		--timeout-seconds "$(DOCKER_SMOKE_TIMEOUT)"
 
