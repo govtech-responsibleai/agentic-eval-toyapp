@@ -1,9 +1,11 @@
 """Verify real SDK span lifecycle without network or Langfuse server timing."""
 
 import asyncio
+import json
 import threading
 from collections import Counter
 from datetime import date
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -94,6 +96,20 @@ class _Retriever:
         )
 
 
+def _assert_prompt_components(
+    span: ReadableSpan, *, system: str, user: str
+) -> dict[str, object]:
+    raw_input = (span.attributes or {}).get("langfuse.observation.input")
+    assert isinstance(raw_input, str)
+    generation_input = json.loads(raw_input)
+    assert isinstance(generation_input, dict)
+    assert generation_input["messages"] == [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    return cast(dict[str, object], generation_input["context"])
+
+
 @pytest.mark.anyio
 async def test_two_direct_turns_are_exported_as_two_complete_sdk_trees() -> None:
     """A missing live trace must not be caused by an unended app span."""
@@ -128,6 +144,14 @@ async def test_two_direct_turns_are_exported_as_two_complete_sdk_trees() -> None
             == Counter({"agent-turn": 1, "inspect-input": 1, "coordinator-action": 1})
             for names in by_trace.values()
         )
+        coordinator_spans = [
+            span for span in spans if span.name == "coordinator-action"
+        ]
+        assert len(coordinator_spans) == 2
+        for span, user_message in zip(
+            coordinator_spans, ("First message", "Second message"), strict=True
+        ):
+            _assert_prompt_components(span, system="Coordinate.", user=user_message)
     finally:
         agent.shutdown()
 
@@ -189,6 +213,13 @@ async def test_rag_route_exports_one_complete_sdk_tree() -> None:
             else:
                 assert span.parent is not None
                 assert name_by_id[span.parent.span_id] == parent_by_name[span.name]
+        for span in (item for item in spans if item.name == "model-action"):
+            context = _assert_prompt_components(
+                span,
+                system="Answer policy questions.",
+                user="Explain annual leave",
+            )
+            assert "retrieved_chunks" in context
     finally:
         agent.shutdown()
 
@@ -261,6 +292,19 @@ async def test_analysis_route_exports_one_complete_sdk_tree() -> None:
                     else "agent-turn"
                 )
                 assert name_by_id[span.parent.span_id] == expected_parent
+        coordinator_span = next(
+            span for span in spans if span.name == "coordinator-action"
+        )
+        _assert_prompt_components(
+            coordinator_span, system="Coordinate.", user="Summarise findings"
+        )
+        analysis_span = next(span for span in spans if span.name == "analyse-report")
+        context = _assert_prompt_components(
+            analysis_span,
+            system="Analyse reports.",
+            user="Summarise findings",
+        )
+        assert "sources" in context
     finally:
         agent.shutdown()
 

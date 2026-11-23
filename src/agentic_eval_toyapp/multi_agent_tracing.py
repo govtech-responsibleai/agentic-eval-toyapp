@@ -244,6 +244,24 @@ def _generation(
             _ACTIVE_GENERATION.reset(token)
 
 
+def _generation_input(
+    *, system_prompt: str, user_message: str, context: Mapping[str, object]
+) -> dict[str, object]:
+    """Keep model instructions and the user request distinct in Langfuse.
+
+    The role-labelled messages make the effective prompt directly inspectable by
+    evaluators, while the separate context retains the structured state used to
+    select the action without presenting it as another chat message.
+    """
+    return {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        "context": dict(context),
+    }
+
+
 def _attachment_metadata(attachment: CoordinatorAttachment) -> dict[str, object]:
     return {
         "file_id": str(attachment.file_id),
@@ -267,17 +285,23 @@ class _LangfuseDelegatedRagTrace(LangfuseTurnTrace):
             self._client,
             name="model-action",
             model=self._model_id,
-            input_data={
-                "user_message": request.user_message,
-                "history": [item.model_dump(mode="json") for item in request.history],
-                "retrieved_chunks": [
-                    chunk.model_dump(mode="json") for chunk in request.retrieved_chunks
-                ],
-                "available_actions": [
-                    action.value for action in request.available_actions
-                ],
-                "model_call_number": request.model_call_number,
-            },
+            input_data=_generation_input(
+                system_prompt=request.system_prompt,
+                user_message=request.user_message,
+                context={
+                    "history": [
+                        item.model_dump(mode="json") for item in request.history
+                    ],
+                    "retrieved_chunks": [
+                        chunk.model_dump(mode="json")
+                        for chunk in request.retrieved_chunks
+                    ],
+                    "available_actions": [
+                        action.value for action in request.available_actions
+                    ],
+                    "model_call_number": request.model_call_number,
+                },
+            ),
         ) as observation:
             yield cast(ModelActionObservation, observation)
 
@@ -327,12 +351,17 @@ class _LangfuseAnalysisTrace:
             self._client,
             name="analyse-report",
             model=model,
-            input_data={
-                "task": request.task,
-                "history": [item.model_dump(mode="json") for item in request.history],
-                "sources": sources,
-                "report_text_exported": self._include_report_text,
-            },
+            input_data=_generation_input(
+                system_prompt=request.system_prompt,
+                user_message=request.task,
+                context={
+                    "history": [
+                        item.model_dump(mode="json") for item in request.history
+                    ],
+                    "sources": sources,
+                    "report_text_exported": self._include_report_text,
+                },
+            ),
         ) as observation:
             yield observation
 
@@ -404,16 +433,21 @@ class _LangfuseCoordinatorTrace:
             self._client,
             name="coordinator-action",
             model=model,
-            input_data={
-                "user_message": request.user_message,
-                "history": [item.model_dump(mode="json") for item in request.history],
-                "attachments": attachments,
-                "available_actions": [
-                    action.value for action in request.available_actions
-                ],
-                "model_call_number": request.model_call_number,
-                "report_text_exported": self._include_report_text,
-            },
+            input_data=_generation_input(
+                system_prompt=request.system_prompt,
+                user_message=request.user_message,
+                context={
+                    "history": [
+                        item.model_dump(mode="json") for item in request.history
+                    ],
+                    "attachments": attachments,
+                    "available_actions": [
+                        action.value for action in request.available_actions
+                    ],
+                    "model_call_number": request.model_call_number,
+                    "report_text_exported": self._include_report_text,
+                },
+            ),
         ) as observation:
             yield observation
 
