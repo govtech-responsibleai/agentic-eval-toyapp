@@ -188,6 +188,17 @@ def _updated(observation: _Observation, key: str) -> list[object]:
     return [update[key] for update in observation.updates if key in update]
 
 
+def _assert_prompt_components(
+    observation: _Observation, *, system: str, user: str
+) -> dict[str, Any]:
+    generation_input = cast(dict[str, Any], observation.input)
+    assert generation_input["messages"] == [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    return cast(dict[str, Any], generation_input["context"])
+
+
 @pytest.mark.anyio
 async def test_direct_answer_has_one_output_bearing_root_and_no_delegation(
     _fake_propagation: list[dict[str, object]],
@@ -212,6 +223,9 @@ async def test_direct_answer_has_one_output_bearing_root_and_no_delegation(
         ("coordinator-action", "generation", 1),
     ]
     assert _updated(client.observations[0], "output") == ["Hello."]
+    _assert_prompt_components(
+        client.observations[2], system="Coordinate.", user="Hello"
+    )
     assert _fake_propagation[0]["session_id"] == "session-123"
     assert client.flushes == 1
     assert "event=started" in caplog.text
@@ -346,6 +360,15 @@ async def test_rag_route_has_one_nested_specialist_and_search_tool() -> None:
     assert _updated(client.observations[0], "output") == [result.message]
     assert _updated(client.observations[3], "output") == [result.message]
     assert client.observations[4].model == "scripted-rag-fixture"
+    for observation in (
+        item for item in client.observations if item.name == "model-action"
+    ):
+        context = _assert_prompt_components(
+            observation,
+            system="Answer policy questions.",
+            user="Explain annual leave",
+        )
+        assert "retrieved_chunks" in context
 
 
 @pytest.mark.anyio
@@ -387,8 +410,12 @@ async def test_analysis_route_exports_only_selected_report_context_by_policy(
         ("validate-report-references", "evaluator", 2),
         ("return-response", "span", 1),
     ]
-    coordinator_input = cast(dict[str, Any], client.observations[2].input)
-    analysis_input = cast(dict[str, Any], client.observations[5].input)
+    coordinator_input = _assert_prompt_components(
+        client.observations[2], system="Coordinate.", user="Summarise findings"
+    )
+    analysis_input = _assert_prompt_components(
+        client.observations[5], system="Analyse reports.", user="Summarise findings"
+    )
     if include_report_text:
         assert (
             coordinator_input["attachments"][0]["extracted_text"]
@@ -432,4 +459,4 @@ async def test_provider_usage_is_attached_only_to_active_generation() -> None:
     assert _updated(generation, "metadata") == [
         {"finish_reason": "stop", "reasoning_tokens": 3}
     ]
-    assert "Hidden" not in str(client.observations)
+    _assert_prompt_components(generation, system="Hidden", user="Hello")
